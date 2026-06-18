@@ -321,6 +321,7 @@ def test_print_state_shows_mode_header():
         chroot_ready = False
         chroot_verified = False
         chroot_installer_ready = False
+        chroot_disk_ready = False
         iso_live_ready = False
         iso_installer_ready = False
         iso_disk_ready = False
@@ -704,6 +705,7 @@ def test_iso_builds_gate_on_container_up_front():
         chroot_verified = True
         chroot_ready = True
         chroot_installer_ready = True
+        chroot_disk_ready = True
         dep_check_ready = True  # STA-39 gate sits before the container gate
 
     for _method_name in ('cmd_build_iso_live', 'cmd_build_iso_installer'):
@@ -750,6 +752,7 @@ def test_surface_builds_gate_on_dep_check_ready():
         dep_check_ready = False          # fresh session
         source_build_ready = True        # persisted from a prior run
         chroot_installer_ready = True    # persisted from a prior run
+        chroot_disk_ready = True
         chroot_ready = True
         chroot_verified = True
 
@@ -10055,6 +10058,7 @@ class _PrintSessionStub:
             chroot_ready            = False
             chroot_verified         = False
             chroot_installer_ready  = False
+            chroot_disk_ready = False
             iso_live_ready          = False
             iso_installer_ready     = False
             iso_disk_ready          = False
@@ -10258,9 +10262,10 @@ def test_print_state_renders_unticked_when_flags_unset():
     assert '[✓]' not in output, (
         f"Expected no ticked rows when every flag is False, got:\n{output}"
     )
-    # All twelve rows should be present as unticked.
-    assert output.count('[·]') == 12, (
-        "Expected 12 unticked rows (one per BuildFlag), got "
+    # All thirteen rows should be present as unticked (incl. the disk
+    # surface's chroot_build_disk + iso_build_disk).
+    assert output.count('[·]') == 13, (
+        "Expected 13 unticked rows (one per BuildFlag), got "
         f"{output.count('[·]')}:\n{output}"
     )
 
@@ -15777,6 +15782,7 @@ def test_status_lines_compact_snapshot():
         iso_live_ready = False
         iso_disk_ready = False
         chroot_installer_ready = False
+        chroot_disk_ready = False
         iso_installer_ready = False
 
     class _Cfg:

@@ -91,6 +91,21 @@ def _require_cache(session) -> bool:
     return True
 
 
+def _src_for_pkg_map(session) -> dict:
+    """Reverse map: binary package name → source name.
+
+    Built from the dep tree's `src_pkg_files` ({src: [name_ver_arch.deb,
+    …]}).  Source objects no longer carry a `.pkgs` attribute, so the old
+    `getattr(src, 'pkgs', [])` walk always produced an empty map and every
+    attribution rendered `from ?`."""
+    _map: dict = {}
+    _files = getattr(session.dep_tree, 'src_pkg_files', {}) or {}
+    for _src_name, _bin_files in _files.items():
+        for _bin_filename in _bin_files:
+            _map[_bin_filename.split('_', 1)[0]] = _src_name
+    return _map
+
+
 # ─── Configuration views ────────────────────────────────────────────────────
 
 def _print_config(session, *_extras) -> None:
@@ -206,11 +221,12 @@ def _print_paths(session, *_extras) -> None:
 def _print_state(session, *_extras) -> None:
     """Pipeline stage progress (BuildFlags) split by target.
 
-    Three sections:
-      Shared          — stages whose output feeds both ISO targets
+    Four sections:
+      Shared          — stages whose output feeds every target
                         (cache, dep tree, sources, build container,
                         source build, signing key).
       Live ISO target — live chroot build, verify, ISO build.
+      Disk target     — disk chroot build (own surface closure), qcow2.
       Installer ISO target — installer chroot build (from udeb
                         closure), ISO build.
 
@@ -266,10 +282,19 @@ def _print_state(session, *_extras) -> None:
             '8-check verifier (passes ⇒ live ISO ok)'),
         ('iso_live_ready',   'iso_build_live        ',
             'hybrid BIOS/EFI live ISO built'),
-        ('iso_disk_ready',   'iso_build_disk        ',
-            'pre-installed bootable qcow2 disk image'),
     ]
     for attr, label, desc in _live:
+        _row(attr, label, desc)
+
+    tui.console.print("")
+    tui.console.print("  Disk target:", tui.COLOR_INFO)
+    _disk = [
+        ('chroot_disk_ready', 'chroot_build_disk     ',
+            'install [Disk] Groups closure into buildroot/disk'),
+        ('iso_disk_ready',    'iso_build_disk        ',
+            'pre-installed bootable qcow2 disk image'),
+    ]
+    for attr, label, desc in _disk:
         _row(attr, label, desc)
 
     tui.console.print("")
@@ -285,7 +310,8 @@ def _print_state(session, *_extras) -> None:
     tui.console.print("")
     tui.console.print(
         "  `iso build` runs separately — `iso build live` after "
-        "chroot_verify, `iso build installer` after chroot_build_installer."
+        "chroot_verify, `iso build disk` after chroot_build_disk, "
+        "`iso build installer` after chroot_build_installer."
     )
 
 
@@ -409,6 +435,8 @@ def status_lines(session) -> 'list[tuple[str, int]]':
         ('chroot_ready',           'chroot_build_live'),
         ('chroot_verified',        'chroot_verify'),
         ('iso_live_ready',         'iso_build_live'),
+        (None,                     None),
+        ('chroot_disk_ready',      'chroot_build_disk'),
         ('iso_disk_ready',         'iso_build_disk'),
         (None,                     None),
         ('chroot_installer_ready', 'chroot_build_installer'),
@@ -445,12 +473,21 @@ def status_lines(session) -> 'list[tuple[str, int]]':
         else:
             add(f"  {label:<14}{_p}  ({gate})")
 
-    _art('ISO live', f"athena-{_ver}-{_arch}.iso",
+    # Snapshot-tagged ISO names — mirror exactly what the builders emit
+    # (iso.py / cmd_build.py): `athena-<ver>[-<snap>]-amd64.iso`.  Without
+    # the tag the predicted "(built)" path pointed at a non-existent file.
+    _snap = utils.snapshot_iso_tag(cfg)
+
+    def _iso_name(_prefix: str) -> str:
+        return (f"{_prefix}-{_ver}-{_snap}-amd64.iso" if _snap
+                else f"{_prefix}-{_ver}-amd64.iso")
+
+    _art('ISO live', _iso_name('athena'),
          'iso_live_ready', 'pending chroot verify')
-    _art('ISO installer', f"athena-installer-{_ver}-{_arch}.iso",
+    _art('ISO installer', _iso_name('athena-installer'),
          'iso_installer_ready', 'pending installer chroot')
     _art('Disk image', f"{_distro.lower()}-{_ver}-{_arch}.qcow2",
-         'iso_disk_ready', 'pending chroot verify')
+         'iso_disk_ready', 'pending disk chroot')
     return rows
 
 
@@ -540,13 +577,21 @@ def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
         tui.console.print("  Chroot (inst)  : udeb closure unpacked into buildroot/installer")
     else:
         tui.console.print("  Chroot (inst)  : not built")
+    if getattr(session.flags, "chroot_disk_ready", False):
+        tui.console.print("  Chroot (disk)  : [Disk] Groups closure installed into buildroot/disk")
+    else:
+        tui.console.print("  Chroot (disk)  : not built")
 
     # Predicted ISO paths + next-step hints.  Build_iso intentionally
     # not auto-invoked — see docstring above.
     tui.console.print("")
     _version = cfg.build_version.strip('"').strip("'")
-    _live_iso_name      = f"athena-{_version}-{cfg.arch}.iso"
-    _installer_iso_name = f"athena-installer-{_version}-{cfg.arch}.iso"
+    # Mirror the builders' snapshot-tagged names: athena-<ver>[-<snap>]-amd64.iso
+    _snap = utils.snapshot_iso_tag(cfg)
+    _live_iso_name      = (f"athena-{_version}-{_snap}-amd64.iso" if _snap
+                           else f"athena-{_version}-amd64.iso")
+    _installer_iso_name = (f"athena-installer-{_version}-{_snap}-amd64.iso" if _snap
+                           else f"athena-installer-{_version}-amd64.iso")
     _live_iso_path      = os.path.join(cfg.dir_image, _live_iso_name)
     _installer_iso_path = os.path.join(cfg.dir_image, _installer_iso_name)
 
@@ -573,19 +618,20 @@ def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
     # build times — slowest-N + aggregate, only when records exist.
     _summary_build_times_section(session)
 
-    # Disk image reuses the verified live chroot (same gate as ISO live).
+    # Disk image has its OWN surface chroot (buildroot/disk), gated on
+    # chroot_disk_ready — NOT the live chroot's verify.
     _distro     = cfg.build_distribution.strip('"').strip("'")
     _disk_name  = f"{_distro.lower()}-{_version}-{cfg.arch}.qcow2"
     _disk_path  = os.path.join(cfg.dir_image, _disk_name)
     if session.flags.iso_disk_ready:
         tui.console.print(f"  Disk image     : {_disk_path}  (built)",
                           tui.COLOR_HIGHLIGHT)
-    elif session.flags.chroot_verified:
+    elif getattr(session.flags, "chroot_disk_ready", False):
         tui.console.print(f"  Disk image     : {_disk_path}", tui.COLOR_INFO)
         tui.console.print("                   Ready — run `iso build disk` to produce it.",
                           tui.COLOR_HIGHLIGHT)
     else:
-        tui.console.print(f"  Disk image     : {_disk_path}  (chroot must verify first)")
+        tui.console.print(f"  Disk image     : {_disk_path}  (run `chroot build disk` first)")
 
 
 def _print_summary(session, *_extras) -> None:
@@ -749,15 +795,7 @@ def _print_extras(session, *_extras) -> None:
             "(check [Build] IncludeRecommends in build.conf)"
         )
         return
-    # Map binary name → source name for display.  Walk selected_srcs and
-    # build a reverse index from each source's pkgs filename list.
-    _src_for_pkg = {}
-    for _src_name, _src in session.dep_tree.selected_srcs.items():
-        for _bin_filename in (getattr(_src, 'pkgs', []) or []):
-            # Filenames are 'name_ver_arch.deb' — first underscore-split chunk
-            # is the package name.
-            _pkg_name = _bin_filename.split('_', 1)[0]
-            _src_for_pkg[_pkg_name] = _src_name
+    _src_for_pkg = _src_for_pkg_map(session)
     tui.console.print(
         f"Recommended extras ({len(extras_pkg_names)} pkg(s) from "
         f"{len(extras_src_names)} extras-only source(s)):"
@@ -784,11 +822,7 @@ def _print_live_exclusive(session, *_extras) -> None:
             "(live.list empty, or every entry already pulled by pkg.list)"
         )
         return
-    _src_for_pkg = {}
-    for _src_name, _src in session.dep_tree.selected_srcs.items():
-        for _bin_filename in (getattr(_src, 'pkgs', []) or []):
-            _pkg_name = _bin_filename.split('_', 1)[0]
-            _src_for_pkg[_pkg_name] = _src_name
+    _src_for_pkg = _src_for_pkg_map(session)
     tui.console.print(
         f"Live-exclusive ({len(live_pkgs)} pkg(s) from "
         f"{len(live_srcs)} live-only source(s)):"
@@ -847,11 +881,7 @@ def _print_installer_exclusive(session, *_extras) -> None:
             "No installer-exclusive packages (installer.list empty)"
         )
         return
-    _src_for_pkg = {}
-    for _src_name, _src in session.dep_tree.selected_srcs.items():
-        for _bin_filename in (getattr(_src, 'pkgs', []) or []):
-            _pkg_name = _bin_filename.split('_', 1)[0]
-            _src_for_pkg[_pkg_name] = _src_name
+    _src_for_pkg = _src_for_pkg_map(session)
     tui.console.print(
         f"Installer-exclusive ({len(inst_pkgs)} pkg(s) from "
         f"{len(inst_srcs)} installer-only source(s)):"
