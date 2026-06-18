@@ -29329,6 +29329,20 @@ def _write_clearsigned_inrelease(path: str, sha256_block: 'list[tuple[str, int, 
         _fh.write(_content)
 
 
+def test_snapshot_divergence_note():
+    """Publish-time snapshot divergence note: local pin ahead → ADVANCE note;
+    mirror ahead → behind-WARNING; equal/unknown → None."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord.publish import snapshot_divergence_note as _n
+    _old, _new = '20260101T000000Z', '20260601T000000Z'
+    assert _n(_new, _old).startswith('snapshot: this publish ADVANCES')
+    assert _n(_old, _new).startswith('WARNING: mirror snapshot')
+    assert _n(_old, _old) is None
+    assert _n('', _new) is None
+    assert _n(_new, '') is None
+
+
 def test_snapshot_adopt_forward_is_forward_only():
     """mirror pull adopts the mirror's snapshot pin FORWARD only — a strictly
     newer remote pin is adopted; equal/older/empty remote → no adoption
@@ -36397,6 +36411,7 @@ def main() -> int:
         test_cmd_mirror_query_requires_pkg_arg,
         test_cmd_mirror_audit_no_mirrors_reports_warning,
         # MIRROR-01 audit gap (1) — InRelease + Packages chain + ownership
+        test_snapshot_divergence_note,
         test_snapshot_adopt_forward_is_forward_only,
         test_publish_lock_records_and_reports_holder,
         test_audit_inrelease_against_head_sha_match_returns_parsed_release,
