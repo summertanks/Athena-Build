@@ -123,9 +123,7 @@ _All stability & correctness tickets are closed — see [`docs/done.md`](docs/do
 
 ## 4. Architecture & coding practices — P1 / P2
 
-| ID    | Sev | Status | Title |
-|-------|-----|--------|-------|
-| ARCH-19 | P2 | todo | **Single-implementation consolidation — the substrate of "fixed in one copy, not the others" regressions.**  Four duplication families found by the cross-cutting sweep, each already exhibiting divergence: (1) **sha256 of a file** — six implementations, three chunking strategies (`utils._compute_sha256`/`get_sha256` with cache vs manual loops in persistence.py/fork_mirror.py vs whole-file `read()` in buildcontainer.py, publish.py, and 3× inline in mirror.py — the mirror.py:1551 claims-verify site slurps multi-hundred-MB .debs into RAM); route everything through `utils.get_sha256`.  (2) **.deb filename parsing** — ~14 ad-hoc `split('_')` sites; only `iso_installer._parse_deb_filename` decodes `%3a` epochs or guards length, and print_commands.py imports that *private* helper cross-module; promote one public `utils.parse_deb_filename()`.  (3) **`_sudo()` wrapper** — four near-identical copies (apt_repo, iso_installer, installer_chroot, disk_image — one even self-documents the duplication); promote to utils.  (4) **sudo-password collect+validate+scrub block** — five byte-near-identical 13-line copies across cmd_repo/cmd_build that even diverge on the failure convention (`return False` vs `return None`); one `collect_validated_sudo_password()` on the command base.  (The claim-fold helper, family 5, is covered by STA-29.)  Filed 2026-06-12 from the full-tree review. |
+_All architecture & coding-practice tickets are closed — see [`docs/done.md`](docs/done.md) § 4._
 
 ## 5. Tests & CI — P1
 
