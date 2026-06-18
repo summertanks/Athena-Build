@@ -29329,6 +29329,38 @@ def _write_clearsigned_inrelease(path: str, sha256_block: 'list[tuple[str, int, 
         _fh.write(_content)
 
 
+def test_publish_lock_records_and_reports_holder():
+    """The publish flock writes a `<lock>.holder` sidecar with our builder-id
+    so a blocked peer can be told who is publishing; remote_flock_holder
+    reads it back (blank/error → None)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import patch, MagicMock
+    from coord import transport as _tx
+
+    # acquire builds the holder write/remove into the flock'd command
+    _cap = {}
+
+    def _popen(cmd, **kw):
+        _cap['cmd'] = ' '.join(cmd)
+        raise OSError('stop')   # spawn-fail path → returns None fast
+    with patch('coord.transport.subprocess.Popen', _popen):
+        assert _tx.remote_flock_acquire(
+            ssh_host='h', lock_path='/var/lock/x', builder_id='bob') is None
+    assert '/var/lock/x.holder' in _cap['cmd'] and 'echo bob >' in _cap['cmd']
+
+    # holder reader parses the sidecar
+    def _mkrun(out):
+        _m = MagicMock(); _m.stdout = out; return _m
+    with patch('coord.transport.subprocess.run', return_value=_mkrun('alice\n')):
+        assert _tx.remote_flock_holder(
+            ssh_host='h', lock_path='/l') == 'alice'
+    with patch('coord.transport.subprocess.run', return_value=_mkrun('')):
+        assert _tx.remote_flock_holder(ssh_host='h', lock_path='/l') is None
+    with patch('coord.transport.subprocess.run', side_effect=OSError):
+        assert _tx.remote_flock_holder(ssh_host='h', lock_path='/l') is None
+
+
 def test_audit_inrelease_against_head_sha_match_returns_parsed_release():
     """Happy path: InRelease pulls successfully, sha matches the
     coord-head pin, deb822.Release parses cleanly, no findings."""
@@ -36350,6 +36382,7 @@ def main() -> int:
         test_cmd_mirror_query_requires_pkg_arg,
         test_cmd_mirror_audit_no_mirrors_reports_warning,
         # MIRROR-01 audit gap (1) — InRelease + Packages chain + ownership
+        test_publish_lock_records_and_reports_holder,
         test_audit_inrelease_against_head_sha_match_returns_parsed_release,
         test_audit_inrelease_against_head_sha_mismatch_critical,
         test_audit_claims_vs_packages_flags_missing_and_mismatched,

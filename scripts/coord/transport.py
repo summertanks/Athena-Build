@@ -347,9 +347,31 @@ def push_coord_head(
 # ───────────────────────── flock helper (P3) ─────────────────────────
 
 
+def remote_flock_holder(
+    *, ssh_host: str, lock_path: str, ssh_key: 'Optional[str]' = None,
+) -> 'Optional[str]':
+    """Best-effort: read the builder-id currently (or last) holding the
+    publish lock, from the `<lock>.holder` sidecar written by
+    remote_flock_acquire.  Returns None if unreadable/absent.  May be stale
+    if a holder's SSH session died (flock auto-releases but the sidecar
+    lingers) — informational only, never a correctness gate."""
+    _ssh_cmd = ['ssh']
+    if ssh_key:
+        _ssh_cmd += ['-i', ssh_key]
+    _ssh_cmd += ['-o', 'StrictHostKeyChecking=accept-new', ssh_host,
+                 f'cat {lock_path}.holder 2>/dev/null']
+    try:
+        _r = subprocess.run(_ssh_cmd, capture_output=True, text=True,
+                            timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    _id = (_r.stdout or '').strip()
+    return _id or None
+
+
 def remote_flock_acquire(
     *, ssh_host: str, lock_path: str, timeout_sec: int = 60,
-    ssh_key: 'Optional[str]' = None,
+    ssh_key: 'Optional[str]' = None, builder_id: 'Optional[str]' = None,
 ) -> 'Optional[subprocess.Popen]':
     """Open an SSH session that holds `lock_path` via flock(1) for the
     duration of the session.  Returns the Popen handle ONLY once the lock
@@ -373,9 +395,18 @@ def remote_flock_acquire(
     # announces the lock is held (ACQUIRED) then `cat` holds it open until
     # we close stdin (release).  On timeout flock exits non-zero, the `&&`
     # short-circuits, the shell exits → stdout EOF with no token.
+    # When we know our builder-id, record it in a `<lock>.holder` sidecar
+    # WHILE the lock is held so a blocked peer can be told who's publishing;
+    # remove it on clean release.  builder_id is validated (no shell
+    # metacharacters) at `mirror init`, so direct interpolation is safe.
+    if builder_id:
+        _hold = (f"echo {builder_id} > {lock_path}.holder; "
+                 f"echo COORD_LOCK_ACQUIRED; cat; rm -f {lock_path}.holder")
+    else:
+        _hold = "echo COORD_LOCK_ACQUIRED; cat"
     _inner = (
         f"flock -w {int(timeout_sec)} {lock_path} -c "
-        f"'echo COORD_LOCK_ACQUIRED; cat' "
+        f"'{_hold}' "
         f"&& echo COORD_LOCK_RELEASED")
     _ssh_cmd.append(_inner)
     try:
