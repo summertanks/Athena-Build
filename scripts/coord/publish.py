@@ -576,6 +576,22 @@ def _read_inrelease_sha256_and_date(inrelease_path: str) -> Tuple[str, str]:
     return _sha, _date
 
 
+def unsanctioned_local_ahead(ahead_rows: 'List[dict]',
+                             reclaim_intents: 'List[dict]') -> 'List[dict]':
+    """MIRROR-03 publish-hazard gate.  Of the local-ahead candidates (our own
+    already-published files whose on-disk bytes diverged at the SAME version),
+    return those NOT covered by an explicit reclaim intent.
+
+    A non-empty result is the hazard: `generate_pending_claims` emits 0 claims
+    for an already-claimed filename (frozen-bytes invariant), but the dist-tree
+    rsync pushes the whole repo — so a same-version rebuild's new bytes + index
+    would land on the remote while the signed claim stays at the old sha,
+    leaving claim_apt_sha_mismatch.  Caller aborts and points the operator at
+    `mirror reclaim` (sanctioned version-less overwrite) or a version bump."""
+    _reclaimed = {_i.get('filename') for _i in reclaim_intents}
+    return [_a for _a in ahead_rows if _a.get('filename') not in _reclaimed]
+
+
 def remote_publish(
     *,
     builder_id: str,
@@ -598,6 +614,7 @@ def remote_publish(
     install_corpus: 'Optional[frozenset[str]]' = None,
     on_published: 'Optional[Callable[[set], None]]' = None,
     reclaim_intents: 'Optional[List[dict]]' = None,
+    local_ahead_fn: 'Optional[Callable]' = None,
 ) -> Tuple[bool, str]:
     """11-step publish transaction (see module docstring).  Returns
     (ok, detail).  On failure detail explains the step that aborted.
@@ -858,6 +875,27 @@ def remote_publish(
             logger.warning(f"reclaim intent skipped: {_why}")
             _status(f"reclaim intent SKIPPED: {_why}")
         _pending.extend(_reclaims_ok)
+        # MIRROR-03 publish-hazard gate — refuse to silently overwrite frozen
+        # published bytes.  The dist-tree rsync below pushes the whole repo, so
+        # an already-published file rebuilt at the SAME version (new bytes, no
+        # new claim) would land on the remote while its signed claim stayed at
+        # the old sha → claim_apt_sha_mismatch.  Abort unless the divergence is
+        # a sanctioned reclaim (those filenames are exempt).
+        if local_ahead_fn is not None:
+            _bad = unsanctioned_local_ahead(
+                local_ahead_fn(_by_builder, builder_id,
+                               config.dir_repo, _buildlog),
+                reclaim_intents or [])
+            if _bad:
+                _names = ', '.join(sorted(_b['filename'] for _b in _bad)[:5])
+                _more = '' if len(_bad) <= 5 else f" (+{len(_bad) - 5} more)"
+                return False, (
+                    f"refusing to publish: {len(_bad)} already-published "
+                    f"file(s) changed on disk at the same version "
+                    f"({_names}{_more}); pushing would overwrite frozen remote "
+                    f"bytes and strand the signed claim. Run `mirror reclaim "
+                    f"<source|file>` for a deliberate version-less change, or "
+                    f"bump the version and rebuild.")
         _status(
             f"pending claims: {len(_pending)} to publish "
             f"({_pending_total - len(_pending) + len(_reclaims_ok) - len(_ownership_blocked)} "

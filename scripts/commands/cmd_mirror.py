@@ -1285,6 +1285,7 @@ class MirrorCommandsMixin(SessionState):
                     install_corpus=_install_corpus or None,
                     on_published=_stamp_published,
                     reclaim_intents=reclaim_intents,
+                    local_ahead_fn=_mirror.local_ahead_candidates,
                 )
             finally:
                 _bar.close()
