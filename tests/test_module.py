@@ -3401,7 +3401,9 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_container', 'purge',    'cmd_container_purge'),
         # cmd_chroot 'build' is now multi-token ('build live' / 'build
         # installer') with default-to-live; covered by its own tests below.
-        ('cmd_chroot',    'verify',   'cmd_verify_chroot'),
+        # 'verify' takes NO args (guarded) — covered by
+        # test_ux09f_stray_token_dispatch_prints_usage, not this pass-through
+        # matrix.
         # cmd_iso is multi-token ('build live' / 'build installer') —
         # not a verb-only dispatcher; covered by its own tests below.
         ('cmd_key',       'generate', 'cmd_generate_signing_key'),
@@ -3442,6 +3444,36 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
     # fallback when no Tui is registered; no need to stub it.
     _sess.cmd_cache('wat')
     assert _called == [], f"unknown verb must not invoke any handler, got {_called}"
+
+
+def test_ux09f_stray_token_dispatch_prints_usage():
+    """`chroot verify now` / `autorun live extra` print a usage line instead
+    of forwarding the stray token to a zero-arg handler (which raised
+    TypeError)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    # chroot verify: no args → forwards once; an extra token → no forward.
+    _s = BuildSession.__new__(BuildSession)
+    _calls = []
+    _s.cmd_verify_chroot = lambda *a, **k: _calls.append(a)
+    _s.cmd_chroot('verify')
+    assert _calls == [()], f"verify (no args) should forward: {_calls}"
+    _calls.clear()
+    _s.cmd_chroot('verify', 'now')          # must NOT raise
+    assert _calls == [], "stray token must not forward to cmd_verify_chroot"
+
+    # autorun live: no args → forwards once; an extra token → no forward.
+    _s2 = BuildSession.__new__(BuildSession)
+    _s2.config = type('C', (), {'build_mode': 'distribution'})()
+    _ran = []
+    _s2.cmd_auto_run_live = lambda *a, **k: _ran.append(a)
+    _s2.cmd_auto_run('live')
+    assert _ran == [()], f"autorun live (no args) should forward: {_ran}"
+    _ran.clear()
+    _s2.cmd_auto_run('live', 'extra')        # must NOT raise
+    assert _ran == [], "stray token must not forward to cmd_auto_run_live"
 
 
 def test_cmd_chroot_build_no_subaction_defaults_to_live():
@@ -35220,6 +35252,7 @@ def main() -> int:
         test_check_dep3_header_subject_satisfies_description,
         test_buildsession_constructible_with_stub_tui,
         test_group_dispatchers_forward_to_underlying_cmd_methods,
+        test_ux09f_stray_token_dispatch_prints_usage,
         test_cache_purge_deletes_files_and_resets_flags,
         test_cache_purge_cancelled_keeps_files_and_flags,
         test_cache_purge_empty_dir_is_noop,

@@ -177,16 +177,24 @@ class ConfigRunCommandsMixin(SessionState):
         # Defensive against missing .config (test doubles).
         _mode = getattr(getattr(self, 'config', None), 'build_mode',
                         'distribution')
+        # The pipelines take no extra tokens — reject stray args with a
+        # usage line instead of forwarding them to a zero-arg handler
+        # (which would raise TypeError).
+        if args:
+            console.print(
+                "Usage: autorun [live|installer|disk|build]  "
+                f"(unexpected: {' '.join(args)})")
+            return self._group_help('autorun', _table, action)
         if action == '' and _mode == 'build':
-            return self.cmd_auto_run_build(*args)
+            return self.cmd_auto_run_build()
         if action in ('', 'live'):
-            return self.cmd_auto_run_live(*args)
+            return self.cmd_auto_run_live()
         if action == 'installer':
-            return self.cmd_auto_run_installer(*args)
+            return self.cmd_auto_run_installer()
         if action == 'disk':
-            return self.cmd_auto_run_disk(*args)
+            return self.cmd_auto_run_disk()
         if action == 'build':
-            return self.cmd_auto_run_build(*args)
+            return self.cmd_auto_run_build()
         return self._group_help('autorun', _table, action)
 
     def cmd_auto_run_live(self):
