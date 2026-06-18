@@ -429,7 +429,7 @@ def _run_dpkg_scan(
     then atomically installs it into place (with sudo when a password is
     supplied; plain `os.replace` otherwise).  Spinner-wrapped — streaming
     Perl stdout through sudo's pipe doesn't surface lines mid-scan
-    reliably even with `stdbuf -oL` (operator-observed 2026-05-22).
+    reliably even with `stdbuf -oL`.
 
     Consolidates the two prior near-parallel
     shell-string subprocess patterns (`_scan_packages_to`,
@@ -685,7 +685,7 @@ def _write_subdir_release(
 def _generate_top_release(
     staging: str, suite: str, codename: str, version: str,
     output_path: str, password: str,
-    components: 'Optional[list[str]]' = None,    # Stage B (2026-05-22)
+    components: 'Optional[list[str]]' = None,    # Stage B
     description: str = 'Athena installer disc',
 ) -> bool:
     """apt-ftparchive release dists/<suite>/ > dists/<suite>/Release.

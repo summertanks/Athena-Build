@@ -108,7 +108,7 @@ class CohortResolverMixin(SessionState):
         downloaded the unsuffixed unstable build instead of the bookworm-
         security ~deb12u1 build).
 
-        OPTION A (2026-06-08): tunnel the source's FULL declared binary
+        OPTION A: tunnel the source's FULL declared binary
         set, filtered by arch + active build PROFILES — the SAME gates
         virtual_build uses to predict — NOT just the dep-closure subset.
         A built source emits (and we keep) its whole binary set; a

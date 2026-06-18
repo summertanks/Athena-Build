@@ -2671,7 +2671,7 @@ class BuildConfig:
             ):
                 pathlib.Path(_sub).mkdir(parents=True, exist_ok=True)
 
-            # fix-up (2026-05-22): if any of the pre-
+            # fix-up: if any of the pre-
             # Stage-D dir names exist at the repo root and are empty,
             # rmdir them.  Stage C's migration removed them once but
             # a pre-Stage-D version of this very block would have

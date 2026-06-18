@@ -464,7 +464,7 @@ def build_disk_image(
             # device under a chroot bind-mount, and BOOTX64.EFI
             # then drops straight to `grub>` because its embedded
             # UUID doesn't match the actual root partition at boot
-            # (operator-observed 2026-05-23).
+            #.
             if not _write_efi_shim_cfg(_mnt, _root_uuid, password):
                 tui.console.print(
                     "ERROR: ESP shim grub.cfg write failed — "

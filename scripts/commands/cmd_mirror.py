@@ -1054,7 +1054,7 @@ class MirrorCommandsMixin(SessionState):
         # `repo index` is no longer an operator-visible command, so
         # mirror publish owns the side-effect.
         #
-        # STALE-INDEX guard (2026-06-11): missing is not the only bad
+        # STALE-INDEX guard: missing is not the only bad
         # state.  Publish pushes dists/ verbatim AND coord-head PINS its
         # sha, so a stale local index publishes "cleanly" and every
         # downstream verification passes while apt clients keep

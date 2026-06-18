@@ -246,7 +246,7 @@ def scan_repo_state(config: 'BuildConfig', subdir: str = 'main',
 
     _temp_dir = config.dir_temp
     os.makedirs(_temp_dir, exist_ok=True)
-    # fix-up (2026-05-22): include a hash of the
+    # fix-up: include a hash of the
     # source dir path in the cache filename.  Without it, a cached
     # audit-Packages-main from a pre-Stage-D scan (against the OLD
     # repo/main path, empty post-migration) would collide with the

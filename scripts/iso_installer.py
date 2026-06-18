@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     import buildcontainer   # forward-reference target for type hints
 
 # apt-repo metadata generators — lifted from this module to scripts/apt_repo.py
-# in CONF-01 Stage A (2026-05-22).  See docs/plans/conf-01-repo-layout-migration.md.
+# in CONF-01 Stage A.  See docs/plans/conf-01-repo-layout-migration.md.
 # Pure code motion; call sites below kept the same semantics.
 from apt_repo import (
     generate_apt_repo,

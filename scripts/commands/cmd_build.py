@@ -71,7 +71,7 @@ class BuildCommandsMixin(SessionState):
         if not self._ensure_signing_key_verified():
             return
 
-        # Pre-flight audit gates (P5 2026-05-23).  Two layers, both
+        # Pre-flight audit gates.  Two layers, both
         # ABORT on red unless `no-gate` is in args:
         #   1. source audit — build-state per source (binaries present,
         #      .result fresh, patches not drifted)
@@ -341,7 +341,7 @@ class BuildCommandsMixin(SessionState):
         # Pre-flight closure audit — scoped to the installer (udeb)
         # selection.  Installer chroot uses dpkg --unpack (no apt),
         # so unmet deps don't fail until the installer runs on the
-        # target — catch them here.  Two-layer gate (P5 2026-05-23) —
+        # target — catch them here.  Two-layer gate —
         # source audit first, then repo audit.  Bypass with `no-gate`.
         _no_gate = 'no-gate' in args or '--no-gate' in args
         if not _no_gate:
@@ -620,7 +620,7 @@ class BuildCommandsMixin(SessionState):
             # via live.list's transitive deps and got classified as
             # live-exclusive — base-installer's install_kernel then
             # failed when this filter dropped it from the target set
-            # (caught 2026-05-12).  Fix: pkg.list now lists every
+            #.  Fix: pkg.list now lists every
             # binary d-i actually apt-installs at install time (audit
             # walked buildroot/installer/ for apt-install callsites);
             # busybox is in pkg_closure after Pass III; Pass IV's
