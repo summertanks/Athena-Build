@@ -29084,6 +29084,37 @@ def test_federation_lab_ownership_transfer():
     assert federation_lab.run_ownership_transfer(verbose=False)['ok']
 
 
+def test_federation_lab_snapshot_divergence():
+    """Snapshot divergence: a peer behind the mirror is warned to pull, the
+    pull forward-adopts and clears it, a publisher ahead gets an ADVANCE
+    note.  Harness: tests/federation_lab.py."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'tests'))
+    import federation_lab
+    assert federation_lab.run_divergence(verbose=False)['ok']
+
+
+def test_federation_lab_reclaim():
+    """RECLAIM-01: a same-version rebuild with different bytes is
+    frozen_bytes_blocked unless it's a reclaim (reclaims_seq), which folds
+    the old claim so the conflict scan stays clean.  Harness:
+    tests/federation_lab.py."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'tests'))
+    import federation_lab
+    assert federation_lab.run_reclaim(verbose=False)['ok']
+
+
+def test_federation_lab_publish_halt_recovery():
+    """PUBLISH_HALT blocks publish; clearing it (the `mirror conflict
+    resolve` recovery) restores publishing.  Harness:
+    tests/federation_lab.py."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'tests'))
+    import federation_lab
+    assert federation_lab.run_publish_halt(verbose=False)['ok']
+
+
 def test_closure_gate_runs_in_both_modes():
     """The publish closure gate is wired regardless of [Build] Mode — the
     install corpus is built from the dep trees unconditionally and passed to
@@ -36594,6 +36625,9 @@ def main() -> int:
         test_federation_lab_build_mode_peer_workflow,
         test_federation_lab_hash_conflict,
         test_federation_lab_ownership_transfer,
+        test_federation_lab_snapshot_divergence,
+        test_federation_lab_reclaim,
+        test_federation_lab_publish_halt_recovery,
         test_mirror03_publish_hazard_gate_blocks_unsanctioned_local_ahead,
         test_filter_pending_by_ownership_no_existing_owner_keeps,
         test_filter_pending_by_ownership_own_claim_keeps,
