@@ -140,7 +140,7 @@ class Prompt:
         b = _instance()
         if b is None:
             return ''
-        # UX-05a + 05f: auto-answer informational YESNO prompts under --yes.
+        # + 05f: auto-answer informational YESNO prompts under --yes.
         # Hard prompts (sudo password, OPTIONS, INPUT, PAUSE) and
         # non-informational YESNO (security gates etc.) always wait for
         # operator input.  Honour the backend's auto_yes flag only when

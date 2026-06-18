@@ -171,7 +171,7 @@ class ConfigRunCommandsMixin(SessionState):
             'disk':       'cache→parse→download→container→source build (+live)→chroot build live→iso build disk (qcow2)',
             'build': 'cache→parse→download→container→source build (indl) — STOPS at source_build_ready (no chroot/ISO)',
         }
-        # MIRROR-02: in [Build] Mode = build, bare `autorun`
+        # in [Build] Mode = build, bare `autorun`
         # routes to the build pipeline (the live/installer/disk
         # variants would refuse at their chroot/ISO steps anyway).
         # Defensive against missing .config (test doubles).
@@ -281,7 +281,7 @@ class ConfigRunCommandsMixin(SessionState):
             (self.cmd_parse_dependency,  'dep_check_ready',       'cache parse'),
             (self.cmd_source_sync,       'download_ready',        'source sync'),
             (self.cmd_init_container,    'build_container_ready', 'container init'),
-            # STA-34: call cmd_source_build BARE.  'build' is not a valid
+            # call cmd_source_build BARE.  'build' is not a valid
             # _SOURCE_SUBSETS token, so it was classified as a package NAME
             # → "Unknown package: build" → source_build_ready never set →
             # autorun aborted at the last step.  Bare → the 'pkg' subset,
@@ -299,7 +299,7 @@ class ConfigRunCommandsMixin(SessionState):
         carrying the stage label that aborted (if any) + total wall time.
         """
         import print_commands
-        # MIRROR-02: surface the build mode at the top of the autorun
+        # surface the build mode at the top of the autorun
         # run so the operator can never mistake a 5-step indl chain
         # for a broken 8-step live chain.
         _mode = getattr(self.config, 'build_mode', 'distribution')

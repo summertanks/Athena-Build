@@ -375,7 +375,7 @@ class MirrorCommandsMixin(SessionState):
                    if _dropped else "")
                 + "?",
             ).get_response()
-            # STA-36: a YESNO get_response() returns 'y'/'n'/'yes'/'no' —
+            # a YESNO get_response() returns 'y'/'n'/'yes'/'no' —
             # ALL truthy, so a bare truthiness check only caught a missing
             # TUI backend (empty string); answering "n" fell straight
             # through to registration.  Decline on anything that isn't an
@@ -712,7 +712,7 @@ class MirrorCommandsMixin(SessionState):
                         _claims.append(_c)
         except OSError as _e:
             return f"(unreadable: {_e})"
-        # STA-29: a published claim folded by a later reclaim/obsolescence
+        # a published claim folded by a later reclaim/obsolescence
         # (its seq is a back-ref target) is NO LONGER live — the old code's
         # `else: _live += 1` double-counted the superseded original as live
         # (we_own showed "5 (1 obsolete)" when the truth was 4 live).
@@ -1050,7 +1050,7 @@ class MirrorCommandsMixin(SessionState):
             return False
         _bid, _priv, _pub = _keys
         # Resolve InRelease (the local copy we sign + push verbatim).
-        # MIRROR-01 Phase 8: auto-index when InRelease is missing —
+        # auto-index when InRelease is missing —
         # `repo index` is no longer an operator-visible command, so
         # mirror publish owns the side-effect.
         #
@@ -1162,7 +1162,7 @@ class MirrorCommandsMixin(SessionState):
             assert _st is not None  # checked above / by list_mirrors
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
-            # MIRROR-02 chunk 13: first-publish dist-mode gate.
+            # first-publish dist-mode gate.
             # When the local builder is in [Build] Mode = build
             # AND the target mirror has no coord-head on remote
             # (fresh bootstrap state), REFUSE.  Bootstrapping an
@@ -1252,7 +1252,7 @@ class MirrorCommandsMixin(SessionState):
                 _install_corpus |= frozenset(
                     self.udeb_dep_tree.selected_pkgs.keys())
             try:
-                # LEDGER-01: after a FULLY successful publish, stamp
+                # after a FULLY successful publish, stamp
                 # published_at on each published source's build record.
                 _lc_buildlog = os.path.join(self.config.dir_log, 'build')
 
@@ -1296,7 +1296,7 @@ class MirrorCommandsMixin(SessionState):
             _published_any = True
             # Success → bump mirror state
             import coord.schema as _schema
-            # MIRROR-02 chunk 12: recompute mirror.base from the
+            # recompute mirror.base from the
             # post-publish claim ledger.  base = oldest snapshot
             # timestamp across all non-retracted claims on the mirror.
             # Combined with chunk 6's snapshot.current >= mirror.base
@@ -1458,7 +1458,7 @@ class MirrorCommandsMixin(SessionState):
             # 3. Walk claims; download per-file for our current snapshot
             _dl = _skip_own = _skip_present = _mismatch = _failed = 0
             _refreshed = 0
-            # MIRROR-02 chunk 10: collect successfully-downloaded
+            # collect successfully-downloaded
             # claims per package so we can write a single local
             # build.json record per source.  Indexed by package name;
             # each entry holds the list of (claim, owner_builder).
@@ -1466,7 +1466,7 @@ class MirrorCommandsMixin(SessionState):
             for _builder, _claims in _by_builder.items():
                 _dead = _schema.superseded_seqs(_claims)
                 for _c in _claims:
-                    # STA-29: fold supersession back-refs, not just marker
+                    # fold supersession back-refs, not just marker
                     # states.  After a reclaim the OLD published claim
                     # (state 'published', old sha) is superseded by the new
                     # reclaim claim under the same filename — without this
@@ -1497,7 +1497,7 @@ class MirrorCommandsMixin(SessionState):
                     _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
                     _local_path = os.path.join(_dst_dir, _fn)
                     if os.path.isfile(_local_path):
-                        # RECLAIM-01: a claim carrying reclaims_seq means
+                        # a claim carrying reclaims_seq means
                         # the publisher REWROTE the bytes under this
                         # filename (sanctioned invariant exception) — a
                         # present local file may hold the superseded
@@ -1557,7 +1557,7 @@ class MirrorCommandsMixin(SessionState):
                     if _pkg_name:
                         _per_pkg_downloads.setdefault(_pkg_name, []).append(
                             (_c, _builder))
-            # MIRROR-02 chunk 10: write local build.json record per
+            # write local build.json record per
             # pulled package so source audit + repo audit see the .deb
             # as already-present (not needs_build).  Tunneled claims
             # land as phase=tunneled + republished_from carried over.
@@ -1779,7 +1779,7 @@ class MirrorCommandsMixin(SessionState):
             return ''
         _oldest: 'Optional[str]' = None
         for _bid, _claims in _by_builder.items():
-            # STA-29 / LEDGER-01: fold supersession back-refs so the base
+            # / LEDGER-01: fold supersession back-refs so the base
             # advances past retracted/deprecated/obsoleted (and reclaimed)
             # snapshots — only LIVE claims pin the oldest snapshot floor.
             _dead = _schema.superseded_seqs(_claims)
@@ -2116,7 +2116,7 @@ class MirrorCommandsMixin(SessionState):
             # `buildlog_dir` lets the helper distinguish
             # "local build ahead of remote" (WARNING) from real bitrot
             # (CRITICAL).
-            # STA-25 follow-up: pass the signed selection's source set so the
+            # follow-up: pass the signed selection's source set so the
             # auditor can downgrade a missing own-claim file to INFO when the
             # next `mirror publish` will RELEASE it (deprecate dropped sources
             # / obsolete superseded versions) instead of flagging CRITICAL —
@@ -2143,7 +2143,7 @@ class MirrorCommandsMixin(SessionState):
                 _print_audit_finding(_sev, _kind, _msg, _color)
             if _own_disk_crit:
                 _all_ok = False
-            # SELECT-LOCK coherence: the signed selection.state ⟷ our published
+            # coherence: the signed selection.state ⟷ our published
             # claims.  CRITICAL when we still own+publish a file whose SOURCE
             # left the selection but was never deprecated (keyed on source, not
             # binary — a source build publishes -dev/-doc/-udeb variants that
@@ -2221,7 +2221,7 @@ class MirrorCommandsMixin(SessionState):
             _seen: 'dict[str, list[tuple]]' = {}
             for _m in _per_mirror:
                 for _bid, _claims in _m['by_builder'].items():
-                    # STA-29: fold supersession back-refs.  Without it, ONE
+                    # fold supersession back-refs.  Without it, ONE
                     # mirror's jsonl contributes both the old published
                     # claim (old sha) and the new reclaim claim (new sha)
                     # for the same filename → a permanent false
@@ -2346,7 +2346,7 @@ class MirrorCommandsMixin(SessionState):
             _keyring = _id.load_keyring(_keyring_dir)
             _by_builder = _store.read_all_claims(_claims_dir, _keyring, {})
             for _bid, _claims in _by_builder.items():
-                # STA-29: fold supersession back-refs so a superseded
+                # fold supersession back-refs so a superseded
                 # original published claim isn't shown as a current claim
                 # alongside its successor (reclaim / obsolescence).
                 _dead = _schema.superseded_seqs(_claims)
@@ -2661,7 +2661,7 @@ class MirrorCommandsMixin(SessionState):
                 tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
             if not _ok:
                 return False
-            # LEDGER-01: the build record mirrors the retraction (the
+            # the build record mirrors the retraction (the
             # current episode is archived to history first).
             try:
                 _bl = os.path.join(self.config.dir_log, 'build')

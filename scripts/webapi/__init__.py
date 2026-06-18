@@ -107,7 +107,7 @@ def create_app(*, buildlog_dir: str, flags_path: str,
             raise HTTPException(
                 status_code=404,
                 detail=f'no {kind} for {package!r}')
-        # STA-53(i): a full read past the 4 MB cap returns {'error': ...}
+        # a full read past the 4 MB cap returns {'error': ...}
         # with no 'text'; surface it as 413 instead of an empty 200.
         if _doc.get('error'):
             raise HTTPException(status_code=413, detail=_doc['error'])

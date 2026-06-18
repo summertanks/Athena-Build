@@ -307,7 +307,7 @@ def restore_session(config: BuildConfig, report) -> Optional[RestoredSession]:
                f"Run `cache parse` to rebuild.")
         return None
 
-    # STA-53(h): a non-dict payload would crash the `.get` below outside the
+    # a non-dict payload would crash the `.get` below outside the
     # guarded load — refuse with the polished message instead.
     if not isinstance(_payload, dict):
         report("resume: pickle payload is not a mapping — refusing restore. "

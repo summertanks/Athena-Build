@@ -691,7 +691,7 @@ class CacheCommandsMixin(SessionState):
             _resp = Prompt(
                 PROMPT_YESNO,
                 "There are one or more dependency validation failures, Proceed?",
-                informational=True,   # UX-05f: safe to auto-yes under --yes
+                informational=True,   # safe to auto-yes under --yes
             ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 self.flags.dep_check_ready = False
@@ -719,7 +719,7 @@ class CacheCommandsMixin(SessionState):
             _resp = Prompt(
                 PROMPT_YESNO,
                 "There are one or more source parse failures, Proceed?",
-                informational=True,   # UX-05f: safe to auto-yes under --yes
+                informational=True,   # safe to auto-yes under --yes
             ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return
@@ -862,7 +862,7 @@ class CacheCommandsMixin(SessionState):
                 self.dep_tree, self.udeb_dep_tree, self.config, closure=_fresh)
             if _action == selection_lock.ACTION_BLOCK and _accept:
                 selection_lock.write_selection_state(self.config, _state)
-                # LEDGER-01 intent-at-accept: record the deprecation on the
+                # intent-at-accept: record the deprecation on the
                 # dropped sources' build records NOW (before any publish),
                 # then touch the still-selected set.
                 _dep_n = utils.lifecycle_mark_deprecated(
@@ -891,7 +891,7 @@ class CacheCommandsMixin(SessionState):
                         f"binary(ies) / {len(_added['srcs'])} new source(s) "
                         "(additions are low-impact)", tui.COLOR_WARNING)
                 selection_lock.write_selection_state(self.config, _state)
-            # LEDGER-01: stamp the lifecycle layer on every selected source
+            # stamp the lifecycle layer on every selected source
             # (bootstrap + refresh paths; the accept path touched above).
             _lc_touch()
 
@@ -1007,7 +1007,7 @@ class CacheCommandsMixin(SessionState):
         ).get_response()
         if _resp.strip().lower() == 'accept':
             self.cmd_parse_dependency('force', 'accept-removals')
-            # UX-08(g): don't claim "re-baselined" unless the accept-removals
+            # don't claim "re-baselined" unless the accept-removals
             # re-resolution actually converged.
             if self.flags.dep_check_ready:
                 console.print("cache select: ACCEPTED — selection.state "
@@ -1113,7 +1113,7 @@ class CacheCommandsMixin(SessionState):
             return
 
         from print_commands import _fmt_dep, _fmt_dep_group
-        # UX-08(f): get_packages returns mirror-parse order, NOT version order —
+        # get_packages returns mirror-parse order, NOT version order —
         # pick the genuinely highest version for the headline (apt's semantics).
         import apt_pkg
         import functools

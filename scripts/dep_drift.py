@@ -71,7 +71,7 @@ class _DepDriftMixin:
     # assignment here.
     _dependencytree: 'dependencytree.DependencyTree'
     _dir_repo: str
-    _dir_repo_main: str   # CONF-01 Stage D
+    _dir_repo_main: str   # D
     _config: 'utils.BuildConfig'
     strip_build_version: Callable[[str], str]
     normalize_repo_filename: Callable[[str], str]
@@ -132,7 +132,7 @@ class _DepDriftMixin:
             f"canonical pkg(s) for cache↔disk skew"
         )
         import package as _pkg_module
-        # STA-24: accumulate built packages that DROPPED a dependency edge
+        # accumulate built packages that DROPPED a dependency edge
         # on a selected package vs the upstream record (the dangerous
         # dep-loss case — see the summary below).
         _dep_loss: 'list[tuple[str, list[str]]]' = []
@@ -141,7 +141,7 @@ class _DepDriftMixin:
             if not _filename:
                 continue
             _filename  = self.normalize_repo_filename(_filename)
-            # CONF-01 Stage D: _dir_repo_main is now dists/<codename>/
+            # _dir_repo_main is now dists/<codename>/
             # main/binary-<arch>/, set by buildsystem.py composer.  The on-disk
             # .deb may carry a +asg<R>u<N> stamp; find_matching_artifact accepts
             # the pristine name OR its stamped variant so drift detection isn't
@@ -175,7 +175,7 @@ class _DepDriftMixin:
                 for _field, _cache_val, _disk_val in _drift:
                     logger.info(f"  {_field}: from {_cache_val} to {_disk_val}")
 
-            # STA-24: a dep present on the upstream cache record but ABSENT
+            # a dep present on the upstream cache record but ABSENT
             # on the built .deb is a LOST dependency.  If its target is a
             # package we SELECT, the minimal SURFACES-01 closure won't pull
             # it in and it silently won't be installed — the e2fsprogs case
@@ -212,7 +212,7 @@ class _DepDriftMixin:
             _pkg_obj.alt_depends     = _deb_pkg.alt_depends
             _pkg_obj.pre_depends     = _deb_pkg.pre_depends
             _pkg_obj.alt_pre_depends = _deb_pkg.alt_pre_depends
-            # CONF-01 Stage D fix-up: sync Version too — see method
+            # fix-up: sync Version too — see method
             # docstring for the asymmetric-sync bug rationale.  Both
             # .version attr and the underlying ['Version'] field need
             # the update (different consumers read different surfaces).
@@ -227,7 +227,7 @@ class _DepDriftMixin:
                 # one for _verify_dep_resolution.
                 pass
 
-        # STA-24: surface dep-loss prominently — it never reaches
+        # surface dep-loss prominently — it never reaches
         # _verify_dep_resolution (that pass runs on the post-sync deps,
         # where the lost edge is already gone) and the legacy ship-
         # everything pool used to mask it; minimal closures make a lost
@@ -277,7 +277,7 @@ class _DepDriftMixin:
                 return False, 'unresolved'
             if not _op:
                 return True, None
-            # STA-18 (extension): if `_name` is a virtual alias (the
+            # (extension): if `_name` is a virtual alias (the
             # provider's Package field differs from `_name`), use the
             # Provides clause's version not the provider's own Version.
             # Without this, `gnome-control-center → desktop-base (>= 10.0.0)`

@@ -106,7 +106,7 @@ def _infer_type(url: str) -> str:
 
 # ─────────────────────────── host / name / public-URL derivation ─────────
 #
-# MIRROR-01 Phase 6 splits the URL the operator types at `mirror add` time
+# splits the URL the operator types at `mirror add` time
 # into THREE derived facts that the mirror state file persists separately:
 #
 #   - `url`         — what we rsync to (ssh:// or file://)
@@ -756,7 +756,7 @@ def project_post_publish_state(local_state, remote_by_builder: dict):
         for _c in _claims:
             if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
                 continue
-            # STA-27: claim.package is the SOURCE name, but RepoState.packages
+            # claim.package is the SOURCE name, but RepoState.packages
             # (and audit_dep_closure's Depends resolution) is keyed by BINARY
             # name.  A source emits N binaries → N claims, each with its own
             # filename — derive the binary name from filename (name_ver_arch
@@ -1581,7 +1581,7 @@ def _own_claims_disk_walk(
                           'remote_sha': _claim_sha, 'local_sha': '',
                           'path': '', 'error': ''})
             continue
-        # ARCH-19: stream via utils.get_sha256 (hashlib.file_digest, chunked)
+        # stream via utils.get_sha256 (hashlib.file_digest, chunked)
         # — this claims-verify path hashes multi-hundred-MB .debs and the old
         # sha256(fh.read()) slurped each fully into RAM.  use_cache=False so
         # silent bitrot (no size/mtime change) is still caught.
@@ -1696,7 +1696,7 @@ def rsync_spec_for_url(url: str) -> 'tuple[str, Optional[str]]':
     acquisition) or None for local-fs mirrors.
     """
     if isinstance(url, str) and url.startswith('ssh://'):
-        # STA-53(e): a non-default ssh port is carried by rsync via
+        # a non-default ssh port is carried by rsync via
         # `-e 'ssh -p N'`, never in the host:path spec — embedding it would
         # mangle into an invalid `host:port:path`.  Reject loudly until the
         # transport learns to thread the port (rather than silently break).

@@ -75,7 +75,7 @@ UUID={efi_uuid}   /boot/efi  vfat    umask=0077                  0  2
 """
 
 
-# ARCH-19: canonical wrapper in utils.sudo (carries the `capture` param);
+# canonical wrapper in utils.sudo (carries the `capture` param);
 # module-local `_sudo` kept as an alias so call sites + test monkeypatching
 # stay unchanged.
 _sudo = utils.sudo
@@ -180,7 +180,7 @@ def build_disk_image(
         try:
             with os.fdopen(_sf_fd, 'w') as _fh:
                 _fh.write(_SFDISK_SCRIPT_TEMPLATE)
-            # STA-40: argv form, no shell.  `sudo -S` would want the password
+            # argv form, no shell.  `sudo -S` would want the password
             # on the SAME stdin sfdisk needs for its partition script, so use
             # `sudo -A` (askpass) and hand sfdisk the script file as its stdin.
             with utils.sudo_askpass_env(password) as _env, \
@@ -350,7 +350,7 @@ def build_disk_image(
             '/usr/bin:/sbin:/bin'
         )
 
-        # STA-26: regenerate the initramfs now that /etc/fstab (step 7) holds
+        # regenerate the initramfs now that /etc/fstab (step 7) holds
         # the real root (ext4) + ESP (vfat) entries.  The kernel's postinst
         # ran update-initramfs during the chroot build, when fstab carried
         # only the virtual filesystems (chroot.py), so initramfs-tools' fsck
@@ -515,7 +515,7 @@ def build_disk_image(
                 )
                 return False
             _root_mounted = False
-        # HK-06: clear the ext4 orphan-inode list on the now-unmounted root
+        # clear the ext4 orphan-inode list on the now-unmounted root
         # so the shipped image is pristine — otherwise first boot logs e2fsck
         # cleaning a small orphan list (files deleted in the chroot while the
         # loop mount was live; nothing replays it on the artifact).  Force
@@ -599,7 +599,7 @@ def _write_minimal_grub_cfg(mnt: str, root_uuid: str,
                 _f.startswith('vmlinuz-') for _f in os.listdir(_boot))
         except OSError as e:
             logger.error(f"list {_boot} for kernel: {e}")
-            # UX-08(e): a fallback-grub failure means an unbootable image —
+            # a fallback-grub failure means an unbootable image —
             # surface it on the console like every sibling failure path.
             tui.console.print(
                 f"ERROR: minimal grub.cfg — can't list {_boot}: {e}")

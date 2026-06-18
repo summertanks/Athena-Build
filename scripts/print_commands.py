@@ -570,7 +570,7 @@ def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
     else:
         tui.console.print(f"  ISO installer  : {_installer_iso_path}  (installer chroot must build first)")
 
-    # OBS-01 build times — slowest-N + aggregate, only when records exist.
+    # build times — slowest-N + aggregate, only when records exist.
     _summary_build_times_section(session)
 
     # Disk image reuses the verified live chroot (same gate as ISO live).

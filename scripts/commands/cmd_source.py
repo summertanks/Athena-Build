@@ -40,7 +40,7 @@ class SourceCommandsMixin(SessionState):
     # pulled by depth-1 Recommends; 'all' = union of every selected source
     # in dep_tree + udeb_dep_tree (no exclusions — equivalent to running
     # pkg + live + installer + recommended back-to-back, deduped).
-    # MIRROR-02: 'build' is recognised by the arg parser; gated
+    # 'build' is recognised by the arg parser; gated
     # to [Build] Mode = build at dispatch time (cmd_source_build
     # rejects it under dist mode with a hint pointing at 'all').
     _SOURCE_SUBSETS = ('pkg', 'live', 'installer', 'recommended', 'all',
@@ -232,7 +232,7 @@ class SourceCommandsMixin(SessionState):
             return 'no_pkgs'
         _buildlog = os.path.join(self.config.dir_log, 'build')
 
-        # OBS-01: the signed build.json record is the sole source of
+        # the signed build.json record is the sole source of
         # truth.  classify_build_record returns:
         #   'missing'     — file absent / tampered / corrupt
         #   'interrupted' — phase != done|failed|tunneled (process
@@ -267,7 +267,7 @@ class SourceCommandsMixin(SessionState):
         if not _sync_ok:
             return 'needs_sync'
 
-        # OBS-01: a non-terminal phase in the record means the build
+        # a non-terminal phase in the record means the build
         # process was killed mid-flight — segregate, normalize, or
         # something else didn't finish.  On-disk binaries may be
         # pre-strip, partial, or missing.  Surface as its own state
@@ -437,7 +437,7 @@ class SourceCommandsMixin(SessionState):
                     #   — on-disk artifacts can't be trusted.
                     # Same action: drop the signed record so the next
                     # source build rebuilds.
-                    # STA-53(f): `source repair` may run before `container
+                    # `source repair` may run before `container
                     # init`, so self.container is None — derive the buildlog
                     # dir from config like the read-only siblings do.
                     _f = os.path.join(
@@ -537,7 +537,7 @@ class SourceCommandsMixin(SessionState):
         if self.udeb_dep_tree is not None:
             for _n, _s in self.udeb_dep_tree.selected_srcs.items():
                 _srcs.setdefault(_n, _s)
-        # STA-53(g): an empty floor means a mirror is configured but has never
+        # an empty floor means a mirror is configured but has never
         # published (see _update_build_pending) — there is nothing to diff
         # against, so the whole non-fork selected set IS the workload.  Skip
         # the snapshot fetch, which would dead-end on an empty timestamp with
@@ -650,7 +650,7 @@ class SourceCommandsMixin(SessionState):
         can't see the change) are rebuilt as bump-targets; genuinely-missing
         binaries (needs_build, e.g. a fresh fork) build normally.  Resumable +
         idempotent."""
-        # UX-05g defensive reset.  cmd_source_build already resets on entry
+        # defensive reset.  cmd_source_build already resets on entry
         # before routing here, but the convention pins False-on-entry for
         # every function that sets the flag True — so a future direct
         # caller can't leak a stale True if this raises mid-run.
@@ -1509,7 +1509,7 @@ class SourceCommandsMixin(SessionState):
                 logger.warning(f"Tunnel {_src_pkg.package} [TUNNELED]")
                 return ('tunneled', 0)
             logger.error(f"Tunnel {_src_pkg.package} [FAIL]")
-            # UX-08(e): the live-build summary reports counts only — name the
+            # the live-build summary reports counts only — name the
             # failing package on the console too, not just the log tab.
             console.print(f"  Tunnel {_src_pkg.package} [FAIL]", tui.COLOR_ERROR)
             return ('failed', 0)
@@ -1560,13 +1560,13 @@ class SourceCommandsMixin(SessionState):
                 f"Building Package {_src_pkg.package} [FAIL] — built but "
                 f"check_build still false (predicted artifact missing or "
                 f"unmatched): expected {_expected_files}")
-            # UX-08(e): surface the failing package on the console, not just log.
+            # surface the failing package on the console, not just log.
             console.print(
                 f"  Building {_src_pkg.package} [FAIL] — built but artifacts "
                 "missing/unmatched", tui.COLOR_ERROR)
             return ('failed', 0)
         logger.error(f"Building Package {_src_pkg.package} [FAIL]")
-        # UX-08(e): surface the failing package on the console, not just log.
+        # surface the failing package on the console, not just log.
         console.print(f"  Building {_src_pkg.package} [FAIL]", tui.COLOR_ERROR)
         return ('failed', 0)
 
@@ -1648,7 +1648,7 @@ class SourceCommandsMixin(SessionState):
             console.print("Run 'container init' first")
             return
 
-        # UX-05g: reset on entry so an interrupted partial build can't
+        # reset on entry so an interrupted partial build can't
         # leak a stale True from a previous successful run.  Re-set to
         # True on the success-tail (~L7115).
         self.flags.source_build_ready = False
@@ -1851,7 +1851,7 @@ class SourceCommandsMixin(SessionState):
             show_rate=False,
         )
 
-        # UPD-01 bump-aware build: when a ledger is loaded (only
+        # bump-aware build: when a ledger is loaded (only
         # `_do_update_build` does so), un-forced builds additionally rebuild a
         # same-base security/NMU re-spin whose THIS-generation +asg<R>u<N>
         # artifact is missing — the one case the filename-based skip gate can't
@@ -1877,7 +1877,7 @@ class SourceCommandsMixin(SessionState):
             except (TypeError, ValueError):
                 _bump_active = False   # can't derive N → stamper skips too
 
-        # COMP-03 Phase 4: split the work into tunneled (serial — network-
+        # split the work into tunneled (serial — network-
         # bound, dest-dir-locked) and to-build (parallelisable).  The
         # serial path falls through to MaxParallelBuilds==1 below.
         _tunnel_pkgs = [
@@ -1960,7 +1960,7 @@ class SourceCommandsMixin(SessionState):
                     "workers will run to completion if Ctrl+C fires")
             try:
                 _executor = _cf.ThreadPoolExecutor(max_workers=_n_parallel)
-                # COMP-03 Phase 6: heavy-package scheduler.  Sources in
+                # heavy-package scheduler.  Sources in
                 # config.heavy_packages run alone — they only start once
                 # every in-flight build has drained, and while they
                 # execute no new builds are submitted.  Empty set =

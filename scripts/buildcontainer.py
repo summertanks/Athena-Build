@@ -36,7 +36,7 @@ _DOCKER_TIMEOUT_DEFAULT = 1800   # 30 min
 # (reap_all_live) which deliberately propagates.
 _DOCKER_TRANSIENT = (_req_exc.Timeout, _req_exc.ConnectionError)
 
-# STA-32: docker-py's `DockerException` is the BASE class; `APIError` is a
+# docker-py's `DockerException` is the BASE class; `APIError` is a
 # subclass, so `except docker.errors.APIError` MISSES a raw
 # DockerException — which is exactly what `DockerClient()` / `from_env()`
 # raise against an unreachable daemon (the server-version probe wraps the
@@ -74,7 +74,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger('athena.build')
 
-# COMP-03 Phase 1: serialises segregate's per-file moves from
+# serialises segregate's per-file moves from
 # every worker's scratch dir into the shared repo subdirs.  Held
 # only for the duration of one source's move loop (microseconds);
 # isolates the os.makedirs / collision-check / os.rename triad so
@@ -117,7 +117,7 @@ class BuildContainer:
         # build.py wires it through, but tests that construct a
         # BuildContainer without a cache continue to work unchanged.
         self.cache = cache
-        # CONF-01 Stage D: keep the full config reference so segregate
+        # keep the full config reference so segregate
         # can route .deb / .udeb destinations via config.deb_dest_for_
         # filename (which knows about the new unified apt-repo layout).
         # Pre-CONF-01 code only needed the path strings below.
@@ -157,7 +157,7 @@ class BuildContainer:
         self.patch_empty = config.dir_patch_empty
         self.build_profiles = config.build_profiles
         self.build_options  = config.build_options
-        # SEC-05: when true, build() runs a `apt-get install --simulate`
+        # when true, build() runs a `apt-get install --simulate`
         # preview against build-deps in a transient container and prompts
         # the operator to proceed.  Off by default.
         self.audit_build_deps = config.audit_build_deps
@@ -200,7 +200,7 @@ class BuildContainer:
                 _client.ping()
                 self.client = _client
             except _DOCKER_CONNECT_ERRORS:
-                # STA-32: catch the base DockerException + transients, not
+                # catch the base DockerException + transients, not
                 # just APIError, so an unreachable external daemon actually
                 # falls back to local instead of escaping __init__.
                 tui.console.print("Athena Build Docker: Couldn't connect to external server, reverting to local")
@@ -210,7 +210,7 @@ class BuildContainer:
                 self.client = docker.from_env(timeout=self._docker_timeout)
                 self.client.ping()
             except _DOCKER_CONNECT_ERRORS as e:
-                # STA-32: the most common failure (daemon not running) raises
+                # the most common failure (daemon not running) raises
                 # a bare DockerException — wrap ALL connect failures in
                 # RuntimeError so cmd_init_container's handler shows the
                 # designed message instead of a raw traceback.
@@ -240,7 +240,7 @@ class BuildContainer:
         except Exception as _e:
             logger.debug(f"Docker version probe failed: {_e}")
 
-        # CONF-15: bake the snapshot TS into the image tag so a snapshot
+        # bake the snapshot TS into the image tag so a snapshot
         # advance ([Snapshot] Timestamp change in build.conf) invalidates
         # the image cache automatically — `docker images` lookup misses
         # the old tag, we build a fresh image against the new snapshot.
@@ -275,7 +275,7 @@ class BuildContainer:
 
         if _needs_build:
             try:
-                # CONF-15: pass the snapshot triplet as build-args so the
+                # pass the snapshot triplet as build-args so the
                 # Dockerfile's first RUN can rewrite /etc/apt/sources.list
                 # to OUR snapshot BEFORE any `apt-get install` (so even the
                 # toolchain layer is pinned, not just per-build steps).
@@ -365,7 +365,7 @@ class BuildContainer:
 
         self.image = image
 
-        # COMP-03 Phase 2: live-container registry.  Every container
+        # live-container registry.  Every container
         # spawned by this BuildContainer (build / SEC-05 preview /
         # grub-mkrescue) registers here on `containers.run()` return and
         # deregisters in its finally block, so Phase 3's reap_all_live()
@@ -374,7 +374,7 @@ class BuildContainer:
         # under the parallel ThreadPoolExecutor (Phase 4).
         self._live: 'dict[str, docker.models.containers.Container]' = {}
         self._live_lock = threading.Lock()
-        # COMP-03 Phase 3: shutdown_event is set by request_shutdown()
+        # shutdown_event is set by request_shutdown()
         # (which also reaps all live containers).  Parallel workers
         # (Phase 4) consult it between scheduled jobs to bail out
         # without starting new builds; SIGINT-driven cleanup flips it
@@ -389,7 +389,7 @@ class BuildContainer:
             'com.athena.build': '1',
             'com.athena.pid': str(os.getpid()),
         }
-        # UPD-01 stamping ledger: {package_name: [asg-stamped versions
+        # stamping ledger: {package_name: [asg-stamped versions
         # already published]}.  Set from build.py around _do_update_build
         # before each update-mode build and cleared after; remains None
         # for a plain (non-update) `source build` so the stamper passes
@@ -397,7 +397,7 @@ class BuildContainer:
         # runtime setters and the stamper consumer both read this name.
         self.asg_ledger: 'dict[str, list[str]] | None' = None
 
-        # COMP-03 Phase 1: sweep any per-worker scratch dirs left over
+        # sweep any per-worker scratch dirs left over
         # from a prior run (kill -9 / OOM / docker-daemon crash skipped
         # the finally-block rmtree).  Best-effort — a permission error
         # here is non-fatal: this run's per-worker dirs use fresh uuid4
@@ -418,7 +418,7 @@ class BuildContainer:
         except OSError:
             pass
 
-        # COMP-03 Phase 2: sweep leftover docker containers from a prior run
+        # sweep leftover docker containers from a prior run
         # that didn't reach its build()/run_grub_mkrescue/capture
         # finally-block (kill -9 / SIGSEGV / daemon restart).  STA-32: reap
         # ONLY containers whose owner (com.athena.pid) is GONE — never one a
@@ -582,11 +582,11 @@ class BuildContainer:
         """
         try:
             if initial is not None:
-                # LEDGER-01: the entry-phase write RECREATES the record;
+                # the entry-phase write RECREATES the record;
                 # carry the lifecycle layer (selection/history/...) the
                 # parse stamped on the prior record through the rewrite.
                 _prior = utils.read_build_record(self.buildlog_path, package)
-                # OBS-02: archive the PRIOR completed run to the journal before
+                # archive the PRIOR completed run to the journal before
                 # this build overwrites build.json — each run lives in exactly
                 # one place (current in build.json, all prior in the journal),
                 # so there is no duplication.  Best-effort inside utils.
@@ -787,7 +787,7 @@ class BuildContainer:
 
     @staticmethod
     def _hash_dockerfile(config_dir: str) -> str:
-        # ARCH-19: route through utils.get_sha256 (chunked file_digest, '' on
+        # route through utils.get_sha256 (chunked file_digest, '' on
         # missing/unreadable).  use_cache=False so no `.verified` sidecar is
         # dropped next to the operator's Dockerfile in config/.
         return utils.get_sha256(
@@ -878,7 +878,7 @@ class BuildContainer:
                 try:
                     container.reload()
                 except _DOCKER_RELOAD_ERRORS:
-                    # STA-32: reload() is another HTTP GET — during the same
+                    # reload() is another HTTP GET — during the same
                     # hiccup it can raise a transient, NOT an APIError.
                     # Tolerate both so the keep-polling loop never escapes
                     # and records a still-running build as failed.
@@ -946,7 +946,7 @@ class BuildContainer:
         """
         _plain_deps: 'list[str]' = []
         _or_groups: 'list[list[str]]' = []
-        # ARCH-16: per-pkg override precedence —
+        # per-pkg override precedence —
         #   per-invocation `[bracket]` token  (profiles_override / options_override)
         #     ↓ falls back to ↓
         #   `[Source.<pkg>]` block in build.conf  (config.build_*_for(pkg))
@@ -977,7 +977,7 @@ class BuildContainer:
             else:
                 _or_groups.append([alt[0] for alt in _grp])
 
-        # SEC-05: opt-in build-dep audit gate.  Runs an apt-get install
+        # opt-in build-dep audit gate.  Runs an apt-get install
         # --simulate preview in a transient container before the real
         # install, shows the resolved set + versions, prompts y/n.
         # Caller gets back False on operator-decline so the build pipeline
@@ -1040,7 +1040,7 @@ class BuildContainer:
             if _live_patch_list else ''
         )
 
-        # OBS-01: compute the patch_set_hash once up front and stamp the
+        # compute the patch_set_hash once up front and stamp the
         # entry-phase record.  The build.json file is the canonical
         # build state from this point — any crash before the next phase
         # write leaves the record at phase=entry, which the audit
@@ -1167,7 +1167,7 @@ class BuildContainer:
         # references — stripping +bN, +debNuN, ~bpoN+N, +rpiN, etc.
         # so internal cross-refs resolve cleanly inside our repo.
         #
-        # CONF-15: the per-build `apt-get -y --allow-downgrades dist-upgrade`
+        # the per-build `apt-get -y --allow-downgrades dist-upgrade`
         # step that used to live here was removed once the toolchain layer
         # was pinned to the snapshot at image-build time (Dockerfile +
         # __init__ buildargs).  The image's installed packages are already
@@ -1199,8 +1199,8 @@ class BuildContainer:
         # mid-build — flow through the finally so a leftover container can
         # never accumulate in `docker ps -a` between runs.
         container = None
-        _res_stop = None     # OBS-03 resource sampler stop event (set in finally)
-        # COMP-03 Phase 1: per-worker scratch repo dir.  The container's
+        _res_stop = None     # resource sampler stop event (set in finally)
+        # per-worker scratch repo dir.  The container's
         # final `cp *.deb /repo/` writes here, NOT into the shared
         # self.repo_path — so concurrent workers can't race on the
         # `os.listdir(repo_path)` scan inside _segregate_built_artifacts.
@@ -1210,7 +1210,7 @@ class BuildContainer:
         _scratch_dir = os.path.join(
             self.config.dir_build_stage, uuid.uuid4().hex)
         os.makedirs(_scratch_dir, exist_ok=True)
-        # OBS-04 observability accumulators — populated through the build
+        # observability accumulators — populated through the build
         # and consumed by _write_buildlog at the terminal.  Initialised
         # here so they're in scope on every exit path.
         _seg_events: 'list[tuple]' = []
@@ -1236,7 +1236,7 @@ class BuildContainer:
                 **self._resource_kwargs(),
             )
             self._register_live(container)
-            # OBS-03: sample container resource usage (peak RSS + CPU%) while it
+            # sample container resource usage (peak RSS + CPU%) while it
             # runs; the peaks are stamped into the build.json record after wait().
             _res_acc = {'peak_rss_bytes': 0, 'mem_limit_bytes': 0,
                         'peak_cpu_pct': 0.0, 'samples': 0}
@@ -1259,7 +1259,7 @@ class BuildContainer:
                 os.path.join(self.buildlog_path, _filename_prefix),
             )['StatusCode']
 
-            # OBS-03: container exited — stop the sampler and snapshot the peaks.
+            # container exited — stop the sampler and snapshot the peaks.
             if _res_stop is not None:
                 _res_stop.set()
             _resources = {
@@ -1270,7 +1270,7 @@ class BuildContainer:
                 'samples': _res_acc['samples'],
             }
 
-            # OBS-01: refresh container attrs so OOMKilled is current,
+            # refresh container attrs so OOMKilled is current,
             # then capture both signals.  Docker exposes the OOM-killed
             # flag distinctly from exit code 137 — a real cgroup-OOM has
             # OOMKilled=True; our reap_all_live SIGKILL also produces
@@ -1282,17 +1282,17 @@ class BuildContainer:
                 _oom_killed = bool(
                     container.attrs.get('State', {}).get('OOMKilled', False))
             except _DOCKER_RELOAD_ERRORS as _e:
-                # STA-32: a transient here must not escape — the build is
+                # a transient here must not escape — the build is
                 # already done; we're only reading the OOM flag.
                 logger.warning(
                     f"container.reload failed for {src_pkg.package}: {_e}")
 
-            # COMP-03 Phase 5: exit code 137 = SIGKILL, which docker
+            # exit code 137 = SIGKILL, which docker
             # produces both when the container hits its mem_limit (the
             # cgroup OOM killer fires) and when we force-remove it
             # externally (Phase 3 reap_all_live).  Surface the OOM
             # hint loudly so the operator knows to raise BuildMemory.
-            # OBS-01 captures OOMKilled separately so the audit can
+            # captures OOMKilled separately so the audit can
             # still tell the two apart even when both produce 137.
             if _exit_code == 137:
                 logger.error(
@@ -1308,7 +1308,7 @@ class BuildContainer:
 
             _build_result = (_exit_code == 0)
 
-            # OBS-01 phase=container_exited: stamp wall-clock and the
+            # phase=container_exited: stamp wall-clock and the
             # container's verdict before any post-processing.  If the
             # process is killed between here and phase=done, the audit
             # sees 'interrupted at container_exited' — strictly more
@@ -1360,7 +1360,7 @@ class BuildContainer:
                 #    in-place rewrites land at the final location.
                 #    Returns post-move absolute paths — fed to strip so
                 #    we don't rescan the whole repo (STA-19).
-                # OBS-04: snapshot what dpkg-buildpackage actually emitted
+                # snapshot what dpkg-buildpackage actually emitted
                 # into scratch BEFORE segregate moves it out — the ground
                 # truth of "files emitted", with sizes.  Best-effort.
                 try:
@@ -1374,7 +1374,7 @@ class BuildContainer:
                         f"buildlog: scratch scan {src_pkg.package}: {_e}")
                 _emitted = self._segregate_built_artifacts(
                     src_pkg, _scratch_dir, events=_seg_events)
-                # OBS-01 phase=segregated: outputs are now at their
+                # phase=segregated: outputs are now at their
                 # final paths; record filenames (basenames — full paths
                 # are noise across machines).
                 _output_names = sorted(os.path.basename(_p) for _p in _emitted)
@@ -1389,7 +1389,7 @@ class BuildContainer:
                 #    POST-NORMALIZE paths — strip + asg-stamp rename the
                 #    files in place, so `_emitted` (pre-normalize paths)
                 #    no longer points at real files post-normalize.
-                # STA-46: key off the ACTUAL applied .patch files, not the
+                # key off the ACTUAL applied .patch files, not the
                 # patch-dir's mere existence — an empty dir (operator removed
                 # the last .patch but left the dir, or a stray README) would
                 # else set _was_delta=True and asg-stamp byte-pristine
@@ -1430,7 +1430,7 @@ class BuildContainer:
                 # Also refresh the `outputs` list to the post-normalize
                 # filenames — the segregated-phase write captured
                 # pre-strip names which no longer exist on disk.
-                # LEDGER-01: resolve the prior-build stash first — when the
+                # resolve the prior-build stash first — when the
                 # new built_version supersedes the old (snapshot move /
                 # +asg bump) the old episode rolls into history as
                 # 'obsolete'; a same-version rebuild just drops the stash.
@@ -1469,7 +1469,7 @@ class BuildContainer:
                 f"(container {_cid}): {e}"
             )
             tui.console.print(f"Athena Build Docker: Error {e}")
-            # OBS-01: flush a terminal phase=failed record so the audit
+            # flush a terminal phase=failed record so the audit
             # doesn't classify this build as 'interrupted' (which would
             # trigger a silent rebuild on next session).  exit_code=-1
             # is the sentinel for "container died before wait()".
@@ -1495,17 +1495,17 @@ class BuildContainer:
                         f"Failed to remove container {container.short_id} "
                         f"for {src_pkg.package}: {e}"
                     )
-                # COMP-03 Phase 2: drop from registry AFTER the remove
+                # drop from registry AFTER the remove
                 # attempt so reap_all_live (Phase 3) can still find the
                 # container if it fires before we get here.  Deregister
                 # always — even on remove failure, the container is no
                 # longer being managed by this worker.
                 self._deregister_live(container)
-            # OBS-03: ensure the resource sampler can't outlive the container
+            # ensure the resource sampler can't outlive the container
             # (it's a daemon thread, but stop it promptly on every exit path).
             if _res_stop is not None:
                 _res_stop.set()
-            # COMP-03 Phase 1: rmtree the per-worker scratch dir even on
+            # rmtree the per-worker scratch dir even on
             # failure paths (the container may have copied .debs in
             # before crashing).  ignore_errors so a fs issue here can't
             # mask the original exception or build result.
@@ -1639,7 +1639,7 @@ class BuildContainer:
                 logger.warning(
                     f"SEC-05 preview {src_pkg.package}: container exited "
                     f"{_exit}; tail: {_text[-400:]}")
-                # STA-53(j): honour the docstring contract — a non-zero exit
+                # honour the docstring contract — a non-zero exit
                 # with no useful output returns None (caller treats as a hard
                 # skip).  Non-empty output is still surfaced for diagnosis.
                 if not _text.strip():
@@ -1763,7 +1763,7 @@ class BuildContainer:
             )
             _result = self._wait_for_exit(container)
             _exit_code = _result.get('StatusCode', -1)
-            # STA-32: the container has EXITED (_wait_for_exit is
+            # the container has EXITED (_wait_for_exit is
             # transient-resilient); a hiccup reading its now-complete logs
             # must not turn a finished ISO master into a failure.  Fall
             # back to empty log text — _exit_code is the source of truth.
@@ -2043,7 +2043,7 @@ class BuildContainer:
         with _REPO_DEST_LOCK:
             for _f in _files:
                 _src = os.path.join(source_dir, _f)
-                # CONF-01 Stage D: config helper routes to the right
+                # config helper routes to the right
                 # nested apt-repo dir (e.g. main → dists/<codename>/main/
                 # binary-<arch>/, main+.udeb → main/debian-installer/...,
                 # dbgsym → dists/<codename>-debug/main/binary-<arch>/).
@@ -2052,7 +2052,7 @@ class BuildContainer:
                 try:
                     os.makedirs(_dst_dir, exist_ok=True)
                     if os.path.exists(_dst):
-                        # UPD-01 append-only invariant: an automatic build
+                        # append-only invariant: an automatic build
                         # path must NEVER os.remove a file already living in
                         # a published dir (all_deb_dirs()).  With +asg<R>u<N>
                         # a rebuilt delta emits a NEW filename, so an exact-
@@ -2152,7 +2152,7 @@ class BuildContainer:
         if not expected_files:
             return False
 
-        # OBS-01: the signed build.json record is the sole source of
+        # the signed build.json record is the sole source of
         # truth for "has this been built".  An interrupted record
         # (non-terminal phase) or missing record is treated as "not
         # built" — the audit's classify_build_record returns 'missing'
@@ -2178,7 +2178,7 @@ class BuildContainer:
             _sub = utils.classify_repo_subdir(_file)
             if _sub != 'main':
                 continue
-            # UPD-01: accept the predicted pristine name OR a +asg<R>u<N>
+            # accept the predicted pristine name OR a +asg<R>u<N>
             # stamped variant of it (find_matching_artifact).  The old
             # exact-only os.path.isfile match was the CONF-13 rebuild-loop
             # cause: a stamped/ABI-variant on-disk file never matched, so the

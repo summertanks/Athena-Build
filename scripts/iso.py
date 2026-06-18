@@ -86,7 +86,7 @@ class _IsoMixin:
         # ── Step 1: locate kernel and initramfs ───────────────────────────────
         logger.info("step 1/6: locate kernel + initramfs in chroot/boot/")
         _boot = os.path.join(self._dir_chroot, 'boot')
-        # STA-31: version-aware selection + initrd paired to the chosen
+        # version-aware selection + initrd paired to the chosen
         # kernel by suffix (a lexicographic sorted()[-1] picks 6.1.0-9 over
         # 6.1.0-47, and independent vmlinuz/initrd sorts can mismatch).
         _pair = utils.select_latest_kernel(_boot)
@@ -110,7 +110,7 @@ class _IsoMixin:
         _staging_grub = os.path.join(_staging, 'boot', 'grub')
         _staging_live = os.path.join(_staging, 'live')
 
-        # STA-52: wipe the staging tree first so an asset removed since the
+        # wipe the staging tree first so an asset removed since the
         # last run (a dropped background/test file) doesn't ship forever —
         # grub-mkrescue images the WHOLE tree.  sudo: a prior run's
         # live/filesystem.squashfs is root-owned (mksquashfs ran as root).
@@ -259,7 +259,7 @@ class _IsoMixin:
                 _exclude_args += ['-e', os.path.join(_dir_path, '*')]
                 _used_glob = True
 
-        # STA-52: mksquashfs treats `-e dir/*` literally without -wildcards,
+        # mksquashfs treats `-e dir/*` literally without -wildcards,
         # so the glob fallback above would match nothing and silently ship
         # the unlistable dir's contents.  Enable wildcards only when the
         # fallback fired (the flag governs all following -e patterns, which
@@ -300,7 +300,7 @@ class _IsoMixin:
 
         # ── Step 6: run grub-mkrescue ─────────────────────────────────────────
         logger.info("step 6/6: grub-mkrescue (in build container) → ISO")
-        # COMP-14 fix path (b): run grub-mkrescue inside the build
+        # fix path (b): run grub-mkrescue inside the build
         # container so the ISO embeds bookworm's GRUB toolchain instead
         # of the host's.  Eliminates the "host runs trixie → ISO
         # bootloader self-reports 2.12-9+deb13u1" leakage path.

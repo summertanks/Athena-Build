@@ -248,7 +248,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         # touching it.
         self.udeb_dep_tree: 'Optional[dependencytree.DependencyTree]' = None
         self.container: 'Optional[buildcontainer.BuildContainer]' = None
-        # UX-04: BuildFlags.load reads buildflags.json (created on every
+        # BuildFlags.load reads buildflags.json (created on every
         # flag transition) and resets _IN_MEMORY_ONLY flags to False —
         # they need `cache parse` to actually rebuild Cache + DT before
         # they're true again.
@@ -638,7 +638,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             self.config.dir_chroot, sudo=True, password=_password, skip_prompt=True)
         self._wipe_dir_contents('buildroot/installer',
             self.config.dir_chroot_installer, sudo=True, password=_password, skip_prompt=True)
-        # STA-49: the disk chroot (its own minimal SURFACES-01 root) is
+        # the disk chroot (its own minimal SURFACES-01 root) is
         # root-owned too — wipe it, else buildroot/disk survives while the
         # flag reset below clears chroot_disk_ready (claiming it's gone).
         self._wipe_dir_contents('buildroot/disk',
@@ -653,7 +653,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         self.cache = None
         self.dep_tree = None
         self.udeb_dep_tree = None
-        # UX-04: keep autosave wiring so the wipe is reflected on disk.
+        # keep autosave wiring so the wipe is reflected on disk.
         self.flags = BuildFlags.load(BuildFlags.default_path(self.config))
         # After a buildroot wipe every flag should be False even if the
         # JSON still carries True (the underlying state is gone).  Set
@@ -901,7 +901,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
 
         _resp = Prompt(
             PROMPT_YESNO, _msg,
-            informational=True,   # UX-05f: signing-key one-time setup, OK under --yes
+            informational=True,   # signing-key one-time setup, OK under --yes
         ).get_response()
         if _resp.lower() not in ('y', 'yes'):
             console.print("Aborted.")
@@ -1003,7 +1003,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             console.print("  Build container ready")
         except (RuntimeError,
                 buildcontainer.docker.errors.DockerException) as e:
-            # STA-32: connect failures are wrapped in RuntimeError, but a
+            # connect failures are wrapped in RuntimeError, but a
             # later init step (image build) can raise a bare DockerException
             # — catch the base too so the operator sees this message instead
             # of a raw traceback.
@@ -1055,7 +1055,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             PROMPT_YESNO,
             "Generate a new signing key for "
             "'{self.config.signing_key_uid}' now?",
-            informational=True,   # UX-05f: pre-chroot gate, OK under --yes
+            informational=True,   # pre-chroot gate, OK under --yes
         ).get_response()
 
         if _resp.lower() not in ('y', 'yes'):
@@ -1359,14 +1359,14 @@ def main(banner: str) -> None:
     # opts out.  See utils.force_ipv4_http.
     utils.force_ipv4_http()
 
-    # UX-05 Path B: detect --headless before BuildConfig sees argv.  Strip
+    # B: detect --headless before BuildConfig sees argv.  Strip
     # it after detection — BuildConfig uses argparse and would error on
     # unknown flags.
     _headless = '--headless' in sys.argv
     if _headless:
         sys.argv.remove('--headless')
 
-    # API-01: `--api [--api-port N]` starts the FastAPI server as the
+    # `--api [--api-port N]` starts the FastAPI server as the
     # session's frontend (third backend besides Tui/Cli).  Commands
     # arrive via POST /api/v1/command and run on the main thread's job
     # loop — single-writer preserved.  Binds 127.0.0.1 only; see
@@ -1384,7 +1384,7 @@ def main(banner: str) -> None:
             print("ERROR: --api-port needs an integer argument, Exiting...")
             sys.exit(1)
 
-    # UX-05a: --yes auto-answers informational YESNO prompts (e.g.
+    # --yes auto-answers informational YESNO prompts (e.g.
     # "There are source build failures, Proceed?", "Generate a new
     # signing key now?").  Hard prompts (sudo password, conflict-
     # resolution OPTIONS, security-audit gates) still wait for the
@@ -1393,7 +1393,7 @@ def main(banner: str) -> None:
     if _auto_yes:
         sys.argv.remove('--yes')
 
-    # UX-05e: `--cmd <cmd>` queues one or more commands to run sequentially
+    # `--cmd <cmd>` queues one or more commands to run sequentially
     # then exit, no REPL.  Multiple --cmd allowed; order preserved.
     # Implies --headless (the TUI's curses screen makes no sense for one-
     # shot).  Each <cmd> is one full command line (e.g. `--cmd "cache build"`
@@ -1566,7 +1566,7 @@ def main(banner: str) -> None:
             "select`) is the authoritative durable pin.",
             tui.COLOR_WARNING)
 
-    # API-01: with the session + every command registered, raise the
+    # with the session + every command registered, raise the
     # HTTP server (daemon thread) and hand the main thread to the job
     # loop.  uvicorn only touches the queue; jobs execute HERE.
     if _api:

@@ -343,7 +343,7 @@ class VirtualCommandsMixin(SessionState):
                     self.config, 'dir_fork_source_repo', None),
             )
             _records.extend(_src_records)
-            # OBS-04 companion: persist the PREDICTED artifact set as
+            # companion: persist the PREDICTED artifact set as
             # log/build/<pkg>.vbuildlog — the reference to diff against the
             # real <pkg>.buildlog after an actual source build.
             self._write_virtual_buildlog(

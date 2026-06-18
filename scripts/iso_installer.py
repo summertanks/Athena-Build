@@ -77,11 +77,11 @@ def build_installer_iso(
     pkg_groups: Optional['dict[str, set]'] = None,
     group_meta: Optional['dict[str, dict[str, str]]'] = None,
     expected_kernel_pkg: Optional[str] = None,
-    dir_repo_main_udeb: Optional[str] = None,   # CONF-01 Stage D
+    dir_repo_main_udeb: Optional[str] = None,   # D
     exclude_names: Optional[set] = None,        # fork-superseded upstream bins
     dir_repo_extras: Optional['list[str]'] = None,  # non-main component dirs
     audit_identity_scan: bool = True,            # [Audit] IdentityScan
-    tasks_desc_text: Optional[str] = None,       # SURFACES-01 generated .desc
+    tasks_desc_text: Optional[str] = None,       # generated .desc
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -140,9 +140,9 @@ def build_installer_iso(
                             snapshot):
         return False
 
-    # FORK-01 Step 5b retired the synthetic athena-tasksel-data .deb
+    # retired the synthetic athena-tasksel-data .deb
     # generation in favor of the fork's static tasks/* → .desc.
-    # SURFACES-01 re-introduces GENERATION — but as DATA, not a package:
+    # re-introduces GENERATION — but as DATA, not a package:
     # the .desc derived from the signed lockfile's groups is staged at
     # /.disk/athena-tasks.desc, and the athena-pkgsel pre-pkgsel.d hook
     # copies it over /target's packaged (fallback) desc before tasksel
@@ -164,7 +164,7 @@ def build_installer_iso(
     if not _stage_base_include(_staging, base_include_pkgs):
         return False
 
-    # CONF-01 Stage D: pool sources are now nested under dists/<codename>/.
+    # pool sources are now nested under dists/<codename>/.
     # Pass both .deb (binary-<arch>/) and .udeb (debian-installer/
     # binary-<arch>/) source dirs so the staged pool ends up flat as
     # the apt-cdrom logic on the target expects.
@@ -193,7 +193,7 @@ def build_installer_iso(
         if not _stage_group_manifests(_staging, pkg_groups):
             return False
 
-    # CONF-10 S3: identity-residue scan over the staged ISO root, after
+    # identity-residue scan over the staged ISO root, after
     # all the text-staging steps have copied + substituted but before
     # binary-heavy steps (apt-repo generation, signing, mkrescue) — so
     # a residue hit aborts cheaply.  Reuses the audit_identity walker
@@ -240,7 +240,7 @@ def build_installer_iso(
 # ---------------------------------------------------------------------------
 
 
-# ARCH-19: canonical wrapper in utils.sudo; module-local `_sudo` kept as an
+# canonical wrapper in utils.sudo; module-local `_sudo` kept as an
 # alias so call sites + test monkeypatching stay unchanged.
 _sudo = utils.sudo
 
@@ -456,7 +456,7 @@ def _build_initrd(dir_chroot_installer: str, staging: str,
     """
     logger.info(f"build initrd: cpio | gzip {dir_chroot_installer} → boot/initrd.gz")
     _initrd = os.path.join(staging, 'boot', 'initrd.gz')
-    # STA-40: argv pipeline, no shell.  `find . -print0 | cpio -o | gzip`.
+    # argv pipeline, no shell.  `find . -print0 | cpio -o | gzip`.
     # `sudo -A` (askpass) reads the root-owned chroot files for find + cpio;
     # gzip runs as the current user (no root needed — it just compresses
     # cpio's stdout) and writes the user-owned initrd.gz directly.  cwd= on

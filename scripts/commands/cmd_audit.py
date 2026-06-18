@@ -560,7 +560,7 @@ class AuditCommandsMixin(SessionState):
                     if not _expected:
                         _no_pkgs += 1
                         continue
-                    # OBS-01: tunneled sources are pristine upstream
+                    # tunneled sources are pristine upstream
                     # passthrough copies — skip deep-verify (different
                     # version semantics than our built binaries).
                     _record = utils.read_build_record(

@@ -204,7 +204,7 @@ class Cache:
         # the HIGHEST recorded upstream version.
         self._upstream_collisions:      Dict[str, List[Tuple[str, str]]] = defaultdict(list)
         self._upstream_udeb_collisions: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
-        # CONF-11 follow-up 2026-05-31: parallel for source records.  The
+        # follow-up 2026-05-31: parallel for source records.  The
         # binary/udeb collision gate fails the build when upstream >= fork
         # (build can't ship correctly), but sources are only metadata —
         # too noisy as a build-killer.  Track them anyway so the audit
@@ -380,7 +380,7 @@ class Cache:
                     return -1
                 _decompress_spinner.done()
 
-                # STA-44: the InRelease sha gated only the skip above — verify
+                # the InRelease sha gated only the skip above — verify
                 # the freshly written index against it so a corrupt/tampered
                 # download fails LOUD instead of being parsed silently.
                 _vok, _vdetail = self._verify_index_against_release(
@@ -542,7 +542,7 @@ class Cache:
             return None
         _decompress_spinner.done()
 
-        # STA-44: verify against InRelease (same as the required-index path).
+        # verify against InRelease (same as the required-index path).
         _vok, _vdetail = self._verify_index_against_release(
             _path=_path, _chosen_ext=_chosen_ext, _rel_sha=_rel_sha,
             _compressed_dst=_compressed_dst, _dst=_dst)
@@ -578,7 +578,7 @@ class Cache:
             _src_file = _mirror_files.get('Sources',  '')
             if not _pkg_file or not _src_file:
                 self.error_str = f"Missing cache files for mirror {_mirror.id}"
-                parser_spinner.done()   # UX-08(g): don't leave the spinner spinning
+                parser_spinner.done()   # don't leave the spinner spinning
                 return False
 
             try:
@@ -587,7 +587,7 @@ class Cache:
             except OSError as e:
                 self.error_str = f"Failed to read cache files for {_mirror.id}: {e}"
                 logger.error(self.error_str)
-                parser_spinner.done()   # UX-08(g): don't leave the spinner spinning
+                parser_spinner.done()   # don't leave the spinner spinning
                 return False
 
             # Fork supersede: fork mirror walks first (it's prepended in
@@ -771,7 +771,7 @@ class Cache:
         # error_str and return False so the calling Cache.__init__
         # leaves _config_valid=False; downstream code already exits on
         # is_valid==False.
-        # CONF-11 follow-up 2026-05-31: warn on upstream source drift
+        # follow-up 2026-05-31: warn on upstream source drift
         # before the collision gate.  Binary/udeb collisions are fatal
         # (the gate fails the build); source collisions are advisory
         # (build still ships, but the fork is stale relative to upstream

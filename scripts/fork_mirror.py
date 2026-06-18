@@ -99,7 +99,7 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
     for _pkg_dir in pkg_dirs:
         _check_and_invalidate_fork_pkg(_pkg_dir, buildconfig)
 
-    # CONF-11: audit each fork pkg's own build system for paths it
+    # audit each fork pkg's own build system for paths it
     # references but doesn't have.  Surfaces the 2026-05-18 athena-tasksel
     # / `packages/list` class of bug at cache-build time rather than deep
     # inside a failed dpkg-buildpackage with an opaque `install: cannot
@@ -118,7 +118,7 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
                 f"{_f['file']}:{_f['line_no']} → '{_f['source']}' "
                 f"({_f['reason']})")
 
-    # CONF-10 / AUDIT-01: identity-residue scan across the entire fork
+    # / AUDIT-01: identity-residue scan across the entire fork
     # tree.  Catches Debian-name leakage in operator-facing prose
     # (debconf templates, task descriptions, menu entries, shipped
     # /etc files) AT BUILD TIME instead of after-the-fact on a fresh

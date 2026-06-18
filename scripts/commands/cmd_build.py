@@ -47,7 +47,7 @@ class BuildCommandsMixin(SessionState):
         """
         if self._refuse_in_build_mode("chroot build live"):
             return
-        # STA-39: dep_check_ready is in-memory-only — set exclusively by
+        # dep_check_ready is in-memory-only — set exclusively by
         # a successful `cache parse` THIS session, which also populates
         # self.cache / self.dep_tree.  Without it the command would pass
         # the persisted source_build_ready gate, collect the sudo
@@ -60,7 +60,7 @@ class BuildCommandsMixin(SessionState):
             console.print("Run 'source build' first")
             return
 
-        # UX-05g: reset flags on entry so a Ctrl+C / exception during this
+        # reset flags on entry so a Ctrl+C / exception during this
         # run can't leave stale True values from a previous successful
         # run.  Re-set to True only on the success-tail (line ~5001 for
         # chroot_ready, the verify call sets chroot_verified separately).
@@ -95,7 +95,7 @@ class BuildCommandsMixin(SessionState):
                 tui.COLOR_WARNING,
             )
 
-        # MIRROR-01 Phase 8: auto-index the repo if InRelease is
+        # auto-index the repo if InRelease is
         # missing.  `repo index` is no longer operator-visible —
         # chroot build (and mirror publish) own the side-effect.
         # The chroot bring-up needs a signed InRelease so apt under
@@ -180,7 +180,7 @@ class BuildCommandsMixin(SessionState):
             except (OSError, ValueError) as _e:
                 logger.error(f"_generate_tasks_desc: {_e}")
                 return ''
-        # STA-53(l): the lockfile seeds are the raw pkg.list vocabulary, which
+        # the lockfile seeds are the raw pkg.list vocabulary, which
         # may be VIRTUAL names — tasksel can't resolve a virtual Key entry and
         # silently drops the whole task.  Canonicalise each seed to its real
         # Package via the selection closure (fall back to the raw name when not
@@ -211,7 +211,7 @@ class BuildCommandsMixin(SessionState):
         """
         if self._refuse_in_build_mode("chroot build disk"):
             return
-        # STA-39: same up-front gate as chroot build live — see there.
+        # same up-front gate as chroot build live — see there.
         if not self.flags.dep_check_ready:
             console.print("Run 'cache parse' first")
             return
@@ -273,7 +273,7 @@ class BuildCommandsMixin(SessionState):
                 logger.error("build_chroot(disk) returned False")
                 return
             self.flags.chroot_disk_ready = True
-            # STA-37: completeness IS now gated — build_chroot returns False
+            # completeness IS now gated — build_chroot returns False
             # (above) on a broken / never-installed set, so chroot_disk_ready
             # is only set on a complete chroot.  This _verify_chroot is the
             # separate BOOT-readiness check; it stays informational on the
@@ -369,7 +369,7 @@ class BuildCommandsMixin(SessionState):
         try:
             console.print("Building installer chroot from udeb closure...")
             _codename = self.config.build_codename.strip('"').strip("'")
-            # CONF-10 S2: pool_pkg_names = the set of pkg names the
+            # pool_pkg_names = the set of pkg names the
             # installed system's apt will see at /cdrom/pool.  Union of
             # the canonical deb closure + the pool_extras additions;
             # passed to installer_chroot so the apt-install audit in
@@ -526,7 +526,7 @@ class BuildCommandsMixin(SessionState):
                 "buildroot/installer/ populated with the udeb closure)"
             )
             return
-        # STA-39: dep_check_ready is in-memory-only (a successful
+        # dep_check_ready is in-memory-only (a successful
         # `cache parse` this session, which populates dep_tree/cache).
         # chroot_installer_ready PERSISTS across sessions, so without
         # this gate a fresh session would silently skip the SELECT-LOCK
@@ -546,7 +546,7 @@ class BuildCommandsMixin(SessionState):
                 "ISO mastering step) runs inside the build container")
             return
 
-        # SELECT-LOCK: refuse to master an ISO whose in-memory selection
+        # refuse to master an ISO whose in-memory selection
         # disagrees with the signed selection.state (catches a force-through
         # parse or a stale resume shipping a set the authority never approved).
         if self.dep_tree is not None:
@@ -628,7 +628,7 @@ class BuildCommandsMixin(SessionState):
             # doesn't add it to live_exclusive.
             _live_excl = self.dep_tree.live_exclusive_pkg_names
             _extras    = self.dep_tree.extras_pkg_names
-            # COMP-02 phase D follow-up: pool extras (from pool.list,
+            # phase D follow-up: pool extras (from pool.list,
             # resolved in Pass VII) ship in /cdrom/pool but are NOT
             # installed in any chroot — drop them from base_include so
             # debootstrap doesn't pull them onto the target.  They
@@ -637,7 +637,7 @@ class BuildCommandsMixin(SessionState):
             # target post-install (or by grub-installer at install
             # time, the case that motivated the file).
             _pool_extras = self.dep_tree.pool_extras_pkg_names
-            # GROUPS-01: pkg.list groups other than [base] ship in the
+            # pkg.list groups other than [base] ship in the
             # cdrom pool but are NOT installed at target debootstrap
             # time — tasksel apt-installs the operator-chosen groups
             # at install time from /cdrom/pool.
@@ -807,7 +807,7 @@ class BuildCommandsMixin(SessionState):
                 _n for _n in self.cache.package_hashtable.keys()
                 if _kernel_pat.match(_n)
             ]
-            # STA-31: version-aware — the prediction that feeds
+            # version-aware — the prediction that feeds
             # expected_kernel_pkg must pick the true highest ABI (47 > 9),
             # not the lexicographic last, or the picker steers _find_kernel
             # to the wrong kernel.
@@ -853,7 +853,7 @@ class BuildCommandsMixin(SessionState):
                 ],
                 # [Audit] IdentityScan — gates the S3 staged-ISO scan.
                 audit_identity_scan=self.config.audit_identity_scan,
-                # SURFACES-01: the generated tasksel menu (from the signed
+                # the generated tasksel menu (from the signed
                 # lockfile's groups) staged at /.disk/athena-tasks.desc.
                 tasks_desc_text=self._generate_tasks_desc(),
             )
@@ -938,7 +938,7 @@ class BuildCommandsMixin(SessionState):
             # gate above is bypassed but nothing re-checks the 8 invariants).
             if _force:
                 console.print("Force mode: re-verifying chroot before disk image...")
-                # SURFACES-01: the disk image masters dir_chroot_disk —
+                # the disk image masters dir_chroot_disk —
                 # verify THAT chroot (pre-decoupling this pointed at the
                 # live dir_chroot), and live-boot doesn't apply here.
                 _passed, _failed = self._verify_chroot(
@@ -1051,7 +1051,7 @@ class BuildCommandsMixin(SessionState):
                else f'{len(_incomplete)} incomplete: {", ".join(_incomplete[:4])}')
 
         # ── Check 3: kernel ──────────────────────────────────────────────────────
-        # STA-31: version-aware display (matches what the ISO/disk builders
+        # version-aware display (matches what the ISO/disk builders
         # actually pick).
         _kernels = glob.glob(os.path.join(chroot, 'boot', 'vmlinuz-*'))
         _kname = utils.latest_kernel_name(_kernels)

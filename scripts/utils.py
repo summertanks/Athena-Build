@@ -93,7 +93,7 @@ _DEFAULT_SECURITY_KEYRING = '/usr/share/keyrings/debian-archive-keyring.gpg'
 # Each subdir has its own Packages index.  `repo audit` scopes repo/main.
 _REPO_SUBDIRS = ('main', 'doc', 'dbgsym', 'tests')
 
-# STA-38: the BUILD-OUTPUT component labels (deb_dir_for keys) that the
+# the BUILD-OUTPUT component labels (deb_dir_for keys) that the
 # maintenance walks — strip (all_deb_dirs) AND stale-artifact detection
 # (_scan_stale_files, feeding cleanup + the chroot pre-flight gate) — must
 # both cover.  Single canon so the two walks can't drift apart: the bug
@@ -284,7 +284,7 @@ def version_no_epoch(version: object) -> str:
     return _s[_colon + 1:]
 
 
-# STA-31: version-aware kernel selection.  A plain `sorted(...)[-1]` over
+# version-aware kernel selection.  A plain `sorted(...)[-1]` over
 # kernel artifacts orders LEXICALLY, so `6.1.0-9` sorts ABOVE `6.1.0-47`
 # ('9' > '4') and `6.9` above `6.10` — picking the OLDER kernel.  Two
 # co-resident ABIs (stale pre-rollback .deb, kernel refresh) then ship the
@@ -812,7 +812,7 @@ _BUILD_RECORD_HMAC_KEY_BASENAME = '.metrics.hmac.key'
 #   tunneled — package was passthrough-copied from upstream, no container
 # A phase string not in {done, failed, tunneled} means the build was
 # interrupted mid-flight; the record's `status` will be None.
-# LEDGER-01: 'selected' is the parse-created pre-build phase — the source
+# 'selected' is the parse-created pre-build phase — the source
 # entered the selection but no build has started.  classify_build_record
 # maps it to 'missing' (NOT 'interrupted') so build/publish/audit
 # consumers treat it exactly like an absent record.
@@ -827,7 +827,7 @@ BUILD_PHASES = (
     'tunneled',
 )
 
-# LEDGER-01 lifecycle fields — the v4 additive layer.  Record CREATORS
+# lifecycle fields — the v4 additive layer.  Record CREATORS
 # (build-start, tunnel-entry) must carry these through a rewrite via
 # preserve_lifecycle(); upsert_build_record() merges them in place.
 LIFECYCLE_FIELDS = (
@@ -1077,13 +1077,13 @@ def new_build_record(*, package: str,
         # Apt component for the source's binaries on disk —
         # determines repo/dists/<codename>/<comp>/binary-<arch>/.
         'component':        component,
-        # LEDGER-01 v4 lifecycle baseline.  The selection/version/
+        # v4 lifecycle baseline.  The selection/version/
         # snapshot/timestamps layer is stamped by `cache parse`
         # (upsert_build_record / lifecycle_touch_selected); a fresh
         # record only carries the migrated markers.
         'lifecycle_v':      1,
         'history':          [],
-        # OBS-03 (v5): container resource telemetry, populated at the
+        # (v5): container resource telemetry, populated at the
         # container_exited phase — {peak_rss_bytes, peak_rss_mb,
         # mem_limit_bytes, peak_cpu_pct, samples}.  None until the build
         # runs (or for pulled/tunneled records that never ran a container).
@@ -1127,7 +1127,7 @@ def _build_history_line(record: dict) -> dict:
         'elapsed_seconds': record.get('elapsed_seconds'),
         'exit_code': record.get('exit_code'),
         'oom_killed': record.get('oom_killed'),
-        'peak_rss_mb': _res.get('peak_rss_mb'),     # OBS-03 telemetry
+        'peak_rss_mb': _res.get('peak_rss_mb'),     # telemetry
         'peak_cpu_pct': _res.get('peak_cpu_pct'),
     }
 
@@ -1403,7 +1403,7 @@ def lifecycle_touch_selected(buildlog_dir: str, selected: 'Dict[str, str]',
                 continue
             _sel = _rec.get('selection')
             if _sel in (SELECTION_DEPRECATED, SELECTION_RETRACTED):
-                # STA-53(k): archive the timestamp that matches the episode's
+                # archive the timestamp that matches the episode's
                 # state — a retracted record must keep retracted_at, not
                 # deprecated_at, in its rolled history.
                 _ts_field = ('retracted_at' if _sel == SELECTION_RETRACTED
@@ -1520,7 +1520,7 @@ def classify_build_record(record: 'Optional[dict]') -> str:
         return 'missing'
     _phase = record.get('phase')
     if _phase == 'selected':
-        # LEDGER-01 parse-created record: source selected, never built.
+        # parse-created record: source selected, never built.
         # 'missing' (not 'interrupted') so build/publish/audit treat it
         # exactly like an absent record.
         return 'missing'
@@ -1666,7 +1666,7 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
             _stats['missing_files'] += 1
         _rec['output_hashes'] = _new_hashes
         _rec['schema_version'] = BUILD_RECORD_SCHEMA_VERSION
-        # MIRROR-02 v3 fields — initialise if absent.
+        # v3 fields — initialise if absent.
         # republished_from stays empty for normally-built backfilled
         # records (only cmd_tunnel_package populates it at write time).
         if 'republished_from' not in _rec:
@@ -1678,7 +1678,7 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
         # writes the source's actual component.
         if 'component' not in _rec:
             _rec['component'] = 'main'
-        # LEDGER-01 v4 fields — initialise the lifecycle layer.  The
+        # v4 fields — initialise the lifecycle layer.  The
         # selection/version/snapshot fields are stamped by the next
         # `cache parse` touch; here we only mark the record migrated.
         _rec.setdefault('lifecycle_v', 1)
@@ -2116,7 +2116,7 @@ class BuildConfig:
     build_base_id: str
     build_codename: str
     build_version: str
-    build_mode: str   # MIRROR-02: 'distribution' (full corpus) | 'build' (build_pkg.list only)
+    build_mode: str   # 'distribution' (full corpus) | 'build' (build_pkg.list only)
     container_release: str
     docker_server: str
 
@@ -2318,7 +2318,7 @@ class BuildConfig:
                     f"got {self.build_mode!r}"
                 )
                 return
-            # COMP-09: default size for `iso build disk` output.  Sparse
+            # default size for `iso build disk` output.  Sparse
             # qcow2 — actual on-disk footprint is much smaller (~chroot
             # size + metadata).  Operator overrides via `iso build disk
             # <n>` arg.
@@ -2326,7 +2326,7 @@ class BuildConfig:
                 'Build', 'DiskImageSizeGB', fallback=5,
             )
 
-            # SURFACES-01: per-surface pkg.list group composition.
+            # per-surface pkg.list group composition.
             # [Live] Groups / [Disk] Groups — comma/space-separated group
             # names whose closure (surfaces.surface_closure) gets installed
             # in that surface's chroot.  'base' is the minimal default;
@@ -2344,14 +2344,14 @@ class BuildConfig:
             # groups); pool.list keeps feeding build/publish roots.
             self.installer_defaults_path = os.path.join(
                 working_dir, 'config/installer-defaults.list')
-            # CONF-02: identity for the project's signing key — used by
+            # identity for the project's signing key — used by
             # generate_signing_key / verify_signing_key / print signing.
             # Format 'Name <email>'.  See [Repo] section in build.conf.
             self.signing_key_uid = config_parser.get(
                 'Repo', 'SigningKeyUid',
                 fallback='Athena Build <athena@local>'
             ).strip()
-            # CONF-02: optional network apt source for the INSTALLED system.
+            # optional network apt source for the INSTALLED system.
             # When set, build_chroot writes /etc/apt/sources.list.d/athena.list
             _skiptest_raw = config_parser.get('Source', 'SkipTest', fallback='')
             self.skip_build_test = [p.strip() for p in _skiptest_raw.split(',') if p.strip()]
@@ -2378,7 +2378,7 @@ class BuildConfig:
             else:
                 self.build_options = self.build_profiles
 
-            # ARCH-16: per-package overrides via [Source.<pkg>] sections.
+            # per-package overrides via [Source.<pkg>] sections.
             # Walk all sections of the form [Source.<pkg-name>] and capture
             # any BuildOptions / BuildProfiles keys.  Either key may be
             # absent; absent → fall back to the global value at lookup time
@@ -2415,7 +2415,7 @@ class BuildConfig:
                     self.build_profiles_per_pkg[_pkg] = frozenset(
                         p.strip() for p in _pp.split(',') if p.strip())
 
-            # COMP-03: parallel source-build pool size, per-container
+            # parallel source-build pool size, per-container
             # resource caps, and heavy-package serialization list.
             # MaxParallelBuilds is capped at 8 to stay under docker-py's
             # default urllib3 pool size (10) — without the cap, parallel
@@ -2477,7 +2477,7 @@ class BuildConfig:
             self.security_disabled = config_parser.getboolean(
                 'Security', 'Disabled', fallback=False
             )
-            # SEC-05: opt-in build-dep audit gate.  When true, every
+            # opt-in build-dep audit gate.  When true, every
             # BuildContainer.build() runs `apt-get install --simulate` in a
             # transient container BEFORE the real install, captures the
             # resolved package set + versions, prints it to the operator,
@@ -2487,7 +2487,7 @@ class BuildConfig:
             self.audit_build_deps = config_parser.getboolean(
                 'Security', 'AuditBuildDeps', fallback=False
             )
-            # CONF-10 identity-residue scans (S1 + S3).  Default ON —
+            # identity-residue scans (S1 + S3).  Default ON —
             # rebrand drift at upstream-rebase time fails loud at build
             # time instead of silently on the installed system.  Set
             # false for dev iteration on intentionally-incomplete forks.
@@ -2496,7 +2496,7 @@ class BuildConfig:
             self.audit_identity_scan = config_parser.getboolean(
                 'Audit', 'IdentityScan', fallback=True
             )
-            # COMP-03 mutex: AuditBuildDeps is an interactive PROMPT_YESNO
+            # mutex: AuditBuildDeps is an interactive PROMPT_YESNO
             # inside BuildContainer.build() (buildcontainer.py:708).  Under
             # parallel workers, multiple prompts would collide on stdin.
             # Fail-closed at config load — these two are mutually exclusive.
@@ -2526,7 +2526,7 @@ class BuildConfig:
             self.dir_log = os.path.join(self.working_dir, config_parser.get('Directories', 'Log'))
             self.dir_cache = os.path.join(self.working_dir, config_parser.get('Directories', 'Cache'))
             self.dir_temp = os.path.join(self.working_dir, config_parser.get('Directories', 'Temp'))
-            # COMP-03 Phase 1: per-worker scratch repo dir.  Each
+            # per-worker scratch repo dir.  Each
             # BuildContainer.build() invocation creates
             # <dir_build_stage>/<uuid>/ and bind-mounts it as /repo
             # inside the build container, isolating one source's
@@ -2598,7 +2598,7 @@ class BuildConfig:
             self.dir_buildroot        = os.path.join(self.working_dir, config_parser.get('Directories', 'Chroot'))
             self.dir_chroot           = os.path.join(self.dir_buildroot, 'live')
             self.dir_chroot_installer = os.path.join(self.dir_buildroot, 'installer')
-            # SURFACES-01: the DISK image's own minimal chroot ([Disk]
+            # the DISK image's own minimal chroot ([Disk]
             # Groups closure) — decoupled from the live chroot so the two
             # surfaces can diverge (live = GNOME, disk = console).
             self.dir_chroot_disk      = os.path.join(self.dir_buildroot, 'disk')
@@ -2608,13 +2608,13 @@ class BuildConfig:
             self.dir_patch_preinstall = os.path.join(self.dir_patch, 'pre-install')
             self.dir_patch_postinstall = os.path.join(self.dir_patch, 'post-install')
             self.dir_patch_empty = os.path.join(self.dir_patch, 'empty')
-            # COMP-02 / MIRROR-01: staging tree for the minimal-publish
+            # / MIRROR-01: staging tree for the minimal-publish
             # workflow (pool/ + dists/).  Derived (not a [Directories]
             # entry) — regenerated by `repo index minimal`, intended as
             # the source tree for a future `mirror publish --minimal`.
             self.dir_publish = os.path.join(self.working_dir, 'publish')
 
-            # COORD-01: per-builder coordination tree.  Holds Ed25519
+            # per-builder coordination tree.  Holds Ed25519
             # claim keypair (identity/), this builder's append-only
             # claim journal (claims/), and a fetched/ cache of the
             # remote repo-coord/ tree (P2+).  Sibling of dir_publish;
@@ -2654,7 +2654,7 @@ class BuildConfig:
 
             pathlib.Path(self.dir_log).mkdir(parents=True, exist_ok=True)
 
-            # STA-53(d): five features write here (snapshot/selection/manifest/
+            # five features write here (snapshot/selection/manifest/
             # mirror state, api.key) — ensure + writability-check it like the rest.
             pathlib.Path(self.dir_config).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_cache).mkdir(parents=True, exist_ok=True)
@@ -2671,7 +2671,7 @@ class BuildConfig:
             ):
                 pathlib.Path(_sub).mkdir(parents=True, exist_ok=True)
 
-            # CONF-01 Stage D fix-up (2026-05-22): if any of the pre-
+            # fix-up (2026-05-22): if any of the pre-
             # Stage-D dir names exist at the repo root and are empty,
             # rmdir them.  Stage C's migration removed them once but
             # a pre-Stage-D version of this very block would have
@@ -2689,7 +2689,7 @@ class BuildConfig:
                     # condition shouldn't fail BuildConfig init.
                     pass
 
-            # CONF-01 Stage D fix-up: stale audit-Packages cache files
+            # fix-up: stale audit-Packages cache files
             # in dir_temp (pre-Stage-D filename shape: no path-hash
             # suffix).  These could serve empty cached packages
             # against the new (populated) layout until the operator
@@ -2720,7 +2720,7 @@ class BuildConfig:
 
             pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_publish).mkdir(parents=True, exist_ok=True)
-            # COORD-01: create coord/ + substructure.  identity/ is
+            # create coord/ + substructure.  identity/ is
             # mode 0700 so the private claim key isn't world-readable
             # (mirrors dir_gnupg's 0700 discipline).
             pathlib.Path(self.dir_coord).mkdir(parents=True, exist_ok=True)
@@ -2933,7 +2933,7 @@ def download_file(url: str, filename: str) -> tuple:
 
     import time as _time
 
-    progress_bar = None   # UX-08(b): one bar across all retries; closed in finally
+    progress_bar = None   # one bar across all retries; closed in finally
     try:
         name_strip: str = urlsplit(url).path.split('/')[-1].ljust(15, ' ')
 
@@ -2963,7 +2963,7 @@ def download_file(url: str, filename: str) -> tuple:
                     expected_size = max(head_size, get_size) or (1 << 20)
                     current_max  = expected_size
 
-                    # UX-08(b): build the bar ONCE; on a retry reuse + reset it
+                    # build the bar ONCE; on a retry reuse + reset it
                     # (set_max un-freezes via UX-08(a)) so each failed attempt
                     # doesn't leak a permanent widget row + its 10 Hz polling.
                     if progress_bar is None:
@@ -2992,7 +2992,7 @@ def download_file(url: str, filename: str) -> tuple:
                     # Final correction so the persisted display matches reality
                     # (in case the size hint over-reported and the bar stopped short).
                     progress_bar.set_max(bytes_written)
-                    return bytes_written, ''   # UX-08(b): bar closed in finally
+                    return bytes_written, ''   # bar closed in finally
 
             except (ConnectTimeout, ReadTimeout, RequestsConnectionError) as e:
                 if _attempt < _HTTP_RETRY_COUNT - 1:
@@ -3066,7 +3066,7 @@ def download_file(url: str, filename: str) -> tuple:
         logger.error(f"download_file({url}): {_detail}")
         return -1, _detail
     finally:
-        # UX-08(b): close the single bar on EVERY exit — success, retry
+        # close the single bar on EVERY exit — success, retry
         # exhaustion, or a propagated exception — not just the success path.
         if progress_bar is not None:
             progress_bar.close()

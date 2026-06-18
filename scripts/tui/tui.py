@@ -67,7 +67,7 @@ class Tui:
         self._banner = banner[:50]
         self._cmd_registry: Dict[str, Tuple[Callable[..., Any], str]] = {}
         self._exit_code = 0
-        # UX-05a: --yes auto-answer flag.  Set by build.py:main() from
+        # --yes auto-answer flag.  Set by build.py:main() from
         # argv.  Only consulted by `Prompt(..., informational=True)`
         # — hard prompts (sudo password, OPTIONS) always wait for
         # operator input regardless.

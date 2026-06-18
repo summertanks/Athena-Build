@@ -33,12 +33,12 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         self._config = config
         self._dir_image = config.dir_image
         self._dir_chroot = dir_chroot or config.dir_chroot
-        # STA-53(c): seed the per-instance chroot env now (no global os.environ
+        # seed the per-instance chroot env now (no global os.environ
         # mutation) so methods invoked directly always find it; build_chroot
         # refreshes it at install time.
         self._setup_chroot_env()
         self._dir_repo = config.dir_repo
-        # CONF-01 Stage D: the new apt-repo layout nests .debs under
+        # the new apt-repo layout nests .debs under
         # dists/<codename>/main/binary-<arch>/.  Mixins (chroot, dep-
         # drift) used to construct `repo/main/<deb>` paths inline; now
         # they read this attr instead.
@@ -72,7 +72,7 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
                 )
             _wipe_chroot = True
 
-        # UX-05b: sudo password.  Source order:
+        # sudo password.  Source order:
         #   1. $ATHENA_SUDO_PASSWORD env var (scripted / CI runs).  Pop'd
         #      from os.environ after read so it doesn't leak into child
         #      subprocesses or appear in /proc/<pid>/environ for the
@@ -107,7 +107,7 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         # rm -rf the contents (not the directory itself) so dir_chroot remains.
         if _wipe_chroot:
             tui.console.print("Wiping chroot...")
-            # STA-42: a SIGKILL'd / OOM-killed prior run can leave
+            # a SIGKILL'd / OOM-killed prior run can leave
             # <chroot>/dev still BIND-MOUNTED to the host's real /dev (same
             # inodes).  Two independent guards so the recursive wipe can
             # never delete host device nodes as root:
@@ -161,7 +161,7 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
             if not os.path.exists(_dir):
                 raise RuntimeError(f"Missing essential directory: {_dir}")
 
-        # UX-05b: same env-var pickup as the main constructor.
+        # same env-var pickup as the main constructor.
         import os as _os
         _env_pw = _os.environ.pop('ATHENA_SUDO_PASSWORD', None)
         if _env_pw is not None:

@@ -584,7 +584,7 @@ class RepoCommandsMixin(SessionState):
         _malformed: 'list[str]' = []
         _total = 0
 
-        # CONF-01 Stage E (2026-05-22): walk the apt indexes instead
+        # (2026-05-22): walk the apt indexes instead
         # of per-file DebFile opens.  repo_audit.iter_packages_all_versions
         # uses dpkg-scanpackages' cached --multiversion output and
         # parses it via apt_pkg.TagFile — same Source/Package/Size
@@ -592,7 +592,7 @@ class RepoCommandsMixin(SessionState):
         # parse instead of N×(fork+exec+tar-extract).  On a 5k-pkg
         # repo this is an order of magnitude faster.
         #
-        # UPD-01: group every on-disk artifact by (subdir, name, base, arch).
+        # group every on-disk artifact by (subdir, name, base, arch).
         # Within a group matching an EXPECTED base, keep only the HIGHEST
         # version (single-snapshot local) — a lower version (e.g. the pristine
         # predecessor of a freshly +asg<R>u<N>-stamped delta) is drift.  This
@@ -601,7 +601,7 @@ class RepoCommandsMixin(SessionState):
         # remote, so deleting it locally is safe (publish-before-prune).
         from collections import defaultdict
         _by_key: 'dict[tuple, list]' = defaultdict(list)
-        # STA-38: walk the build-output components via _STALE_SCAN_SUBDIRS
+        # walk the build-output components via _STALE_SCAN_SUBDIRS
         # (the same canon all_deb_dirs uses), NOT the narrower _REPO_SUBDIRS
         # that was missing `main-udeb` — so a superseded +asg<R>u<N> udeb in
         # main/debian-installer/ (our built e2fsprogs-udeb / keyring-udeb)
@@ -635,7 +635,7 @@ class RepoCommandsMixin(SessionState):
                 _by_key[(_sub, _file_key(_filename))].append(
                     (_filename, _ver, _src_name, _size))
 
-            # STA-38: recover the malformed bucket.  dpkg-scanpackages
+            # recover the malformed bucket.  dpkg-scanpackages
             # silently omits a .deb/.udeb it can't parse (truncated /
             # corrupt control), so any binary on disk in this subdir that
             # the index didn't emit is unscannable.  Diff on-disk files
@@ -827,7 +827,7 @@ class RepoCommandsMixin(SessionState):
         finally:
             _spin.done()
 
-        # STA-25: which obsolete targets still have a LIVE published claim on
+        # which obsolete targets still have a LIVE published claim on
         # a mirror?  `mirror publish` RELEASES every one of them automatically
         # — superseded versions get obsoleted (publish Step 6c), dropped
         # sources deprecated (Step 6b) — so the clean order is publish-before-
@@ -951,7 +951,7 @@ class RepoCommandsMixin(SessionState):
             )
             return
 
-        # STA-25: a dedicated publish-before-prune gate — when any target is
+        # a dedicated publish-before-prune gate — when any target is
         # still live on a mirror, require an explicit acknowledgement BEFORE
         # the generic delete prompt (the operator should normally
         # `mirror publish` the supersession first).
@@ -989,7 +989,7 @@ class RepoCommandsMixin(SessionState):
         _bar = ProgressBar(
             label='Cleanup', maxvalue=_n_to_delete, show_rate=False,
         )
-        # STA-38: resolve the on-disk dir from the SCANNED label `_sub`
+        # resolve the on-disk dir from the SCANNED label `_sub`
         # via deb_dir_for — the scan found the file in exactly that dir.
         # (The previous filename-derived routing defaulted component to
         # 'main', which mis-routed a non-free-firmware .deb to main/ →
