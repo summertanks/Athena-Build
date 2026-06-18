@@ -28954,6 +28954,46 @@ def test_generate_pending_claims_non_tunneled_record_carries_none():
         assert _pending[0].get('republished_from') is None
 
 
+def test_generate_pending_claims_skips_pulled_from_peer():
+    """A build record stamped `pulled_from` (pulled from a peer that owns it)
+    generates NO claim — we never take ownership of a peer's package on our
+    own publish (the reverse-sync footgun)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+
+    def _fake_read(_dir, _pkg):
+        return {
+            'package': 'foo', 'intended_version': '1.0',
+            'built_version': '1.0', 'phase': 'done',
+            'outputs': ['foo_1.0_all.deb'],
+            'output_hashes': {'foo_1.0_all.deb': 'd' * 64},
+            'pulled_from': {'mirror': 'm1', 'builder': 'bob'},
+            'finished': '2026-06-04T12:00:00Z',
+        }
+    with tempfile.TemporaryDirectory() as _td:
+        _log = os.path.join(_td, 'log')
+        os.makedirs(_log)
+        with open(os.path.join(_log, 'foo.build.json'), 'w') as _fh:
+            _fh.write('{}')
+        _claims = os.path.join(_td, 'claims')
+        os.makedirs(_claims)
+        _pending = _publish.generate_pending_claims(
+            builder_id='alice', buildlog_dir=_log, claims_dir=_claims,
+            public_key_path='/nonexistent.pub', snapshot_pin='S',
+            read_build_record=_fake_read)
+        assert _pending == [], _pending
+
+
+def test_build_mode_publish_implies_no_iso():
+    """Mode = build implies --no-iso (build peers don't build ISOs; the
+    mirror snapshot may lead any ISO snapshot)."""
+    with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_mirror.py')) as _f:
+        _src = _f.read()
+    assert "or _publish_mode == 'build'" in _src, \
+        "build mode must imply --no-iso in cmd_mirror_publish"
+
+
 def _new_pending_claim(builder: str, package: str, filename: str,
                        version: str, sha: str = 'f' * 64) -> dict:
     """Compact builder for filter_pending_by_ownership tests."""
@@ -36300,6 +36340,8 @@ def main() -> int:
         test_mirror_pull_write_build_records_empty_input_is_no_op,
         test_generate_pending_claims_threads_republished_from_per_output,
         test_generate_pending_claims_non_tunneled_record_carries_none,
+        test_generate_pending_claims_skips_pulled_from_peer,
+        test_build_mode_publish_implies_no_iso,
         test_mirror03_publish_hazard_gate_blocks_unsanctioned_local_ahead,
         test_filter_pending_by_ownership_no_existing_owner_keeps,
         test_filter_pending_by_ownership_own_claim_keeps,
