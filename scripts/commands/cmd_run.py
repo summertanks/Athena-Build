@@ -240,7 +240,7 @@ class ConfigRunCommandsMixin(SessionState):
 
     def cmd_auto_run_disk(self):
         """Run the full pipeline through to a pre-installed bootable qcow2
-        disk image (COMP-09).
+        disk image.
 
         The disk image is mastered from its OWN minimal chroot
         (buildroot/disk, the [Disk] Groups closure) — decoupled from the

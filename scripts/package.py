@@ -445,7 +445,7 @@ class Package(Packages):
             logger.warning(_msg)   # persist constraint faults to the log too
             return False
 
-    # ── UX-04 pickle support ────────────────────────────────────────────
+    # ── pickle support ────────────────────────────────────────────
     # Replay field-by-field on load so Deb822's internal OrderedSet (with
     # weakref __keys) is reconstructed fresh rather than serialised.  Drop
     # the Deb822-internal attributes (_Deb822Dict__*, _PkgRelationMixin__*
@@ -724,7 +724,7 @@ class Source(Sources):
             return group
         return [(_p, _ver, _op) for _p in _providers] + [(_name, _ver, _op)]
 
-    # ── UX-04 pickle support ────────────────────────────────────────────
+    # ── pickle support ────────────────────────────────────────────
     # Source uses raw_text-based restore rather than field replay because
     # its multi-valued fields (Files, Checksums-Sha256, Build-Depends) come
     # back from python-debian as wrappers whose internal lists carry

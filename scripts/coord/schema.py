@@ -34,18 +34,18 @@ from typing import Any, Dict, Iterable, Optional
 # Pinned at v1; bump on any breaking field change.  Readers tolerate
 # unknown future keys (preserve in dict; ignore semantics they don't
 # know).  Removing a key is a v2.
-# v1 → v2 (SELECT-LOCK): adds claim_state 'deprecated' + the optional
+# v1 → v2: adds claim_state 'deprecated' + the optional
 # `deprecates_seq` field.  Back-compat: claim_from_jsonl never compares `v`,
 # so v2 PUBLISHED/PENDING/RETRACTED lines parse on a v1 reader unchanged; only
 # a 'deprecated' line is rejected by a v1 reader (unknown state → None), which
 # is a SAFE degrade — the v1 peer keeps treating the file as owned/published
 # (stale, not corrupt) until it upgrades.
-# v2 → v3 (LEDGER-01): adds claim_state 'obsolete' + the optional
+# v2 → v3: adds claim_state 'obsolete' + the optional
 # `obsoletes_seq` field — a version-superseded marker the owner stamps on
 # their own older-version claims at publish (Step 6c).  Same degrade: a v2
 # peer rejects only the 'obsolete' lines and keeps treating the old file as
 # published — stale, not corrupt, until it upgrades.
-# v3 → v4 (RECLAIM-01): adds the optional `reclaims_seq` field on a normal
+# v3 → v4: adds the optional `reclaims_seq` field on a normal
 # 'published' claim — the sanctioned exception to the INVARIANT that a
 # published filename's bytes are frozen forever.  A reclaim is a NEW live
 # claim for the SAME filename with a NEW sha256 (same-version rebuild:
@@ -60,13 +60,13 @@ from typing import Any, Dict, Iterable, Optional
 # upgrade BEFORE the federation's first reclaim.
 CLAIM_RECORD_SCHEMA_VERSION = 4
 COORD_HEAD_SCHEMA_VERSION = 3
-# v1 → v2 (MIRROR-01 Phase 2): adds `neighbours: list[str]` — the
+# v1 → v2: adds `neighbours: list[str]` — the
 # federation membership list (every mirror's coord-head carries the
 # canonical URL set, signed by tier-1 GPG).  v1 readers tolerate a
 # missing field as an empty list; the federation-gate at publish time
 # treats empty-from-v1 as "no peers known" and uses the local config
 # as the source of truth on first contact.
-# v2 → v3 (MIRROR-01 Phase 7): `neighbours` becomes a list of
+# v2 → v3: `neighbours` becomes a list of
 # per-peer records: ``[{url, public_url, public_proto}, ...]``.  Lets a
 # heterogeneous federation (peer A serves https, peer B serves http;
 # peers under different DNS shapes) round-trip the apt-readable URL
@@ -83,14 +83,14 @@ SNAPSHOT_STATE_SCHEMA_VERSION = 1
 # see it until the next reindex+sign.  `published` is the steady
 # state.  `retracted` is a signed tombstone — only the owner can
 # write it; references the seq of the claim being retracted.
-# `deprecated` (SELECT-LOCK) — the owner published this file but the
+# `deprecated` — the owner published this file but the
 # package is no longer in their selection (dropped via `cache select`).
 # UNLIKE retracted (a tombstone that strips the file's metadata), a
 # deprecated claim KEEPS the filename/sha/size so the .deb stays
 # resolvable in the pool — it just RELEASES ownership: project_owners
 # reports builder=None (like a tunneled claim), so any other builder may
 # take the file over by republishing.  References `deprecates_seq`.
-# `obsolete` (LEDGER-01) — this exact file (an OLD version) has been
+# `obsolete` — this exact file (an OLD version) has been
 # superseded by a newer version of the same binary published by the SAME
 # owner.  Natural aging, not abandonment: ownership is RETAINED
 # (project_owners keeps the builder, unlike deprecated), the file stays
@@ -284,7 +284,7 @@ def new_deprecation(
     component: str = 'main',
 ) -> dict:
     """A signed ownership-release for a file the builder published but no
-    longer selects (SELECT-LOCK).  `deprecates_seq` is the seq of the prior
+    longer selects.  `deprecates_seq` is the seq of the prior
     published claim.
 
     Unlike `new_retraction` (a stripped tombstone), a deprecation KEEPS the
@@ -327,7 +327,7 @@ def new_obsolescence(
     obsoletes_seq: int,
     component: str = 'main',
 ) -> dict:
-    """A version-superseded marker (LEDGER-01) the owner stamps on their
+    """A version-superseded marker the owner stamps on their
     OWN older-version claim when a newer version of the same binary is
     published.  `obsoletes_seq` is the seq of the superseded published
     claim (erased in the fold, this record stands in its place).

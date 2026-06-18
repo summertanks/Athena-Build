@@ -8,7 +8,7 @@ strips, ``+asg<R>u<N>`` stamps, per-file hash + size, and timing.
 
 This is SEPARATE from the two existing artifacts:
   * ``log/build/<pkg>``            — raw container stdout/stderr stream
-  * ``log/build/<pkg>.build.json`` — structured machine record (OBS-01)
+  * ``log/build/<pkg>.build.json`` — structured machine record
 The new file is ``log/build/<pkg>.buildlog`` — the narrative an operator
 reads to understand the whole workflow end to end.
 

@@ -618,7 +618,7 @@ class Cache:
                 if _pkg.arch != 'all' and self._arch_table.matches_architecture(_pkg.arch, arch) is False:
                     continue
 
-                # Fork supersede check (FORK-01 Step 2): tracks only the
+                # Fork supersede check: tracks only the
                 # binary Package: name, NOT Provides:.  Operator must
                 # declare needed virtuals explicitly in fork debian/control.
                 if _is_fork:
@@ -1005,7 +1005,7 @@ class Cache:
         """
         return UdebCacheView(self)
 
-    # ── UX-04 pickle support ────────────────────────────────────────────
+    # ── pickle support ────────────────────────────────────────────
     # Drop the non-picklable bits and flatten lambda-factory defaultdicts.
     # Restored to original shape on __setstate__.  _arch_table (DpkgArchTable
     # from python-debian) carries C-extension state that doesn't round-trip

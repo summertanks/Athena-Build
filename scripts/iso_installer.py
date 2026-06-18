@@ -757,8 +757,7 @@ def _parse_deb_filename(filename: str) -> tuple:
     For files that don't match (e.g. `Packages.gz` accidentally in
     pool/), returns `('', '')` so the caller can skip them.
 
-    Thin decoding wrapper over the shared `utils.parse_deb_filename`
-    (ARCH-19): that splitter returns the RAW version; here we decode the
+    Thin decoding wrapper over the shared `utils.parse_deb_filename`: that splitter returns the RAW version; here we decode the
     `%3a` epoch into the control-file form callers expect.
     """
     _r = utils.parse_deb_filename(filename)

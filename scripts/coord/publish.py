@@ -12,7 +12,7 @@ Two entry points:
                    → release flock.
 
 `remote_publish` push the .deb pool per-file as part of the same
-transaction (MIRROR-01 Phase 3b): each pending claim's binary lands
+transaction: each pending claim's binary lands
 on the remote pool before its claim line is appended, so a partial
 publish leaves a consistent view.  When `pool_remote_spec` is None
 (legacy callers), pool push is skipped and the operator is expected
@@ -617,7 +617,7 @@ def remote_publish(
     """11-step publish transaction (see module docstring).  Returns
     (ok, detail).  On failure detail explains the step that aborted.
 
-    `reclaim_intents` (RECLAIM-01) — operator-resolved
+    `reclaim_intents` — operator-resolved
     `mirror.local_ahead_candidates` rows from `mirror reclaim`; each is
     re-validated against the just-fetched remote view
     (validate_reclaim_intents) and, when still sound, rides the normal
@@ -643,7 +643,7 @@ def remote_publish(
         is preserved verbatim so heterogeneous-proto peers round-trip;
         v2 strings auto-promote to records with empty meta)
 
-    `pool_remote_spec` (MIRROR-01 Phase 3b): when set, the rsync target
+    `pool_remote_spec`: when set, the rsync target
     for the apt POOL root (sibling of the coord root on the mirror
     host).  For each pending claim whose .deb is on the local pool,
     push that .deb per-file BEFORE writing its claim.  Files that fail
@@ -652,7 +652,7 @@ def remote_publish(
     survives only for unit-test fakes that exercise the sidecar layer
     in isolation.
 
-    `on_progress` callback (MIRROR-01 Phase 3b): invoked once per .deb
+    `on_progress` callback: invoked once per .deb
     push attempt as `on_progress(current, total, filename, ok)`.  Caller
     drives a tui.ProgressBar from this.  Optional; no-op when omitted.
 

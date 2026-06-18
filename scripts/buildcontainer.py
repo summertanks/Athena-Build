@@ -835,7 +835,7 @@ class BuildContainer:
         # `_m.url = {baseurl}/{baseid}`) so a CUSTOM snapshot mirror still
         # pins.  Hardcoding snapshot.debian.org silently dropped the pin to
         # Priority 500 on any non-default mirror, re-opening the 2026-05-23
-        # downgrade-refusal loop (STA-51).  Distinct from the Origin: header
+        # downgrade-refusal loop.  Distinct from the Origin: header
         # inside InRelease (`Origin: Debian` / `Origin: Debian-Security`).
         # This pin is broad — every pkg from that host wins.
         _snap_host = (
@@ -1004,7 +1004,7 @@ class BuildContainer:
         # vars below propagate the right values into dpkg-buildpackage.
         _deb_build_opts     = ' '.join(sorted(_active_options))
         _deb_build_profiles = ' '.join(sorted(_active_profiles))
-        # ATHENA_CODENAME (FORK-01 Step 4): forks under fork/source/ that
+        # ATHENA_CODENAME: forks under fork/source/ that
         # need to substitute the distribution codename into shipped files
         # (lsb-release, default-release, debootstrap script symlinks) read
         # this in their debian/rules via $(ATHENA_CODENAME).  Sourced from
@@ -1359,7 +1359,7 @@ class BuildContainer:
                 #    the suffix rule.  Done BEFORE strip so the strip's
                 #    in-place rewrites land at the final location.
                 #    Returns post-move absolute paths — fed to strip so
-                #    we don't rescan the whole repo (STA-19).
+                #    we don't rescan the whole repo.
                 # snapshot what dpkg-buildpackage actually emitted
                 # into scratch BEFORE segregate moves it out — the ground
                 # truth of "files emitted", with sizes.  Best-effort.

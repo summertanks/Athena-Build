@@ -436,7 +436,7 @@ def parse_packages_to_ledger(packages_path: str) -> 'dict[str, list[str]]':
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Local signed published-manifest (UPD-01) — a Packages-format mirror of what's
+# Local signed published-manifest — a Packages-format mirror of what's
 # published, the AUTHORITY for +asg bump numbers and offline merge-index.  When
 # external is enabled it mirrors the remote; when disabled it's the only record.
 # Durable (config/), gitignored, signed with the project key for integrity.

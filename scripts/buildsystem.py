@@ -26,7 +26,7 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
     def __init__(self, dependency_tree: dependencytree.DependencyTree,
                  config: BuildConfig,
                  dir_chroot: 'str | None' = None):
-        """`dir_chroot` (SURFACES-01): override the chroot target dir —
+        """`dir_chroot`: override the chroot target dir —
         the disk surface builds into config.dir_chroot_disk while the
         live surface keeps the default config.dir_chroot."""
         self._dependencytree = dependency_tree

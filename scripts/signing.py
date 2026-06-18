@@ -224,7 +224,7 @@ def generate_key(config, _key_length: int = 4096) -> bool:
         f'Name-Real: {_parse_uid_name(uid)}\n'
         f'Name-Email: {_parse_uid_email(uid)}\n'
         # Expire-Date: 0 = never expires.  Rotation is manual via
-        # `generate_signing_key force` once docs/release.md (DOC-04)
+        # `generate_signing_key force` once docs/release.md
         # documents the procedure.
         'Expire-Date: 0\n'
         '%commit\n'

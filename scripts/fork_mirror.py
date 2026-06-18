@@ -861,7 +861,7 @@ def _write_release(dir_fork: str, codename: str,
         fh.write('\n')
 
 
-# ── CONF-11 fork-tree internal completeness audit ─────────────────────────
+# ── fork-tree internal completeness audit ─────────────────────────
 
 # `install` short-flags that take a separate value as the next token.  All
 # others are no-arg flags.  Used by `_scan_install_sources` to walk past
@@ -951,7 +951,7 @@ def audit_fork_tree(pkg_dir: str) -> 'List[Dict[str, str]]':
     `packages/list` class of bug at cache-build time rather than deep
     inside a failed `dpkg-buildpackage`.
 
-    Design note (CONF-11): a `debian/<binary>.install` audit was
+    Design note: a `debian/<binary>.install` audit was
     considered + dropped because dh_install runs AFTER the build target,
     so `.install` legitimately references built binaries and generated
     debian/* files.  Static-time existence check would false-positive on

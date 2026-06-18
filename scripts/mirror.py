@@ -656,8 +656,7 @@ def add_mirror(
     typically the caller passes the local snapshot's current pin so the
     mirror starts at parity.
 
-    `host` / `host_type` / `public_proto` / `public_url` (MIRROR-01
-    Phase 6) record the operator-supplied split the new `cmd_mirror_add`
+    `host` / `host_type` / `public_proto` / `public_url` record the operator-supplied split the new `cmd_mirror_add`
     flow derives: rsync target URL (`url`), DNS-resolvable host (`host`)
     + its kind (`ip`/`fqdn`/`local`), apt read protocol (`public_proto`),
     and the canonical apt URL the chroot's

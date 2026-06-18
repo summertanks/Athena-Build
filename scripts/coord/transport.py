@@ -147,7 +147,7 @@ def push_single_deb(
     semantics so MIRROR-01 Phase 3b can tick a ProgressBar one notch
     per .deb and report failures precisely.
 
-    overwrite=True (RECLAIM-01): drop --ignore-existing so the
+    overwrite=True: drop --ignore-existing so the
     transfer REPLACES the remote bytes — used exclusively for reclaim
     claims, the sanctioned exception to filename immutability (the
     remote file exists by definition and skipping it would publish a
@@ -279,7 +279,7 @@ def push_dist_tree(
     _src = local_dist_dir.rstrip('/') + '/'
     _dst = remote_dir_spec.rstrip('/') + '/'
     # EXCLUDE pool artifacts (not merely `--filter=P` protect).
-    # The pool .debs live INSIDE dists/<codename>/ (CONF-01 Stage D), so
+    # The pool .debs live INSIDE dists/<codename>/, so
     # this whole-subtree rsync would otherwise touch them.  A `--filter=P`
     # only stops receiver-side DELETION — rsync -aH still TRANSFERS/
     # overwrites any .deb whose size/mtime differs, so a local-ahead
