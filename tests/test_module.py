@@ -383,6 +383,153 @@ def test_write_local_conf_round_trips():
         assert _p2.get('Registration', 'beta') == 'builder-y'
 
 
+class _FakeOnbSession:
+    """Minimal session for onboarding tests: a config with a tmp config_path
+    (so write_local_conf lands in the tmp dir) + the federation methods the
+    wizard calls, recording invocations."""
+    def __init__(self, tmp, *, self_keys=('bid-1', 'priv', 'pub'),
+                 cmd_mirror_ret=True, cmd_key_ret=True):
+        class _Cfg:
+            pass
+        self.config = _Cfg()
+        self.config.config_path = os.path.join(tmp, 'build.conf')
+        self.config.build_mode = 'distribution'
+        self.config.setup_complete = False
+        self._self_keys = self_keys
+        self._cmd_mirror_ret = cmd_mirror_ret
+        self._cmd_key_ret = cmd_key_ret
+        self.mirror_calls: 'list' = []
+        self.key_calls: 'list' = []
+        self.snap_called = False
+
+    def _coord_self_keys(self):
+        return self._self_keys
+
+    def cmd_mirror(self, *args):
+        self.mirror_calls.append(args)
+        return self._cmd_mirror_ret
+
+    def cmd_key(self, *args):
+        self.key_calls.append(args)
+        return self._cmd_key_ret
+
+    def _ensure_snapshot_pins(self):
+        self.snap_called = True
+
+
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def _onboarding_patched(answers, *, verify_ok):
+    """Patch onboarding.Prompt (scripted answers), signing.verify_key, and
+    console.print for the duration of a wizard run; restore after."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    _seq = list(answers)
+    _printed: 'list[str]' = []
+
+    class _P:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_response(self):
+            return _seq.pop(0) if _seq else ''
+
+    _saved = (onboarding.Prompt, onboarding.signing.verify_key,
+              onboarding.console.print)
+    onboarding.Prompt = _P
+    onboarding.signing.verify_key = lambda cfg: (verify_ok, 'stub')
+    onboarding.console.print = lambda *a, **k: _printed.append(
+        str(a[0]) if a else '')
+    try:
+        yield _printed
+    finally:
+        (onboarding.Prompt, onboarding.signing.verify_key,
+         onboarding.console.print) = _saved
+
+
+def test_needs_onboarding_guards():
+    """LOCAL-CONF/onboarding: the wizard runs ONLY for an interactive,
+    not-yet-set-up box — every non-interactive signal and a set-up box skip
+    it."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+
+    class _C:
+        setup_complete = False
+    _c = _C()
+    _base = {'headless': False, 'api': False, 'one_shot': False,
+             'auto_yes': False}
+    assert onboarding.needs_onboarding(_c, **_base) is True
+    for _kw in ('headless', 'api', 'one_shot', 'auto_yes'):
+        _k = dict(_base)
+        _k[_kw] = True
+        assert onboarding.needs_onboarding(_c, **_k) is False, _kw
+    _c.setup_complete = True
+    assert onboarding.needs_onboarding(_c, **_base) is False
+
+
+def test_onboarding_first_system_declines_mirror():
+    """First/origin: mode forced to distribution, mirror declined → setup
+    completes with Role=first and no mirror calls."""
+    import onboarding
+    import utils
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess = _FakeOnbSession(_tmp)
+        # role=first, enable-mirror=n
+        with _onboarding_patched(['first', 'n'], verify_ok=True):
+            onboarding.run_onboarding(_sess)
+        _p = utils.read_local_conf(_sess.config)
+        assert _p.get('Local', 'Role') == 'first'
+        assert _p.get('Local', 'Mode') == 'distribution'
+        assert _p.getboolean('Local', 'SetupComplete') is True
+        assert _sess.mirror_calls == []
+        assert _sess.snap_called is True
+
+
+def test_onboarding_federation_happy_path_registers_and_records():
+    """Federation peer: verified tier-1 key → mirror add + register, mode
+    choice, and the registration marker recorded in local.conf."""
+    import onboarding
+    import utils
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess = _FakeOnbSession(_tmp, self_keys=('wsl-peer-1', 'k', 'k.pub'))
+        _answers = ['federation', 'origin', 'ip',
+                    'ssh://u@h/asgard', 'config/k.key', 'https', 'build']
+        with _onboarding_patched(_answers, verify_ok=True):
+            onboarding.run_onboarding(_sess)
+        # mirror add carried name/ssh-key/proto; register ran for 'origin'.
+        assert ('add', 'ip', 'ssh://u@h/asgard', '--name', 'origin',
+                '--ssh-key', 'config/k.key', '--proto', 'https') \
+            in _sess.mirror_calls
+        assert ('builders', 'register', 'origin') in _sess.mirror_calls
+        _p = utils.read_local_conf(_sess.config)
+        assert _p.get('Local', 'Role') == 'federation'
+        assert _p.get('Local', 'Mode') == 'build'
+        assert _p.getboolean('Local', 'SetupComplete') is True
+        assert _p.get('Registration', 'origin') == 'wsl-peer-1'
+        assert _sess.config.build_mode == 'build'
+
+
+def test_onboarding_federation_aborts_without_tier1_key():
+    """Federation peer: tier-1 key not usable → abort BEFORE any mirror call;
+    setup is NOT marked complete (re-prompts next launch)."""
+    import onboarding
+    import utils
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess = _FakeOnbSession(_tmp)
+        with _onboarding_patched(['federation'], verify_ok=False):
+            onboarding.run_onboarding(_sess)
+        assert _sess.mirror_calls == []
+        assert _sess.snap_called is False
+        _p = utils.read_local_conf(_sess.config)
+        # SetupComplete never written → reads False.
+        assert _p.getboolean('Local', 'SetupComplete', fallback=False) is False
+
+
 def test_print_state_shows_mode_header():
     """MIRROR-02 chunk 6b: `print state` surfaces the active build
     mode at the top of the output.  In build mode the line also shows
@@ -26870,8 +27017,14 @@ def _build_session_for_setget(_tmp):
         # _set_mode persists to config/local.conf alongside build.conf;
         # point config_path into the tmp dir so the write lands there.
         config_path = os.path.join(_tmp, 'build.conf')
+        # Registered federation peer — the default context so `set mode build`
+        # passes the Phase-3 gate (first-system / unregistered refusals have
+        # their own dedicated tests).
+        system_role = 'federation'
     _sess.config = _Cfg()
     _sess.flags = MagicMock(dep_check_ready=True)
+    import utils as _utils
+    _utils.write_local_conf(_sess.config, registration={'origin': 'bid-1'})
     return _sess, _build_mod
 
 
@@ -26958,6 +27111,44 @@ def test_cmd_set_mode_persists_to_local_conf():
         assert 'config/local.conf' in '\n'.join(_printed)
         # build.conf must NOT have been created/touched by the switch.
         assert not os.path.isfile(os.path.join(_tmp, 'build.conf'))
+
+
+def test_cmd_set_mode_build_refused_on_first_system():
+    """Phase-3 gate: a FIRST/origin system cannot switch to build mode —
+    build needs a published baseline it can't itself be."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess, _build_mod = _build_session_for_setget(_tmp)
+        _sess.config.system_role = 'first'          # override default
+        _printed: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
+        _sess.cmd_set('mode', 'build')
+        assert _sess.config.build_mode == 'distribution'   # unchanged
+        _joined = '\n'.join(_printed)
+        assert 'cannot switch to build mode' in _joined
+        assert 'FIRST/origin' in _joined
+
+
+def test_cmd_set_mode_build_refused_when_unregistered():
+    """Phase-3 gate: build mode requires a federation [Registration] marker;
+    an un-registered box stays in distribution."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess, _build_mod = _build_session_for_setget(_tmp)
+        _sess.config.system_role = ''               # un-onboarded
+        # Drop the registration marker the helper wrote.
+        os.remove(os.path.join(_tmp, 'local.conf'))
+        _printed: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
+        _sess.cmd_set('mode', 'build')
+        assert _sess.config.build_mode == 'distribution'
+        _joined = '\n'.join(_printed)
+        assert 'cannot switch to build mode' in _joined
+        assert 'register' in _joined.lower()
 
 
 def test_cmd_set_mode_invalid_value_keeps_old_value():
@@ -35675,6 +35866,10 @@ def main() -> int:
         test_local_conf_absent_falls_back_to_build_conf,
         test_local_conf_malformed_invalidates_config,
         test_write_local_conf_round_trips,
+        test_needs_onboarding_guards,
+        test_onboarding_first_system_declines_mirror,
+        test_onboarding_federation_happy_path_registers_and_records,
+        test_onboarding_federation_aborts_without_tier1_key,
         test_parse_build_pkg_list_strips_comments_dedups_preserves_order,
         test_print_state_shows_mode_header,
         test_cmd_auto_run_dispatch_routes_build_mode,
@@ -36668,6 +36863,8 @@ def main() -> int:
         test_cmd_get_named_param_returns_current_value,
         test_cmd_set_mode_switches_value_and_warns_to_re_run_cache_parse,
         test_cmd_set_mode_persists_to_local_conf,
+        test_cmd_set_mode_build_refused_on_first_system,
+        test_cmd_set_mode_build_refused_when_unregistered,
         test_cmd_set_mode_invalid_value_keeps_old_value,
         test_cmd_set_mode_same_value_is_noop_when_dep_check_ready,
         test_cmd_set_mode_same_value_surfaces_parse_hint_when_not_parsed,

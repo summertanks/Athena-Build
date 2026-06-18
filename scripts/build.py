@@ -1537,6 +1537,26 @@ def main(banner: str) -> None:
         import print_commands as _pc
         tui_inst.set_status_provider(lambda: _pc.status_lines(session))
 
+    # First-run onboarding: establish system role (first vs federation peer),
+    # enforce the federation registration handshake, pick mode + snapshot pin,
+    # and record it in config/local.conf — BEFORE the banner so it reflects the
+    # chosen mode.  Interactive + not-yet-set-up only; headless / --cmd / --api
+    # / --yes runs skip it entirely (see onboarding.needs_onboarding).
+    import onboarding
+    if onboarding.needs_onboarding(
+            config, headless=_headless, api=_api,
+            one_shot=bool(_one_shot_cmds), auto_yes=_auto_yes):
+        onboarding.run_onboarding(session)
+        # The wizard may have switched to build mode; the [build] footer tag
+        # was applied (1485) under the pre-onboarding mode, so re-apply it.
+        if (not _headless
+                and getattr(config, 'build_mode', 'distribution') == 'build'
+                and hasattr(tui_inst, 'dispatcher')):
+            try:
+                tui_inst.dispatcher.state.banner = (f"{banner} [build]")[:50]
+            except AttributeError:
+                pass
+
     console.print(asciiart_logo, tui.COLOR_ERROR)
     console.print("Starting Athena Build System...", tui.COLOR_HIGHLIGHT)
     console.print(f"\tArch\t\t\t{config.arch}")

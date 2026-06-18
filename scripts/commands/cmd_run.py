@@ -26,6 +26,26 @@ class ConfigRunCommandsMixin(SessionState):
     # set / get — session-local config parameter manipulation
     # ─────────────────────────────────────────────────────────────────
 
+    def _build_mode_block_reason(self) -> Optional[str]:
+        """Why this box may NOT enter build mode, or None if it may.
+
+        Two rules, mirroring onboarding + the publish-time gate
+        (cmd_mirror first-publish refusal): a FIRST/origin system stays in
+        distribution (build mode needs a published baseline it can't itself
+        be), and any peer must be federation-registered first — a
+        [Registration] marker in config/local.conf, written once
+        registration succeeds."""
+        if getattr(self.config, 'system_role', '') == 'first':
+            return ("a FIRST/origin system stays in distribution mode "
+                    "(build mode needs a published baseline from an origin)")
+        _local = utils.read_local_conf(self.config)
+        if not (_local.has_section('Registration')
+                and _local.options('Registration')):
+            return ("register to a mirror first (run setup or "
+                    "`mirror builders register`) — build mode publishes a "
+                    "subset that only an already-bootstrapped mirror accepts")
+        return None
+
     def _set_mode(self, value: str) -> None:
         """`set mode <distribution|build>` — switch build mode in
         the running session.  Clears dep_check_ready so the next
@@ -39,6 +59,13 @@ class ConfigRunCommandsMixin(SessionState):
                 f"  invalid mode: {value!r}  (try: {' | '.join(_valid)})",
                 tui.COLOR_ERROR)
             return
+        if value == 'build':
+            _block = self._build_mode_block_reason()
+            if _block is not None:
+                console.print(
+                    f"  cannot switch to build mode: {_block}",
+                    tui.COLOR_ERROR)
+                return
         if self.config.build_mode == value:
             console.print(f"  mode already = {value}", tui.COLOR_INFO)
             # Operator may have re-typed this to confirm state.

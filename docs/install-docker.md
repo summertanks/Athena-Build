@@ -78,8 +78,13 @@ Setup:
    ```bash
    docker info        # should print the Docker Desktop engine, no sudo
    ```
-3. Set `[Build] Mode = build` in `config/build.conf` and populate
-   `config/build_pkg.list` with the packages this peer owns.
+3. On the **first launch**, the onboarding wizard runs (see "First-run
+   onboarding" in `docs/mirror-setup.md`): pick **federation peer**, let it
+   validate the tier-1 key + register to the mirror, then choose **build**
+   mode.  Mode and registration are stored in the untracked
+   `config/local.conf` — *not* `build.conf` — so they never leak through git.
+   Populate `config/build_pkg.list` with the packages this peer owns.
+   (Build mode is refused until the peer has registered to a mirror.)
 
 On startup Athena-Build logs the connected Docker endpoint + engine identity
 so you can confirm it's the host Docker Desktop daemon (shared via WSL
