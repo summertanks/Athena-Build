@@ -367,16 +367,21 @@ class ConfigRunCommandsMixin(SessionState):
                 f"\nbuild history: {_pkg} — {len(_runs)} run(s), "
                 f"{_pass} pass / {len(_runs) - _pass} fail ({_rate}%)\n",
                 tui.COLOR_HIGHLIGHT)
-            console.print(f"  {'ts':<22}{'status':<8}{'version':<20}elapsed")
+            console.print(f"  {'ts':<22}{'status':<8}{'version':<20}"
+                          f"{'elapsed':<11}{'peakRSS':<10}cpu%")
             for _r in _runs[-20:][::-1]:
                 _el = _r.get('elapsed_seconds')
+                _rss = _r.get('peak_rss_mb')       # OBS-03
+                _cpu = _r.get('peak_cpu_pct')
                 _color = (tui.COLOR_ERROR if _r.get('status') == 'FAIL'
                           else tui.COLOR_NORMAL)
                 console.print(
                     f"  {str(_r.get('ts', '-')):<22}"
                     f"{str(_r.get('status', '-')):<8}"
                     f"{str(_r.get('version') or '-'):<20}"
-                    f"{('-' if _el is None else f'{_el}s')}", _color)
+                    f"{('-' if _el is None else f'{_el}s'):<11}"
+                    f"{('-' if _rss is None else f'{_rss}MB'):<10}"
+                    f"{('-' if _cpu is None else _cpu)}", _color)
             return
 
         # No package → per-package aggregate, flakiest first.

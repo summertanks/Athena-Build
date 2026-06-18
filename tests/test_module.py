@@ -26258,14 +26258,18 @@ def test_build_record_schema_v3_field_set():
     added `pulled_from` (provenance for mirror-pulled records) and
     `component` (apt component of the source's origin mirror, so the
     audit / mirror-pull / publish layers don't have to re-derive it
-    from the dep tree)."""
+    from the dep tree).
+
+    v4→v5 (OBS-03): added `resources` (None at entry; populated at the
+    container_exited phase with {peak_rss_bytes, peak_rss_mb,
+    mem_limit_bytes, peak_cpu_pct, samples} from the per-build poll)."""
     _u = _utils_module()
     _rec = _u.new_build_record(
         package='libwmf', intended_version='0.2.12-5.1',
         patch_set_hash='abc123', started='2026-06-02T14:00:00Z',
     )
-    assert _u.BUILD_RECORD_SCHEMA_VERSION == 4
-    assert _rec['schema_version'] == 4
+    assert _u.BUILD_RECORD_SCHEMA_VERSION == 5
+    assert _rec['schema_version'] == 5
     _required = {
         'schema_version', 'package', 'intended_version', 'built_version',
         'patch_set_hash', 'phase', 'status', 'started', 'finished',
@@ -26273,9 +26277,10 @@ def test_build_record_schema_v3_field_set():
         'output_hashes',
         'republished_from', 'pulled_from', 'component',
         'lifecycle_v', 'history',   # LEDGER-01 v4 baseline
+        'resources',                # OBS-03 v5
     }
     assert set(_rec.keys()) == _required, (
-        f"v4 schema drift: {set(_rec.keys()) ^ _required}")
+        f"v5 schema drift: {set(_rec.keys()) ^ _required}")
     assert _rec['phase'] == 'entry'
     assert _rec['status'] is None
     assert _rec['republished_from'] == {}
@@ -26283,6 +26288,36 @@ def test_build_record_schema_v3_field_set():
     assert _rec['component'] == 'main'  # default when not specified
     assert _rec['outputs'] == []
     assert _rec['output_hashes'] == {}
+    assert _rec['resources'] is None
+
+
+def test_obs03_container_cpu_pct_and_sampler_wired():
+    """OBS-03: CPU% from the cpu_stats-vs-precpu_stats delta of one
+    stats(stream=False) reading; None when not computable.  And build() wires
+    the sampler + stamps `resources` at the container_exited phase + stops the
+    poller on every exit path."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import buildcontainer as _bc
+    # cpu_delta=1000, system_delta=5000, 4 cpus → (1000/5000)*4*100 = 80%
+    assert _bc._container_cpu_pct({
+        'cpu_stats': {'cpu_usage': {'total_usage': 2000},
+                      'system_cpu_usage': 10000, 'online_cpus': 4},
+        'precpu_stats': {'cpu_usage': {'total_usage': 1000},
+                         'system_cpu_usage': 5000}}) == 80.0
+    # zero system delta → not computable
+    assert _bc._container_cpu_pct({
+        'cpu_stats': {'cpu_usage': {'total_usage': 1}, 'system_cpu_usage': 5},
+        'precpu_stats': {'cpu_usage': {'total_usage': 1},
+                         'system_cpu_usage': 5}}) is None
+    # malformed payload → None (never raises)
+    assert _bc._container_cpu_pct({}) is None
+    # build() wiring: sampler started, peaks stamped, poller stopped in finally
+    _src = inspect.getsource(_bc.BuildContainer.build)
+    assert '_sample_resources' in _src
+    assert 'resources=_resources' in _src
+    assert '_res_stop.set()' in _src
 
 
 def test_build_record_hmac_round_trip():
@@ -27787,7 +27822,7 @@ def test_backfill_output_hashes_upgrades_v1_record():
         # Verify the upgraded record.
         _rec = _u.read_build_record(_log, 'libfoo')
         assert _rec is not None
-        assert _rec['schema_version'] == 4
+        assert _rec['schema_version'] == 5
         import hashlib as _hashlib
         _h1 = _hashlib.sha256(b'fake-deb-1').hexdigest()
         _h2 = _hashlib.sha256(b'fake-deb-2').hexdigest()
@@ -27833,7 +27868,7 @@ def test_backfill_output_hashes_reports_missing_files():
         assert _stats['upgraded'] == 1
         _rec = _u.read_build_record(_log, 'ghost')
         assert _rec is not None
-        assert _rec['schema_version'] == 4
+        assert _rec['schema_version'] == 5
         assert _rec['output_hashes'] == {}  # nothing on disk to hash
         assert _rec['republished_from'] == {}  # MIRROR-02 v3 default
         assert _rec['pulled_from'] is None    # MIRROR-02 v3 default
@@ -36026,6 +36061,7 @@ def main() -> int:
         test_render_failure_capture_no_op_on_success,
         # OBS-01 canonical signed build record
         test_build_record_schema_v3_field_set,
+        test_obs03_container_cpu_pct_and_sampler_wired,
         test_build_record_hmac_round_trip,
         test_build_record_tamper_detection,
         test_build_record_hmac_key_mode_0600,
