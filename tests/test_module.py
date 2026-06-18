@@ -14499,6 +14499,25 @@ def test_cli_unknown_command_does_not_crash_repl():
     assert 'nonexistent' in err_v
 
 
+def test_cli_repl_enables_readline_history():
+    """The headless REPL turns on readline before its read loop so Up-arrow
+    recalls the previous command — input() has no history until readline is
+    imported.  The setup is best-effort (no-op for piped/non-TTY stdin)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import cli
+    _wsrc = inspect.getsource(cli.Cli.wait)
+    assert '_enable_line_editing()' in _wsrc, _wsrc
+    _esrc = inspect.getsource(cli.Cli._enable_line_editing)
+    assert 'import readline' in _esrc, _esrc
+    # non-TTY stdin → early return, never raises, no readline side effects
+    _c = object.__new__(cli.Cli)
+    from unittest.mock import patch
+    with patch('sys.stdin') as _stdin:
+        _stdin.isatty.return_value = False
+        _c._enable_line_editing()
+
+
 def test_cli_handler_exception_does_not_kill_repl():
     """A handler raising mid-command logs the error to stderr and the REPL
     keeps going — same forgiving model as Tui.shell()."""
@@ -35562,6 +35581,7 @@ def main() -> int:
         test_cli_registers_itself_as_tui_singleton,
         test_cli_register_command_dispatches_via_wait,
         test_cli_unknown_command_does_not_crash_repl,
+        test_cli_repl_enables_readline_history,
         test_cli_handler_exception_does_not_kill_repl,
         test_cli_help_lists_registered_commands,
         test_cli_eof_exits_repl_cleanly,
