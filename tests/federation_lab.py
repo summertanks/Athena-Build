@@ -33,9 +33,13 @@ import coord.store as _store                  # noqa: E402
 import coord.head as _head                    # noqa: E402
 import coord.schema as _schema                # noqa: E402
 import coord.config_manifest as _cfgman       # noqa: E402
+import apt_pkg                                 # noqa: E402
 import coord.publish as _publish              # noqa: E402
+import coord.reconcile as _reconcile          # noqa: E402
 import mirror as _mirror                      # noqa: E402
 import utils as _utils                        # noqa: E402
+
+apt_pkg.init_system()   # version_compare in the ownership matrix needs this
 
 _DUMMY_INRELEASE_SHA = 'a' * 64
 
@@ -102,11 +106,14 @@ class Builder:
 
     def fake_build(self, package, version, arch='all'):
         """Materialize a built .deb + a phase=done build.json record so the
-        publish path sees it (stands in for a real Docker build)."""
+        publish path sees it (stands in for a real Docker build).  The bytes
+        include this builder's id, so two builders that build the SAME
+        filename produce DIFFERENT sha256 — a non-reproducible-build
+        collision, exactly what the hash-conflict scan must catch."""
         _fn = f'{package}_{version}_{arch}.deb'
         _deb = os.path.join(self.dir_repo, _fn)
         with open(_deb, 'wb') as _f:
-            _f.write(f'fake-deb:{package}:{version}'.encode())
+            _f.write(f'fake-deb:{package}:{version}:{self.id}'.encode())
         _sha = hashlib.sha256(open(_deb, 'rb').read()).hexdigest()
         _rec = _utils.new_build_record(
             package=package, intended_version=version, patch_set_hash='-')
@@ -225,6 +232,22 @@ class FederationLab:
         assert _head.write_coord_head(self.mirror_coord, _new,
                                       self.signing_home)
 
+    def view(self):
+        """The verified merged claim view {builder_id: [claims]} (revoked
+        builders dropped per the coord-head)."""
+        _h = _head.read_coord_head(self.mirror_coord, self.signing_home)
+        _keyring = _identity.load_keyring(self.mirror_keyring)
+        _revoked = (_h or {}).get('revoked_builders') or {}
+        return _store.read_all_claims(self.mirror_claims, _keyring, _revoked)
+
+    def scan_conflicts(self):
+        """Run the real cross-builder hash-conflict scan over the mirror."""
+        return _reconcile.detect_hash_conflicts(self.view())
+
+    def owners(self):
+        """Per-filename ownership projection of the mirror's claim view."""
+        return _store.project_owners(self.view())
+
 
 def _claim_filenames(claim_view):
     return {_c.get('filename')
@@ -296,7 +319,90 @@ def run(verbose=True):
     return {'ok': True, 'builders': ['owner', 'peer']}
 
 
+def run_hash_conflict(verbose=True):
+    """Two builders independently build the SAME filename with different
+    bytes (non-reproducible build); both publish; the cross-builder
+    hash-conflict scan must flag it CRITICAL."""
+    def _step(msg):
+        if verbose:
+            print(f"  ✓ {msg}")
+    with tempfile.TemporaryDirectory() as _td:
+        _lab = FederationLab(_td)
+        _a = _lab.builder('alice', mode='distribution')
+        _b = _lab.builder('bob', mode='build')
+        _a.set_lists('foo\n', '')
+
+        _a.fake_build('foo', '1.0')           # alice's bytes
+        _lab.publish(_a, 'S1')
+        assert not [_f for _f in _lab.scan_conflicts()
+                    if _f.severity == 'CRITICAL'], "single publisher: no conflict"
+        _step("alice published foo_1.0 — no conflict")
+
+        _b.fake_build('foo', '1.0')           # bob's bytes (different sha)
+        _lab.publish(_b, 'S1')
+        _crit = [_f for _f in _lab.scan_conflicts()
+                 if _f.severity == 'CRITICAL']
+        assert _crit, "two distinct shas for one filename must be CRITICAL"
+        assert any('foo_1.0' in (_f.message or '') for _f in _crit)
+        _step("bob published foo_1.0 with different bytes — hash conflict "
+              "detected CRITICAL")
+    return {'ok': True, 'critical': True}
+
+
+def run_ownership_transfer(verbose=True):
+    """Exercise the publish ownership decision matrix against a real owner
+    record: no-owner → take; other-owner higher version → transfer;
+    same/lower → ownership_blocked; different bytes → frozen_bytes_blocked."""
+    def _step(msg):
+        if verbose:
+            print(f"  ✓ {msg}")
+
+    def _cand(filename, sha, version):
+        return {'filename': filename, 'sha256': sha, 'built_version': version}
+
+    with tempfile.TemporaryDirectory() as _td:
+        _lab = FederationLab(_td)
+        _a = _lab.builder('alice', mode='distribution')
+        _lab.builder('bob', mode='build')     # bob need only exist as a name
+        _a.set_lists('foo\n', '')
+        _fn = _a.fake_build('foo', '1.0')
+        _lab.publish(_a, 'S1')
+        _owners = _lab.owners()
+        assert _fn in _owners and _owners[_fn]['builder'] == 'alice'
+        _a_sha = _owners[_fn]['sha256']
+        _step(f"alice owns {_fn} (sha {_a_sha[:12]})")
+
+        # no existing owner → bob takes a brand-new filename
+        _kept, _blk = _publish.filter_pending_by_ownership(
+            'bob', [_cand('bar_1.0_all.deb', 'c' * 64, '1.0')], _owners)
+        assert _kept and not _blk
+        _step("no owner → bob takes bar_1.0")
+
+        # other owner, strictly higher version, same bytes → ownership transfers
+        _kept, _blk = _publish.filter_pending_by_ownership(
+            'bob', [_cand(_fn, _a_sha, '2.0')], _owners)
+        assert _kept and not _blk, "higher version must transfer ownership"
+        _step("alice-owned, bob version 2.0 > 1.0 → ownership transfers")
+
+        # other owner, not strictly higher → ownership_blocked
+        _kept, _blk = _publish.filter_pending_by_ownership(
+            'bob', [_cand(_fn, _a_sha, '0.9')], _owners)
+        assert not _kept and _blk and 'not strictly higher' in _blk[0]['reason']
+        _step("alice-owned, bob version 0.9 ≤ 1.0 → ownership_blocked")
+
+        # other owner, different bytes → frozen_bytes_blocked
+        _kept, _blk = _publish.filter_pending_by_ownership(
+            'bob', [_cand(_fn, 'd' * 64, '2.0')], _owners)
+        assert not _kept and _blk and 'frozen pool copy' in _blk[0]['reason']
+        _step("alice-owned, different bytes → frozen_bytes_blocked "
+              "(use `mirror reclaim` / bump version)")
+    return {'ok': True}
+
+
 if __name__ == '__main__':
     print("federation_lab: build-mode peer end-to-end simulation")
-    _res = run(verbose=True)
-    print(f"\nPASS — federated build-mode peer workflow: {_res}")
+    print(f"\nPASS — happy path: {run(verbose=True)}")
+    print("\nfederation_lab: hash-conflict scenario")
+    print(f"\nPASS — hash conflict: {run_hash_conflict(verbose=True)}")
+    print("\nfederation_lab: ownership-transfer scenario")
+    print(f"\nPASS — ownership matrix: {run_ownership_transfer(verbose=True)}")

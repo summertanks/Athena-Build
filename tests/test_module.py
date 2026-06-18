@@ -29063,6 +29063,27 @@ def test_federation_lab_build_mode_peer_workflow():
     assert federation_lab.run(verbose=False)['ok']
 
 
+def test_federation_lab_hash_conflict():
+    """Two builders build one filename with different bytes (non-reproducible
+    build) → the real cross-builder hash-conflict scan flags CRITICAL.
+    Harness: tests/federation_lab.py."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'tests'))
+    import federation_lab
+    assert federation_lab.run_hash_conflict(verbose=False)['critical']
+
+
+def test_federation_lab_ownership_transfer():
+    """The publish ownership decision matrix against a real owner record:
+    no-owner → take, other-owner-higher-version → transfer, same/lower →
+    ownership_blocked, different-bytes → frozen_bytes_blocked.  Harness:
+    tests/federation_lab.py."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'tests'))
+    import federation_lab
+    assert federation_lab.run_ownership_transfer(verbose=False)['ok']
+
+
 def test_closure_gate_runs_in_both_modes():
     """The publish closure gate is wired regardless of [Build] Mode — the
     install corpus is built from the dep trees unconditionally and passed to
@@ -36571,6 +36592,8 @@ def main() -> int:
         test_canonical_config_round_trip_and_verify,
         test_closure_gate_runs_in_both_modes,
         test_federation_lab_build_mode_peer_workflow,
+        test_federation_lab_hash_conflict,
+        test_federation_lab_ownership_transfer,
         test_mirror03_publish_hazard_gate_blocks_unsanctioned_local_ahead,
         test_filter_pending_by_ownership_no_existing_owner_keeps,
         test_filter_pending_by_ownership_own_claim_keeps,
