@@ -95,6 +95,12 @@ class ProgressBar:
 
     def set_max(self, value: int) -> None:
         self._max = max(1, value)
+        # UX-08(a): step() auto-STOPs at the old max.  When the REAL max
+        # arrives later (download_file grow-path, mirror-publish lazily-sized
+        # bar seeded at maxvalue=1), un-freeze so the bar keeps animating
+        # instead of sticking at 100% / 1-of-1.
+        if self._state == self.STOPPED and self._value < self._max:
+            self._state = self.RUNNING
 
     def reset(self) -> None:
         self._value = 0

@@ -440,7 +440,8 @@ class Dispatcher:
         self.state.dirty = True
 
     def _on_log(self, e: LogEvent) -> None:
-        tab = self.state.tabs.get(e.tab) or self.state.tabs.get('build')
+        # UX-08(d): fall back to 'log' (a real tab), not the long-gone 'build'.
+        tab = self.state.tabs.get(e.tab) or self.state.tabs.get('log')
         if tab is None:
             return
         # Resolve severity → curses attr via the renderer's helper so
