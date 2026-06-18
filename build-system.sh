@@ -393,8 +393,11 @@ if [ ! -f "$PY_REQ_FILE" ]; then
 fi
 
 echo "Checking required Python packages..."
-MISSING_PKGS=()
 
+# Halt on the FIRST missing module rather than collecting them into an
+# end-of-run summary: with a half-provisioned box the actionable signal is
+# "the next thing to install", and per-line progress shows exactly which
+# import failed (the import name often differs from the apt package name).
 while IFS= read -r line || [[ -n "$line" ]]; do
     # Skip empty lines and comments
     [[ -z "$line" || "$line" =~ ^# ]] && continue
@@ -402,18 +405,16 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     import_name=$(echo "$line" | awk '{print $1}')
     install_name=$(echo "$line" | awk '{print $2}')
 
-    if ! python3 -c "import ${import_name}" 2>/dev/null; then
-        MISSING_PKGS+=("${install_name}  (import: ${import_name})")
+    printf '   %-14s ... ' "$import_name"
+    if python3 -c "import ${import_name}" 2>/dev/null; then
+        echo "ok"
+    else
+        echo "MISSING"
+        echo "E: required Python module '${import_name}' is not importable." >&2
+        echo "   install it with:  sudo apt install ${install_name}" >&2
+        exit 1
     fi
 done < "$PY_REQ_FILE"
-
-if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-    echo "E: Missing Python packages:" >&2
-    for pkg in "${MISSING_PKGS[@]}"; do
-        echo "   - ${pkg}" >&2
-    done
-    exit 1
-fi
 
 echo "All required Python packages found."
 

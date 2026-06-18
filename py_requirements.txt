@@ -2,12 +2,13 @@
 # Format: import_name   install_name
 # Lines starting with # are ignored
 
-psutil        psutil
-requests      requests
+# install_name is the Debian/apt package (build-system.sh suggests
+# `sudo apt install <install_name>`); the import_name is what Python sees.
+psutil        python3-psutil
+requests      python3-requests
 apt_pkg       python3-apt
-rich          rich
 debian        python3-debian
-gnupg         python-gnupg
-docker        docker
+gnupg         python3-gnupg
+docker        python3-docker
 apt           python3-apt
 aptsources    python3-apt
