@@ -949,15 +949,26 @@ def remote_publish(
             + (f", {len(_reclaims_ok)} reclaim(s)" if _reclaims_ok else '')
             + ")")
         # post-publish installability gate.
-        # Project the union state (mirror's existing claims + our
-        # pending) and walk audit_dep_closure with consumer_set =
-        # our pending packages.  Any unresolved hard Depends → BLOCK
-        # the publish with detailed findings; the mirror's
-        # installability invariant is not negotiable.  Tolerant of
-        # test doubles that don't provide a full BuildConfig: if
-        # scan_repo_state raises (missing attrs), the gate is
-        # skipped with a logged warning — production callers always
-        # have a real config so the gate always runs there.
+        # Walk audit_dep_closure over the local repo state (which, after a
+        # `mirror pull`, is the MERGED mirror+local pool) constrained to the
+        # install corpus.  Any unresolved hard Depends → BLOCK the publish.
+        #
+        # Responsibility split across modes (both run this gate):
+        #   - distribution publisher: install_corpus is the FULL resolved
+        #     closure (dep_tree.selected_pkgs ∪ udeb), so this is a COMPLETE
+        #     repo-closure check — the authoritative gate.
+        #   - build-mode peer: install_corpus is the SUBSET it built
+        #     (build_pkg.list), so this is a local sanity check that OUR
+        #     packages resolve against the merged pool.  A peer can't compute
+        #     the full closure (it never parses the full pkg.list — that's
+        #     the point of build mode), and the owner's corpus would be stale
+        #     vs the peer's advanced snapshot; complete federation closure is
+        #     therefore the distribution publisher's `mirror audit` on
+        #     sync-back, not the peer's publish.
+        #
+        # Tolerant of test doubles without a full BuildConfig: if
+        # scan_repo_state raises (missing attrs), the gate is skipped with a
+        # logged warning — production callers always have a real config.
         if _pending and install_corpus is None:
             logger.warning(
                 "closure gate: install_corpus not provided; skipping "
