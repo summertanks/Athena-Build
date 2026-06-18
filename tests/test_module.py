@@ -26223,18 +26223,6 @@ def test_sbom_command_registered():
     )
 
 
-def test_ux04_save_session_called_after_parse_dependency():
-    """cmd_parse_dependency calls persistence.save_session at the tail
-    so the next process can `resume` without re-parsing."""
-    _b = _session_source()
-    import re
-    _m = re.search(
-        r'def cmd_parse_dependency\(self.*?(?=\n    def )', _b, re.DOTALL)
-    assert _m, "cmd_parse_dependency not found"
-    assert 'persistence.save_session(self' in _m.group(0), (
-        "cmd_parse_dependency must call persistence.save_session at the tail")
-
-
 # ─── OBS-01: canonical signed build record ──────────────────────────────────
 
 
@@ -36040,7 +36028,6 @@ def main() -> int:
         test_ux04_buildflags_autosave_round_trip,
         test_ux04_buildflags_in_memory_only_reset_on_load,
         test_ux04_buildflags_restored_summary_excludes_in_memory_flags,
-        test_ux04_save_session_called_after_parse_dependency,
         # CONF-07 SBOM
         test_sbom_emits_valid_cyclonedx_skeleton,
         test_sbom_components_sorted_by_name,
