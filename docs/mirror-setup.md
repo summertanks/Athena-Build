@@ -332,6 +332,108 @@ Mode is shown persistently:
 `autorun build` is the build-mode autorun variant.  Bare `autorun`
 in build mode routes there automatically.
 
+### Federated build-mode peer — end-to-end
+
+A build-mode peer (e.g. a WSL builder; see `docs/install-docker.md`) joins
+the federation, pulls the mirror, builds + publishes the packages it owns,
+and the distribution publisher consolidates on sync-back.
+
+**1. Identity + federation membership** (one-time):
+
+```text
+mirror init <peer-id>                 # Ed25519 builder keypair
+key verify                            # tier-1 signing key must verify
+mirror add <host> <ssh-url> --ssh-key <key> --proto https
+mirror builders register <name>       # upload our pubkey + adopt the
+                                       # owner's canonical pkg.list/pool.list
+```
+
+`mirror builders register` is gated on a verified tier-1 signing key **and**
+SSH write access to the mirror (the pubkey upload proves it). It also
+fetches the owner's **canonical config** (`pkg.list` + `pool.list`, pinned
+by sha256 in the signed coord-head) and **overwrites** the peer's local
+copies so the federation shares one selection. (See "Canonical config
+propagation" below.) The tier-1 GPG key itself is transferred out-of-band —
+see "Signing-key mismatch".
+
+**2. Sync the mirror**:
+
+```text
+mirror pull
+```
+
+`mirror pull` **auto-adopts the mirror's snapshot pin forward** (never
+backward): it reads the signed coord-head's `snapshot.current`, and if it's
+newer than the local pin it advances the local pin to it before downloading
+claims — so a peer always pulls the latest published packages instead of
+silently filtering them out. It then **re-applies the canonical config** so
+the owner's later source-select changes propagate to every builder.
+Advancing the pin invalidates `cache_ready` / `dep_check_ready`; re-run
+`cache build` + `cache parse`.
+
+**3. Advance + build the subset you own**:
+
+```text
+snapshot select latest                # expose updatable packages
+cache build && cache parse
+source build                          # builds build_pkg.list; strips +
+                                      # asg-stamps automatically
+repo audit                            # local pool sanity
+```
+
+**4. Publish (packages only)**:
+
+```text
+mirror publish <name>                 # Mode = build implies --no-iso
+mirror audit <name>                   # confirm claims + no conflicts
+```
+
+In build mode `mirror publish` **implies `--no-iso`** (a build peer never
+builds ISOs, and its mirror snapshot may lead any ISO snapshot) and
+publishes **only the packages it built and owns** — pulled-from-a-peer
+records (`pulled_from`) are skipped so a peer never tries to claim another
+builder's package. The closure gate is a local sanity check that *your*
+packages resolve against the merged (pulled) pool; complete federation
+closure is the distribution publisher's `mirror audit` on sync-back (see
+"Installability gate"). If you publish while the mirror is ahead of your
+pin, the publish warns loudly to `mirror pull` first.
+
+**5. Publisher sync-back** (on the distribution machine):
+
+```text
+mirror pull                           # snapshot auto-adopts; peer .debs arrive
+cache build && cache parse
+repo audit && mirror audit
+chroot build live && chroot build installer
+iso build live && iso build installer
+mirror publish                        # full publish incl. ISO leg
+```
+
+**Decommissioning a peer** (from any builder with the tier-1 key):
+
+```text
+mirror builders decommission <peer-id> [<name>]
+```
+
+Adds the peer to the coord-head's `revoked_builders` under the publish lock.
+The peer's claims are then dropped federation-wide, so every filename it
+owned becomes **no-owner** and other builders take them on their next
+publish. (No need for the decommissioned peer's private key — claims are
+per-builder signed, so `revoked_builders` is the key-less mechanism.) The
+command refuses to revoke the *local* builder (self-lockout).
+
+### Canonical config propagation
+
+The distribution-mode owner is authoritative for `pkg.list` + `pool.list`.
+On every `mirror publish` it writes `config/canonical.json` (the two list
+files) into the coord tree and pins its **sha256 in the signed coord-head**
+(`config_sha256`). Peers fetch it on `mirror builders register` (overwrite
+on first register) and refresh it on every `mirror pull`. Nothing unverified
+is ever applied — the head's GPG signature vouches for the hash, the hash
+vouches for the file; a sha mismatch or a missing pin leaves the peer's
+local lists untouched. A build-mode peer never owns the canonical config (it
+preserves the owner's pin on publish).
+
 ### Per-package ownership
 
 Each non-retracted `published` claim on the mirror has an "owner":
@@ -371,6 +473,22 @@ claim across `[mirror.base, mirror.current]`.  An older claim whose
 `Depends:` is satisfied only by a newer-snapshot claim is fine — the
 projection includes both versions, and the closure walk resolves
 against the full set.
+
+**Mode responsibility split.** The gate runs in *both* modes, but its
+consumer set differs:
+
+- **Distribution publisher** — the consumer set is the FULL resolved
+  closure (`dep_tree.selected_pkgs ∪ udeb`), so this is a *complete*
+  repo-closure check. This is the authoritative gate.
+- **Build-mode peer** — the consumer set is the SUBSET it built
+  (`build_pkg.list`), so this is a *local sanity* check that the peer's
+  own packages resolve against the merged (pulled) pool. A peer can't
+  compute the full closure — it never parses the full `pkg.list` (that's
+  the point of build mode), and the owner's corpus would be stale against
+  the peer's advanced snapshot. Complete federation closure is therefore
+  verified by the distribution publisher's `mirror audit` on sync-back,
+  not by the peer's publish. Run `mirror pull` before a build-mode publish
+  so `scan_repo_state` reflects the merged mirror pool.
 
 ### First-publish dist-mode gate
 
@@ -506,6 +624,15 @@ backup of your own work.  Two rules worth internalising:
   deliberate manual copy off the mirror.
 - **End-of-life states are skipped.**  Claims in `retracted` /
   `deprecated` / `obsolete` are never downloaded.
+- **Snapshot auto-adopt (forward-only).**  Pull reads the signed
+  coord-head's `snapshot.current` and, if it is newer than the local pin,
+  advances the local pin to it *before* the claim walk — so the snapshot
+  filter doesn't silently skip a peer's newer packages. Never rolls a pin
+  backward. Advancing invalidates `cache_ready` / `dep_check_ready`
+  (re-run `cache build` + `cache parse`).
+- **Canonical config refresh.**  Pull re-applies the owner's verified
+  `pkg.list` / `pool.list` (see "Canonical config propagation"), so
+  source-select changes propagate to every builder.
 
 ## Publish hardening (2026-06-11)
 
@@ -712,12 +839,15 @@ mirror list                     name, type, federation-consistency tag, url
 mirror summary [<name>]         per-mirror state + we_own count + neighbours_known list
 mirror status [<name>]          builder identity + halt sentinel + per-mirror PUBLISHED/NEVER PUBLISHED
 mirror reconcile-neighbours     fan-out: align every peer's coord-head.neighbours with local config
-mirror publish [<name>]         per-file .deb push + sign claims + re-sign coord-head (federation-gated + snapshot-base-gated; auto-reindexes a missing/stale local InRelease)
-mirror pull [<name>]            fetch peer sidecar, download missing claim .debs (skip-own; SHA verified; retracted/deprecated/obsolete skipped; reclaimed files refreshed)
+mirror publish [<name>]         per-file .deb push + sign claims + re-sign coord-head (federation-gated + snapshot-base-gated; auto-reindexes a missing/stale local InRelease; warns on snapshot divergence; Mode=build implies --no-iso + owned-only; a blocked publish names the builder holding the lock)
+mirror pull [<name>]            fetch peer sidecar, download missing claim .debs (skip-own; SHA verified; retracted/deprecated/obsolete skipped; reclaimed files refreshed; auto-adopts the mirror's snapshot pin FORWARD; refreshes the canonical pkg.list/pool.list)
 mirror reclaim [<src>|<file>] [<name>] [force]
                                 same-version rebuild: bare = list local-ahead candidates; with target = overwrite published bytes under unchanged filename (sanctioned invariant exception)
 mirror audit [<name>]           federation consistency, claim sigs, hash conflicts, cross-mirror pool drift, on-disk pool ↔ claims integrity
 mirror query <pkg> [<name>]     show claims matching <pkg> from last fetched view of each mirror
-mirror builders                 list registered builders (local + fetched keyring)
+mirror builders [list]          list registered builders (local + fetched keyring)
+mirror builders register <name> register THIS builder on a mirror: upload our pubkey (needs signing key + SSH write) + adopt the owner's canonical pkg.list/pool.list
+mirror builders decommission <id> [<name>]
+                                retire builder <id>: add to coord-head revoked_builders so its claims drop and its packages become no-owner (peers take them)
 mirror conflict resolve <pkg>   retract our claim for <pkg>; clear PUBLISH_HALT
 ```
