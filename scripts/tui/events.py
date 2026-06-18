@@ -50,7 +50,11 @@ class LogEvent:
     the dispatcher doesn't import `logging`."""
     severity: int
     text: str
-    tab: str = 'build'
+    # UX-08(d): default to 'log', a real DEFAULT_TABS member.  Was 'build',
+    # which no longer exists (three-tab layout = console/log/status), so any
+    # LogEvent without an explicit tab (e.g. Tui.INFO/WARNING/ERROR) was
+    # silently dropped in curses mode.
+    tab: str = 'log'
 
 
 @dataclass(frozen=True)

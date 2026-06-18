@@ -2935,6 +2935,7 @@ def download_file(url: str, filename: str) -> tuple:
 
     import time as _time
 
+    progress_bar = None   # UX-08(b): one bar across all retries; closed in finally
     try:
         name_strip: str = urlsplit(url).path.split('/')[-1].ljust(15, ' ')
 
@@ -2964,8 +2965,16 @@ def download_file(url: str, filename: str) -> tuple:
                     expected_size = max(head_size, get_size) or (1 << 20)
                     current_max  = expected_size
 
-                    progress_bar = tui.ProgressBar(label=name_strip, itr_label='B/s',
-                                                   maxvalue=expected_size)
+                    # UX-08(b): build the bar ONCE; on a retry reuse + reset it
+                    # (set_max un-freezes via UX-08(a)) so each failed attempt
+                    # doesn't leak a permanent widget row + its 10 Hz polling.
+                    if progress_bar is None:
+                        progress_bar = tui.ProgressBar(
+                            label=name_strip, itr_label='B/s',
+                            maxvalue=expected_size)
+                    else:
+                        progress_bar.reset()
+                        progress_bar.set_max(expected_size)
 
                     bytes_written = 0
                     with open(filename, 'wb') as f:
@@ -2985,8 +2994,7 @@ def download_file(url: str, filename: str) -> tuple:
                     # Final correction so the persisted display matches reality
                     # (in case the size hint over-reported and the bar stopped short).
                     progress_bar.set_max(bytes_written)
-                    progress_bar.close()
-                    return bytes_written, ''
+                    return bytes_written, ''   # UX-08(b): bar closed in finally
 
             except (ConnectTimeout, ReadTimeout, RequestsConnectionError) as e:
                 if _attempt < _HTTP_RETRY_COUNT - 1:
@@ -3059,6 +3067,11 @@ def download_file(url: str, filename: str) -> tuple:
         tui.console.print(f"ERROR: unexpected failure downloading {url}")
         logger.error(f"download_file({url}): {_detail}")
         return -1, _detail
+    finally:
+        # UX-08(b): close the single bar on EVERY exit — success, retry
+        # exhaustion, or a propagated exception — not just the success path.
+        if progress_bar is not None:
+            progress_bar.close()
     # Defensive: the retry loop above either returns (success) or
     # raises into one of the except blocks (failure).  mypy can't see
     # that, so we add an unreachable fallback so the function's return

@@ -2564,6 +2564,41 @@ def test_ux05d_cli_print_emits_ansi_when_tty():
         assert _p.call_args.args[0] == 'hello'
 
 
+def test_ux08_signal_loss_fixes():
+    """UX-08 (a)(c)(d): ProgressBar.set_max un-freezes a STOPPED bar; Cli's
+    COLOR_* match tui.render's numbering so the constant handlers ACTUALLY pass
+    (`tui.COLOR_ERROR`) prints red, not green; the LogEvent default tab is a
+    real tab ('log', not the long-gone 'build' that silently dropped logs)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import io
+    from unittest.mock import patch
+    import cli
+    import tui
+    from tui.widgets import ProgressBar
+    from tui.events import LogEvent
+    from tui.state import DEFAULT_TABS
+
+    # (a) set_max un-freezes a bar that auto-STOPped at its (lazy) max
+    _b = ProgressBar(label='x', maxvalue=1)
+    _b.step(1)
+    assert _b._state == _b.STOPPED
+    _b.set_max(1000)
+    assert _b._state == _b.RUNNING
+
+    # (c) Cli colours keyed on render's numbering — passing the RENDER constant
+    # (what command handlers pass) yields red, not the old cross-wired green.
+    assert cli.Cli.COLOR_ERROR == tui.COLOR_ERROR
+    _c = object.__new__(cli.Cli)
+    _c._use_color = True
+    with patch('builtins.print') as _p:
+        _c.print('boom', tui.COLOR_ERROR)
+        assert _p.call_args.args[0].startswith('\x1b[31m'), _p.call_args.args[0]
+
+    # (d) LogEvent default tab is a real DEFAULT_TABS member (was 'build')
+    assert LogEvent.tab == 'log'
+    assert 'log' in DEFAULT_TABS and 'build' not in DEFAULT_TABS
+
+
 def test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits():
     """UX-05e: Cli with one_shot_cmds populated must dispatch each
     in order then exit (no REPL).  Exit code reflects worst outcome."""
@@ -35171,6 +35206,7 @@ def main() -> int:
         test_ux05a_auto_yes_does_not_skip_password_or_options,
         test_ux05b_atena_sudo_password_env_var_picked_up,
         test_ux05d_cli_print_emits_ansi_when_tty,
+        test_ux08_signal_loss_fixes,
         test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits,
         test_ux05e_one_shot_exit_code_nonzero_when_a_command_fails,
         test_ux05g_cmd_methods_reset_flags_on_entry,

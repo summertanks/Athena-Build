@@ -88,18 +88,19 @@ class Cli:
     SEVERITY_INFO    = 3
 
     # UX-05d: ANSI color codes for stdout when running attached to a TTY
-    # and the operator hasn't set NO_COLOR.  Values are arbitrary
-    # integers used as keys in the ANSI map below — the curses backend
-    # has its own COLOR_* with different numeric values; what matters is
-    # that the Console facade passes whatever each backend defines
-    # opaquely back into print().
-    COLOR_NORMAL    = 0
-    COLOR_REVERSE   = 1
-    COLOR_WARNING   = 2
-    COLOR_ERROR     = 3
-    COLOR_HIGHLIGHT = 4
-    COLOR_FOOTER    = 5
-    COLOR_INFO      = 6
+    # and the operator hasn't set NO_COLOR.  UX-08(c): these MUST match
+    # tui.render's COLOR_* numbering — command handlers pass the render
+    # constants (`tui.COLOR_ERROR` etc.) opaquely into print(), and the
+    # `_ANSI` map below is keyed on these names.  A prior off-by-one
+    # (NORMAL=0…) meant render.COLOR_ERROR(4) hit `_ANSI[HIGHLIGHT]`=green,
+    # WARNING→red, NORMAL→inverse — errors printed green in headless mode.
+    COLOR_NORMAL    = 1
+    COLOR_REVERSE   = 2
+    COLOR_WARNING   = 3
+    COLOR_ERROR     = 4
+    COLOR_HIGHLIGHT = 5
+    COLOR_FOOTER    = 6
+    COLOR_INFO      = 7
 
     # Map our COLOR_* keys to ANSI escape sequences.  Choices roughly
     # mirror curses semantics: errors red, warnings yellow, highlights
