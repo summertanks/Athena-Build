@@ -26,9 +26,7 @@ logger = logging.getLogger('athena.build')
 
 class RepoCommandsMixin(SessionState):
     def cmd_index_repo(self, *args):
-        """Generate apt-repo metadata IN-PLACE under repo/dists/.
-
-        (2026-05-22).  Produces:
+        """Generate apt-repo metadata IN-PLACE under repo/dists/..  Produces:
           repo/dists/<codename>/Release, InRelease, Release.gpg
           repo/dists/<codename>/main/binary-amd64/Packages*
           repo/dists/<codename>/main/debian-installer/binary-amd64/Packages*
@@ -584,7 +582,7 @@ class RepoCommandsMixin(SessionState):
         _malformed: 'list[str]' = []
         _total = 0
 
-        # (2026-05-22): walk the apt indexes instead
+        #: walk the apt indexes instead
         # of per-file DebFile opens.  repo_audit.iter_packages_all_versions
         # uses dpkg-scanpackages' cached --multiversion output and
         # parses it via apt_pkg.TagFile — same Source/Package/Size

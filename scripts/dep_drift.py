@@ -108,7 +108,7 @@ class _DepDriftMixin:
         untouched.  Drift is logged at info level (log tab only) in the form
         "Dep drift seen for package <pkg> from <cache_ver> to <disk_ver>".
 
-        Fix-up (2026-05-22): the Version sync was added
+        Fix-up: the Version sync was added
         because dep constraints emerging from on-disk .debs are
         NMU-stripped (e.g. `(= 0.8-10)`), but the cache-derived Version
         on the SAME Package object was still un-stripped (`0.8-10+deb12u1`).

@@ -1239,8 +1239,7 @@ class SourceCommandsMixin(SessionState):
           - Both operations invalidate cache + dep_tree so the change
             takes effect on the next `cache build` + `cache parse`.
 
-        Replaces the standalone `repo reload <pkg>...` command (P4
-        2026-05-23).
+        Replaces the standalone `repo reload <pkg>...` command.
         """
         if not args:
             console.print(

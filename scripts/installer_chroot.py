@@ -128,7 +128,7 @@ def build_installer_chroot(
     # their maintainer scripts only run at first boot under
     # rootskel + main-menu).
     #
-    # 3+4 (2026-05-16/17) — moved into the
+    # 3+4 — moved into the
     # athena-installer-data udeb (dpkg-unpacked above with the rest
     # of the closure):
     #   - Step 3: mirror/protocol stub template
@@ -171,8 +171,7 @@ def _wipe_and_create(dir_chroot_installer: str, password: str) -> bool:
     os.makedirs so the top-level chroot dir is user-owned — same
     pattern the live chroot already uses.  If we sudo-mkdir'd here, the
     recreated dir would be root-owned, and BuildConfig's next startup
-    would fail its `os.access(dir, os.W_OK)` check (caught in
-    production 2026-05-11).
+    would fail its `os.access(dir, os.W_OK)` check.
 
     Operator can wipe a stale root-owned chroot manually with
     `sudo rm -rf <dir>`; BuildConfig recreates it user-owned on the
@@ -350,7 +349,7 @@ def _dpkg_unpack(
     # Per-line emit (one logger call per dpkg line) so each becomes its
     # own buffer entry in the TUI — emitting the whole stdout as a single
     # multi-line record makes the log tab wrap-slice it across line
-    # boundaries (caught 2026-05-31).  "Selecting/Preparing/Unpacking"
+    # boundaries.  "Selecting/Preparing/Unpacking"
     # stay at INFO so the chroot tab paints them as progress; everything
     # else (file lists, debconf chatter) at DEBUG to keep the tab quiet.
     _PROGRESS_PREFIXES = (
@@ -611,7 +610,7 @@ def _apply_installer_overlay(
 #
 # Each helper here mirrors one action stock d-i's installer/build/Makefile
 # performs against $(TREE) AFTER the dpkg --unpack pass and BEFORE the
-# initrd is packed.  Our priority hierarchy (locked 2026-05-12):
+# initrd is packed.  Our priority hierarchy:
 #
 #   1. Build-pipeline action in installer_chroot.py (this file)  ← preferred
 #   2. Stock kernel-cmdline knob via installer/boot/grub.cfg

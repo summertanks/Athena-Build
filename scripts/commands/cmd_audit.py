@@ -200,7 +200,7 @@ class AuditCommandsMixin(SessionState):
         )
         _hash_drift = _hash_audit['mismatched']
 
-        # STALE-FILE gate (2026-06-11): a superseded .deb lingering in
+        # STALE-FILE gate: a superseded .deb lingering in
         # repo/ is SILENTLY consumed — find_matching_artifact accepts any
         # +asg-stamped variant of the predicted pristine name, so a
         # version-drift artifact from a pre-fix build can poison the
@@ -513,7 +513,7 @@ class AuditCommandsMixin(SessionState):
     def _report_content_integrity(self, deb_state, *, verbose: bool,
                                     refresh: bool = False) -> None:
         """Per-cohort content-integrity scan — absorbed from the former
-        `cmd_source_verify` (deleted in P3 2026-05-23).  Resolution
+        `cmd_source_verify`.  Resolution
         scope is the cohort's RepoState (deb→main, udeb→main-udeb)
         rather than the cache — see `verify_pkg_artifact`'s docstring
         for why (NMU-vs-pristine version skew).
@@ -654,7 +654,7 @@ class AuditCommandsMixin(SessionState):
 
     def _report_nmu_residue(self, state, *, verbose: bool) -> None:
         """NMU-suffix residue check — absorbed from the former
-        `cmd_audit_nmu` (deleted in P3 2026-05-23).  Catches any .deb
+        `cmd_audit_nmu`.  Catches any .deb
         in repo/ that bypassed BuildContainer's post-build stripper.
 
         Tunneled packages are EXCLUDED — they're pristine Debian binary
