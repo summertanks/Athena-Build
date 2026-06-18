@@ -406,8 +406,10 @@ class Package(Packages):
         if constraint == '': constraint = '='
 
         if constraint not in ['=', '>=', '<=', '>>', '<<', '>', '<']:
-            tui.console.print(f"WARNING: Invalid constraint '{constraint}' for package {self.package} "
-                              f"version {self.version}, skipping")
+            _msg = (f"Invalid constraint '{constraint}' for package {self.package} "
+                    f"version {self.version}, skipping")
+            tui.console.print(f"WARNING: {_msg}")
+            logger.warning(_msg)   # UX-08(e): persist constraint faults to the log too
             return False
 
         # If the constraint is not added yet, add it
@@ -437,8 +439,10 @@ class Package(Packages):
             return True
 
         else:
-            tui.console.print(f"WARNING: Cannot resolve conflicting constraints for "
-                              f"{self.package} {_constraint} vs {old_constraint}, ignoring")
+            _msg = ("Cannot resolve conflicting constraints for "
+                    f"{self.package} {_constraint} vs {old_constraint}, ignoring")
+            tui.console.print(f"WARNING: {_msg}")
+            logger.warning(_msg)   # UX-08(e): persist constraint faults to the log too
             return False
 
     # ── UX-04 pickle support ────────────────────────────────────────────

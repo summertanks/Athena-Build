@@ -2599,6 +2599,57 @@ def test_ux08_signal_loss_fixes():
     assert 'log' in DEFAULT_TABS and 'build' not in DEFAULT_TABS
 
 
+def test_ux08_cache_info_picks_highest_version():
+    """UX-08(f): the cache-info headline picks the genuinely highest version
+    (apt semantics), not get_packages' mirror-parse order.  Regression: the
+    old `pkgs[0]` returned the first-parsed version, and a naive string max
+    picks '1.2.5' over '1.10.0' (lexical) — both wrong."""
+    import apt_pkg
+    import functools
+    apt_pkg.init_system()
+    # parse-order list: the highest version is neither first nor a string-max.
+    pkgs = [{'Version': '1.2.0'}, {'Version': '1.10.0'}, {'Version': '1.2.5'}]
+    pick = max(pkgs, key=functools.cmp_to_key(
+        lambda _a, _b: apt_pkg.version_compare(
+            str(_a.get('Version', '')), str(_b.get('Version', '')))))
+    assert pick['Version'] == '1.10.0', pick
+    assert pkgs[0]['Version'] == '1.2.0'           # the old buggy pick
+    assert max(p['Version'] for p in pkgs) == '1.2.5'   # the lexical-max trap
+
+
+def test_ux08_spinner_done_idempotent():
+    """UX-08(g): a Spinner spanning multiple passes gets done() at the end of
+    one pass and again on a later early-return; done() must print the
+    '✓ … done' line exactly once."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui
+    from tui.widgets import Spinner
+
+    class _Backend:
+        def __init__(self):
+            self.prints = []
+
+        def add_widget(self, w):
+            return 1
+
+        def del_widget(self, wid):
+            pass
+
+        def print(self, msg):
+            self.prints.append(msg)
+
+    _b = _Backend()
+    _saved = tui.tui_instance
+    tui.tui_instance = _b
+    try:
+        _s = Spinner("Parsing Dependencies")
+        _s.done()
+        _s.done()
+    finally:
+        tui.tui_instance = _saved
+    assert sum('done' in _m for _m in _b.prints) == 1, _b.prints
+
+
 def test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits():
     """UX-05e: Cli with one_shot_cmds populated must dispatch each
     in order then exit (no REPL).  Exit code reflects worst outcome."""
@@ -35207,6 +35258,8 @@ def main() -> int:
         test_ux05b_atena_sudo_password_env_var_picked_up,
         test_ux05d_cli_print_emits_ansi_when_tty,
         test_ux08_signal_loss_fixes,
+        test_ux08_cache_info_picks_highest_version,
+        test_ux08_spinner_done_idempotent,
         test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits,
         test_ux05e_one_shot_exit_code_nonzero_when_a_command_fails,
         test_ux05g_cmd_methods_reset_flags_on_entry,

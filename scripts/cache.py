@@ -578,6 +578,7 @@ class Cache:
             _src_file = _mirror_files.get('Sources',  '')
             if not _pkg_file or not _src_file:
                 self.error_str = f"Missing cache files for mirror {_mirror.id}"
+                parser_spinner.done()   # UX-08(g): don't leave the spinner spinning
                 return False
 
             try:
@@ -586,6 +587,7 @@ class Cache:
             except OSError as e:
                 self.error_str = f"Failed to read cache files for {_mirror.id}: {e}"
                 logger.error(self.error_str)
+                parser_spinner.done()   # UX-08(g): don't leave the spinner spinning
                 return False
 
             # Fork supersede: fork mirror walks first (it's prepended in

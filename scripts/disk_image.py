@@ -599,12 +599,20 @@ def _write_minimal_grub_cfg(mnt: str, root_uuid: str,
                 _f.startswith('vmlinuz-') for _f in os.listdir(_boot))
         except OSError as e:
             logger.error(f"list {_boot} for kernel: {e}")
+            # UX-08(e): a fallback-grub failure means an unbootable image —
+            # surface it on the console like every sibling failure path.
+            tui.console.print(
+                f"ERROR: minimal grub.cfg — can't list {_boot}: {e}")
             return False
         if not _have_vmlinuz:
             logger.error(f"no vmlinuz-* in {_boot}")
+            _why = f"no vmlinuz-* in {_boot}"
         else:
             logger.error(
                 f"no initrd.img matching the latest vmlinuz in {_boot}")
+            _why = f"no initrd.img matching the latest vmlinuz in {_boot}"
+        tui.console.print(
+            f"ERROR: minimal grub.cfg — {_why}; disk image will not boot")
         return False
     _k_name, _i_name = _pair
 
