@@ -561,8 +561,10 @@ class TunnelCommandsMixin(SessionState):
         Usage: tunnel_package [pkg ...]
 
         If no package names are given, uses the 'Tunneled' list from build.conf.
-        Packages must already be present in the dependency tree (run parse_dependency
-        first).  Skips packages whose result file already says TUNNELED or PASS.
+        Packages must already be present in the dependency tree (run `cache
+        parse` first).  Every named package is re-tunnelled: the download is
+        SHA256-skipped when the on-disk .deb already matches, but the package
+        is always re-stamped (pristine/+asg) and its result re-recorded.
         """
         if not self.flags.dep_check_ready:
             console.print("Run 'cache parse' first")

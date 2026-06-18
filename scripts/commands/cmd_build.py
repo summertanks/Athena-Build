@@ -895,10 +895,9 @@ class BuildCommandsMixin(SessionState):
             install).  Helper checks at entry and surfaces the first
             missing tool with an actionable message.
 
-        Known v1 limitation: grub-install runs on the build host, so
-        the produced disk image's GRUB binaries reflect the host's
-        GRUB version (analogous to pre-COMP-14 ISO leakage).  Follow-
-        up will move grub-install into the build container.
+        grub-install runs via `chroot` into the disk's own root, so the
+        installed boot binaries reflect the image's GRUB version, not the
+        build host's.
         """
         if self._refuse_in_build_mode("iso build disk"):
             return

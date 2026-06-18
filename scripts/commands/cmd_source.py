@@ -482,7 +482,7 @@ class SourceCommandsMixin(SessionState):
         `_mirror.id == 'fork'`; see scripts/fork_mirror.py).  Forks are not part
         of any upstream snapshot's Sources index, so the snapshot-to-snapshot
         change-detection must skip them — they only change when WE edit a fork
-        (a rebase + `package reload`), never when the snapshot advances.  Without
+        (a rebase + `source fork`), never when the snapshot advances.  Without
         this they'd hit the "absent from upstream Sources" branch and be flagged
         as changed on every update build, then rebuild to an identical filename
         and get dropped as a dup by `_segregate_built_artifacts`."""

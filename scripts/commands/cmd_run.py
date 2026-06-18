@@ -168,7 +168,7 @@ class ConfigRunCommandsMixin(SessionState):
         _table = {
             'live':       'cache→parse→download→container→source build (+live)→chroot build live→iso build live',
             'installer':  'cache→parse→download→container→source build (+installer)→chroot build installer→iso build installer',
-            'disk':       'cache→parse→download→container→source build (+live)→chroot build live→iso build disk (qcow2)',
+            'disk':       'cache→parse→download→container→source build→chroot build disk→iso build disk (qcow2)',
             'build': 'cache→parse→download→container→source build (indl) — STOPS at source_build_ready (no chroot/ISO)',
         }
         # in [Build] Mode = build, bare `autorun`
