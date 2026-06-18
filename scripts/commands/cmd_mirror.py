@@ -1137,6 +1137,12 @@ class MirrorCommandsMixin(SessionState):
                 "mirror publish: Mode = build — publishing packages only "
                 "(--no-iso implied; ISOs come from a distribution build).",
                 tui.COLOR_INFO)
+            console.print(
+                "  closure: the publish gate checks YOUR packages against the "
+                "LOCAL pool — run `mirror pull` first so it's the merged "
+                "mirror pool.  Complete federation closure is verified "
+                "authoritatively by the distribution publisher's `mirror "
+                "audit` on sync-back.", tui.COLOR_INFO)
         _pos_args = [_a for _a in args if _a not in ('--no-iso', 'no-iso')]
         _release_isos, _missing_isos = self._release_iso_descriptors()
         if _missing_isos and not _no_iso:

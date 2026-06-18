@@ -29051,6 +29051,22 @@ def test_revoke_builder_adds_to_revoked_preserving_head():
         assert _s.cmd_mirror_builders_decommission('me') is False
 
 
+def test_closure_gate_runs_in_both_modes():
+    """The publish closure gate is wired regardless of [Build] Mode — the
+    install corpus is built from the dep trees unconditionally and passed to
+    remote_publish, so a distribution publisher (full corpus) AND a build-mode
+    peer (subset corpus) both run it over the merged local pool.  The gate
+    documents the responsibility split."""
+    with open(os.path.join(_ROOT, 'scripts', 'commands',
+                           'cmd_mirror.py')) as _f:
+        _pub = _f.read()
+    assert '_install_corpus |= frozenset(' in _pub
+    assert 'install_corpus=_install_corpus or None' in _pub
+    with open(os.path.join(_ROOT, 'scripts', 'coord', 'publish.py')) as _f:
+        _pp = _f.read()
+    assert 'Responsibility split across modes (both run this gate)' in _pp
+
+
 def test_canonical_config_round_trip_and_verify():
     """Owner writes pkg.list + pool.list into canonical.json (sha pinned in
     the head); a peer applies it only when the sha matches the signed head;
@@ -36541,6 +36557,7 @@ def main() -> int:
         test_mirror_builders_register_gates_and_uploads,
         test_revoke_builder_adds_to_revoked_preserving_head,
         test_canonical_config_round_trip_and_verify,
+        test_closure_gate_runs_in_both_modes,
         test_mirror03_publish_hazard_gate_blocks_unsanctioned_local_ahead,
         test_filter_pending_by_ownership_no_existing_owner_keeps,
         test_filter_pending_by_ownership_own_claim_keeps,
