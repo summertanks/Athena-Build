@@ -24276,7 +24276,7 @@ def test_local_cleanup_keeps_highest_prunes_superseded_and_flags_orphan():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UPD-01 step 5 — merge_remote_index (multi-version, signed locally)
+# merge_packages_indexes — multi-version union (append-only, local wins)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_merge_remote_index_preserves_old_versions_multiversion():
@@ -24429,28 +24429,6 @@ def test_generate_top_release_avoids_self_reference_via_tempfile():
     assert "open(output_path, 'wb')" not in _fn, \
         ("_generate_top_release must not stream apt-ftparchive output "
          "directly to output_path — caused MISMATCH Release self-reference")
-
-
-def test_merge_remote_index_signs_locally_and_merges():
-    """merge_remote_index must merge remote+local stanzas, scan the local
-    pool, and sign locally (key never leaves the host)."""
-    import re
-    _ar = os.path.join(_ROOT, 'scripts', 'apt_repo.py')
-    with open(_ar) as fh:
-        _body = fh.read()
-    _m = re.search(r'def merge_remote_index\(.*?(?=\ndef )', _body, re.DOTALL)
-    assert _m, "merge_remote_index not found"
-    _fn = _m.group(0)
-    assert 'merge_packages_indexes(' in _fn, "must merge remote+local stanzas"
-    assert '_scan_packages_to(' in _fn, "must scan the local pool"
-    assert 'sign_release_files(' in _fn, "must sign locally"
-    # Multi-component: non-main components are scanned + published when
-    # populated, and the top-level Release lists the populated set.
-    assert 'non-free-firmware' in _fn, "must publish non-free-firmware component"
-    assert "for _other in ('contrib', 'non-free', 'non-free-firmware')" in _fn
-    assert 'components=_populated' in _fn, \
-        "top Release must list the populated component set, not just main"
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -25677,126 +25655,6 @@ def test_update_build_pending_per_mirror_path():
 # ─────────────────────────────────────────────────────────────────────────────
 # UPD-02 — index on the remote (dpkg-scanpackages on the VM)
 # ─────────────────────────────────────────────────────────────────────────────
-
-def test_remote_scan_packages_builds_ssh_argv():
-    """_remote_scan_packages runs `cd <root> && dpkg-scanpackages -m <rel>` on
-    the VM via ssh (with `-t udeb` for udebs) and returns stdout."""
-    import types
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import apt_repo
-    _calls = []
-
-    def _fake_run(argv, **kw):
-        _calls.append(list(argv))
-        return types.SimpleNamespace(returncode=0, stdout='Package: x\n',
-                                     stderr='')
-
-    _saved = apt_repo.subprocess.run
-    apt_repo.subprocess.run = _fake_run
-    try:
-        _txt = apt_repo._remote_scan_packages(
-            ['ssh', '-i', 'k'], 'u@h', '/srv/asgard',
-            'dists/thor/main/binary-amd64', udeb=False)
-        assert _txt == 'Package: x\n'
-        _argv = _calls[0]
-        assert _argv[:4] == ['ssh', '-i', 'k', 'u@h'], _argv
-        _shell = _argv[4]
-        assert 'cd /srv/asgard' in _shell
-        assert ('dpkg-scanpackages -m dists/thor/main/binary-amd64 /dev/null'
-                in _shell), _shell
-        # udeb variant adds -t udeb
-        _calls.clear()
-        apt_repo._remote_scan_packages(
-            ['ssh'], 'u@h', '/srv/asgard',
-            'dists/thor/main/debian-installer/binary-amd64', udeb=True)
-        assert '-t udeb' in _calls[0][-1], _calls[0]
-    finally:
-        apt_repo.subprocess.run = _saved
-
-
-def test_remote_reindex_wiring():
-    """remote_reindex_and_sign scans REMOTELY but builds Release + signs
-    LOCALLY (key never leaves the box).  Post-COMP-02-local refactor: the
-    shared body lives in `_reindex_and_sign_via`; remote_ is a thin wrapper
-    that closes over _remote_has_debs/_remote_scan_packages.  The "signing
-    stays local" invariant is now in the shared body."""
-    _ar = os.path.join(_ROOT, 'scripts', 'apt_repo.py')
-    with open(_ar) as fh:
-        _b = fh.read()
-    import re
-    _m = re.search(r'def remote_reindex_and_sign\(.*?(?=\ndef )', _b, re.DOTALL)
-    assert _m, "remote_reindex_and_sign not found"
-    _fn = _m.group(0)
-    # The wrapper must delegate to the shared body AND pass the remote scan.
-    assert '_reindex_and_sign_via(' in _fn, (
-        "remote_reindex_and_sign should delegate to the shared body")
-    assert '_remote_scan_packages(' in _fn, "scan must run on the remote"
-    # The shared body must invoke the local-only helpers.
-    _v = re.search(r'def _reindex_and_sign_via\(.*?(?=\ndef )', _b, re.DOTALL)
-    assert _v, "_reindex_and_sign_via not found"
-    _vfn = _v.group(0)
-    for _local in ('_compress_index(', '_write_subdir_release(',
-                   '_generate_top_release(', 'sign_release_files('):
-        assert _local in _vfn, (
-            f"{_local} (local) missing in _reindex_and_sign_via — "
-            f"signing must stay local")
-
-
-def test_local_reindex_wiring():
-    """COMP-02 local-publish twin: local_reindex_and_sign delegates to the
-    same shared body, closing over the local-fs helpers — no ssh, no
-    `remote_root`/`userhost`."""
-    _ar = os.path.join(_ROOT, 'scripts', 'apt_repo.py')
-    with open(_ar) as fh:
-        _b = fh.read()
-    import re
-    _m = re.search(r'def local_reindex_and_sign\(.*?(?=\ndef )', _b, re.DOTALL)
-    assert _m, "local_reindex_and_sign not found"
-    _fn = _m.group(0)
-    assert '_reindex_and_sign_via(' in _fn, (
-        "local_reindex_and_sign should delegate to the shared body")
-    assert '_local_has_debs(' in _fn, "must use the local-fs has-debs probe"
-    assert '_local_scan_packages(' in _fn, (
-        "must use the local-fs dpkg-scanpackages")
-    # No ssh leakage.
-    assert 'ssh_cmd' not in _fn, "local twin must not take an ssh_cmd"
-    assert 'userhost' not in _fn, "local twin must not take a userhost"
-
-
-def test_local_scan_packages_argv_no_ssh():
-    """_local_scan_packages runs dpkg-scanpackages directly via subprocess,
-    NOT through ssh."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import apt_repo
-    _calls = []
-    _orig_run = apt_repo.subprocess.run
-
-    def _fake_run(argv, **kw):
-        _calls.append((argv, kw))
-        class _R:
-            returncode = 0
-            stdout = 'Package: foo\nVersion: 1.0\n\n'
-            stderr = ''
-        return _R()
-    apt_repo.subprocess.run = _fake_run
-    try:
-        _out = apt_repo._local_scan_packages(
-            '/tmp/some-root', 'dists/thor/main/binary-amd64', udeb=False)
-    finally:
-        apt_repo.subprocess.run = _orig_run
-    assert _out and 'Package: foo' in _out
-    assert len(_calls) == 1
-    _argv, _kw = _calls[0]
-    assert _argv[0] == 'dpkg-scanpackages', (
-        f"first argv element must be dpkg-scanpackages, got {_argv[0]}")
-    assert 'ssh' not in _argv, f"ssh leaked into local scan argv: {_argv}"
-    assert _kw.get('cwd') == '/tmp/some-root', (
-        f"cwd must be the dest root, got {_kw.get('cwd')}")
-
-
-
-
-
 
 def test_index_minimal_stages_nested_subset():
     """cmd_index_repo_minimal stages the runtime subset in the SAME nested
@@ -36125,12 +35983,11 @@ def main() -> int:
         test_published_base_versions,
         test_group_by_pristine_base,
         test_local_cleanup_keeps_highest_prunes_superseded_and_flags_orphan,
-        # UPD-01 step 5: merge_remote_index
+        # merge_packages_indexes
         test_merge_remote_index_preserves_old_versions_multiversion,
         test_merge_packages_indexes_dedup_local_wins,
         test_generate_top_release_subprocess_text_mode_consistency,
         test_generate_top_release_avoids_self_reference_via_tempfile,
-        test_merge_remote_index_signs_locally_and_merges,
         # UPD-01 step 6: workload + Guard A preflight
         test_needs_bump_build_per_file_exact_un,
         test_preflight_stamp_invariant_roundtrips_and_flags_bad_version,
@@ -36173,10 +36030,6 @@ def main() -> int:
         test_manifest_vs_remote_discrepancies,
         test_update_build_pending_per_mirror_path,
         # UPD-02: index on the remote
-        test_remote_scan_packages_builds_ssh_argv,
-        test_remote_reindex_wiring,
-        test_local_reindex_wiring,
-        test_local_scan_packages_argv_no_ssh,
         test_index_minimal_stages_nested_subset,
         # UX-04 persistence
         test_ux04_sha256_sidecar_round_trip,
