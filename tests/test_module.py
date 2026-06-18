@@ -15463,6 +15463,38 @@ def test_v2_state_append_and_scroll():
     assert s.tabs['log'].scroll_offset == 1 + 3
 
 
+def test_tui_page_rows_subtracts_widgets_on_console_only():
+    """The console tab overlays live widgets on its bottom rows, so the
+    scroll page (and clamp viewport) there must be shorter by len(widgets)
+    — otherwise the oldest len(widgets) lines are unreachable during a build.
+    Non-console tabs carry no widgets and keep the full height."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.dispatcher import Dispatcher
+
+    d = Dispatcher(_v2_fake_renderer())     # content_rows() == 20
+    assert d.state.active_tab_name() == 'console'
+
+    # No widgets → full height.
+    assert d._page_rows() == 20
+
+    # Three live widgets on the console tab → viewport shrinks by 3.
+    d.state.add_widget(object())
+    d.state.add_widget(object())
+    d.state.add_widget(object())
+    assert d._page_rows() == 17
+
+    # On a non-console tab the widgets don't overlay, so full height stands.
+    d.state.activate('log')
+    assert d._page_rows() == 20
+
+    # Never collapses below 1 even if widgets exceed the height.
+    d.state.activate('console')
+    for _ in range(40):
+        d.state.add_widget(object())
+    assert d._page_rows() == 1
+
+
 def test_v2_cmdline_edit_and_history():
     """CmdLine matches legacy _Commands semantics (cursor edit + history)."""
     import sys
@@ -35665,6 +35697,7 @@ def main() -> int:
         # tui — event-dispatcher TUI (replaces legacy ARCH-14 P1-P7 tests)
         test_v2_wrap_helpers_round_trip,
         test_v2_state_append_and_scroll,
+        test_tui_page_rows_subtracts_widgets_on_console_only,
         test_v2_cmdline_edit_and_history,
         test_v2_dispatcher_key_events_gated_without_prompt,
         test_v2_dispatcher_status_bar_includes_network,

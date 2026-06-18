@@ -38,23 +38,39 @@ MIN_LINES       = 24
 def _safe_addstr(win, y: int, x: int, text: str, attr: int = 0) -> None:
     """Write `text` at (y, x) inside `win`, clipping to fit.  Never raises.
 
-    Off-window coords silently no-op.  Clipping width is
-    ``max_x - x - 1``: leaving the bottom-right cell untouched avoids
-    curses' forced-scroll trigger AND in observed cases prevents the
-    next row's first column getting overwritten when the cursor lands
-    at the absolute end of a row.  The wrap layer
-    (``Renderer.width()``) MUST honor the same width budget."""
+    Fills the FULL row width, including the last column.  The catch:
+    `addstr`-ing a glyph into the bottom-right cell of a window forces
+    the cursor past the corner — curses raises `curses.error` and (on
+    some terminals) leaves a pending line-wrap that swallows the next
+    write.  So the last column is written with `insch`, which places a
+    glyph without advancing the cursor past the right margin — no error,
+    no pending wrap, and the rightmost column actually renders.
+
+    Off-window coords silently no-op.  The wrap layer
+    (``Renderer.width()``) reserves the same full budget (``max_x``)."""
     try:
         max_y, max_x = win.getmaxyx()
         if y < 0 or y >= max_y or x < 0 or x >= max_x:
             return
-        available = max_x - x - 1
-        if available <= 0:
+        budget = max_x - x
+        s = text[:budget]
+        if not s:
             return
-        if attr:
-            win.addstr(y, x, text[:available], attr)
-        else:
-            win.addstr(y, x, text[:available])
+        fills_last_col = (len(s) == budget)
+        # addstr everything up to the penultimate column; the last column
+        # (if our text reaches it) goes in via insch below.
+        head = s[:-1] if fills_last_col else s
+        if head:
+            if attr:
+                win.addstr(y, x, head, attr)
+            else:
+                win.addstr(y, x, head)
+        if fills_last_col:
+            last_x = x + budget - 1     # == max_x - 1, the right margin
+            if attr:
+                win.insch(y, last_x, s[-1], attr)
+            else:
+                win.insch(y, last_x, s[-1])
     except curses.error:
         pass
 
@@ -115,25 +131,16 @@ class Renderer:
             pass
 
     def width(self) -> int:
-        """Current writable tab content width — used by dispatcher for
+        """Current writable tab content width — used by the dispatcher for
         wrap-row calculations.
 
-        Subtract 2 from the raw window width, not 1.  Reasoning:
-        - `_safe_addstr` itself clips to ``max_x - 1`` to keep the
-          bottom-right cell untouched (curses forced-scroll guard).
-        - But chunks of exactly ``max_x - 1`` chars land the cursor
-          AT column ``max_x - 1`` (the very last column).  In some
-          terminals this state leaks into the NEXT row's first cell
-          on the subsequent addstr — the first character of every
-          wrapped continuation line appears blank.
-
-        Wrap budget = ``max_x - 2`` leaves a one-column gap before
-        the reserved cell so the cursor never reaches the last column
-        and no edge-case behaviour fires.  Visible content per row
-        is ``max_x - 2`` chars in cols 0..max_x-3; cols max_x-2 and
-        max_x-1 stay empty."""
+        Full window width: `_safe_addstr` renders every column including
+        the last (the corner cell goes in via `insch`), so the wrap budget
+        must be the same full width or the dispatcher's row counts and the
+        renderer's actual layout drift apart — which is exactly what made
+        scrolling stop one screenful short."""
         _raw = self._w if self._w > 0 else MIN_COLS
-        return max(1, _raw - 2)
+        return max(1, _raw)
 
     def content_rows(self) -> int:
         """Current tab content rows — used by dispatcher for scroll."""
@@ -208,9 +215,12 @@ class Renderer:
             pass
         self._h, self._w = new_h, new_w
         self._tab_h = max(1, new_h - FOOTER_HEIGHT)
-        # Clamp scroll offsets to the new total display rows.
+        # Clamp scroll offsets to the new total display rows.  Count at the
+        # SAME width the renderer wraps at (self.width()), else the clamp
+        # undercounts rows and the bottom of the buffer becomes unreachable.
+        _ww = self.width()
         for t in state.tabs.values():
-            total = wrap.total_display_rows(t.buffer, self._w)
+            total = wrap.total_display_rows(t.buffer, _ww)
             t.scroll_offset = min(t.scroll_offset, max(0, total - self._tab_h))
         # Resize footer + tab windows in place.
         if self._footer is not None:
@@ -256,14 +266,10 @@ class Renderer:
         i = len(tab.buffer) - 1
         while i >= 0 and len(display) < need:
             text, attr = tab.buffer[i]
-            # Wrap budget = max_x - 2.  See `Renderer.width()` for
-            # the full reasoning: chunks of exactly max_x - 1 chars
-            # land the cursor at the last column, which (on observed
-            # terminals) causes the first character of the NEXT row
-            # to be silently dropped on the subsequent addstr.
-            # Shrinking by one more column keeps cursor in cols
-            # 0..max_x-3 and eliminates the edge.
-            wrapped = wrap.wrap_line(text.rstrip('\n'), max(1, max_x - 2))
+            # Wrap budget = full window width; `_safe_addstr` paints every
+            # column (last cell via insch).  MUST match `Renderer.width()`
+            # so the dispatcher's wrapped-row counts agree with what's drawn.
+            wrapped = wrap.wrap_line(text.rstrip('\n'), max(1, max_x))
             for chunk in reversed(wrapped):
                 display.append((chunk, attr))
             i -= 1

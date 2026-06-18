@@ -291,6 +291,19 @@ class Dispatcher:
         # the dispatcher doesn't yet handle without crashing the loop.
 
     # ─── Individual handlers ─────────────────────────────────────────────
+    def _page_rows(self) -> int:
+        """Rows of scrollable content actually visible on the active tab —
+        the PgUp/PgDn page size AND the scroll clamp's viewport height.
+
+        The console tab overlays live widgets (spinners, progress bars) on
+        its bottom rows, so its real viewport is shorter by len(widgets).
+        Using the full height there makes the scroll clamp stop short and
+        leaves the oldest len(widgets) lines unreachable during a build."""
+        cr = self._renderer.content_rows()
+        if self.state.active_tab_name() == 'console':
+            cr = max(1, cr - len(self.state.widgets))
+        return cr
+
     def _on_key(self, key: str) -> None:
         """Single keystroke dispatch.
 
@@ -338,12 +351,12 @@ class Dispatcher:
         # Scroll the output, switch tabs, leave a selector — so the operator
         # can read output and move around during a long build.
         if key == 'KEY_PPAGE':
-            cr = self._renderer.content_rows()
+            cr = self._page_rows()
             st.active_tab().scroll_by(cr, self._renderer.width(), cr)
             st.dirty = True
             return
         if key == 'KEY_NPAGE':
-            cr = self._renderer.content_rows()
+            cr = self._page_rows()
             st.active_tab().scroll_by(-cr, self._renderer.width(), cr)
             st.dirty = True
             return
