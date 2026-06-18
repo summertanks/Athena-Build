@@ -29329,6 +29329,21 @@ def _write_clearsigned_inrelease(path: str, sha256_block: 'list[tuple[str, int, 
         _fh.write(_content)
 
 
+def test_snapshot_adopt_forward_is_forward_only():
+    """mirror pull adopts the mirror's snapshot pin FORWARD only — a strictly
+    newer remote pin is adopted; equal/older/empty remote → no adoption
+    (never roll the local pin backward)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    _a, _b = '20260101T000000Z', '20260601T000000Z'
+    assert _mir.snapshot_adopt_forward(_a, _b) == _b      # remote newer → adopt
+    assert _mir.snapshot_adopt_forward(_b, _a) is None     # remote older → no
+    assert _mir.snapshot_adopt_forward(_a, _a) is None     # equal → no
+    assert _mir.snapshot_adopt_forward('', _b) == _b       # unset local → adopt
+    assert _mir.snapshot_adopt_forward(_a, '') is None     # no remote → no
+
+
 def test_publish_lock_records_and_reports_holder():
     """The publish flock writes a `<lock>.holder` sidecar with our builder-id
     so a blocked peer can be told who is publishing; remote_flock_holder
@@ -36382,6 +36397,7 @@ def main() -> int:
         test_cmd_mirror_query_requires_pkg_arg,
         test_cmd_mirror_audit_no_mirrors_reports_warning,
         # MIRROR-01 audit gap (1) — InRelease + Packages chain + ownership
+        test_snapshot_adopt_forward_is_forward_only,
         test_publish_lock_records_and_reports_holder,
         test_audit_inrelease_against_head_sha_match_returns_parsed_release,
         test_audit_inrelease_against_head_sha_mismatch_critical,

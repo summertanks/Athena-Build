@@ -236,6 +236,16 @@ def validate_host_for_type(
     return True, ''
 
 
+def snapshot_adopt_forward(local: str, remote: str) -> Optional[str]:
+    """Federation snapshot adoption decision: return `remote` if it is
+    strictly FORWARD of `local` (so a pull can advance the local pin to the
+    mirror's), else None.  Snapshot pins are `YYYYMMDDTHHMMSSZ` UTC strings —
+    lexical order == chronological order.  Never rolls a pin backward."""
+    if remote and (not local or remote > local):
+        return remote
+    return None
+
+
 def derive_name_from_url(url: str, host_type: str) -> Optional[str]:
     """Auto-derive a mirror name from the URL + host type.
 

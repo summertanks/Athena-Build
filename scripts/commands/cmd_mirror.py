@@ -1446,6 +1446,28 @@ class MirrorCommandsMixin(SessionState):
                     "trust the fetched tree.", tui.COLOR_ERROR)
                 _all_ok = False
                 continue
+            # Auto-adopt the mirror's snapshot pin FORWARD (federation: the
+            # mirror's snapshot is authoritative; a peer that advanced it and
+            # published newer packages would otherwise be invisible to our
+            # claim filter, which keys on the local pin).  Forward-only —
+            # never roll our pin backward.
+            _remote_snap = ''
+            _hs = _head.get('snapshot')
+            if isinstance(_hs, dict):
+                _remote_snap = str(_hs.get('current') or '')
+            _adopt = (_mirror.snapshot_adopt_forward(_snap, _remote_snap)
+                      if getattr(self.config, 'snapshot_enabled', False)
+                      else None)
+            if _adopt:
+                utils.write_snapshot_state(self.config, current=_adopt)
+                self.flags.cache_ready = False
+                self.flags.dep_check_ready = False
+                console.print(
+                    f"  snapshot: advanced local pin {_snap or '(unset)'} "
+                    f"→ {_adopt} (from mirror {_n}) — re-run "
+                    "`cache build` + `cache parse` to resolve at the new pin",
+                    tui.COLOR_WARNING)
+                _snap = _adopt
             _keyring = _id.load_keyring(
                 os.path.join(_fetched, 'keyring', 'builders'))
             _revoked = _head.get('revoked_builders') or {}
