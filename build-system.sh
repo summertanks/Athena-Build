@@ -202,12 +202,25 @@ case "$PACKAGE" in
 esac
 echo "Using awk: ${PACKAGE:-unknown} — ${AWK_VERSION:-version unknown}"
 
-# Build mode ([Build] Mode in the config).  A build-mode peer only builds +
-# publishes packages (chroot/ISO/disk steps are refused in build mode), so it
-# needs Docker + the cache/source toolchain but NOT the ISO/disk host tools.
-# In that mode a missing ISO/disk tool is a note, not a fatal startup error.
+# Build mode.  A build-mode peer only builds + publishes packages (chroot/ISO/
+# disk steps are refused in build mode), so it needs Docker + the cache/source
+# toolchain but NOT the ISO/disk host tools — a missing one is a note, not a
+# fatal startup error.
+#
+# Mode now lives in the untracked machine-local config/local.conf ([Local]
+# Mode), falling back to build.conf for back-compat — mirror BuildConfig's
+# precedence (local.conf > build.conf > distribution) so this gate agrees with
+# the Python side on a peer whose mode is only in local.conf.
 BUILD_MODE="distribution"
-if [ -f "$CONFIG_FILE" ] && grep -qiE '^[[:space:]]*Mode[[:space:]]*=[[:space:]]*build([[:space:]]|$)' "$CONFIG_FILE"; then
+LOCAL_CONF="$(dirname "$CONFIG_FILE")/local.conf"
+MODE_LINE=""
+if [ -f "$LOCAL_CONF" ]; then
+    MODE_LINE=$(grep -iE '^[[:space:]]*Mode[[:space:]]*=' "$LOCAL_CONF" | head -1)
+fi
+if [ -z "$MODE_LINE" ] && [ -f "$CONFIG_FILE" ]; then
+    MODE_LINE=$(grep -iE '^[[:space:]]*Mode[[:space:]]*=' "$CONFIG_FILE" | head -1)
+fi
+if printf '%s' "$MODE_LINE" | grep -qiE '=[[:space:]]*build([[:space:]]|$)'; then
     BUILD_MODE="build"
     echo "Build mode = build — ISO/disk host tools are optional."
 fi

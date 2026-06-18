@@ -27,7 +27,40 @@ A mirror is **not** the same as a `[Mirror.<name>]` section in
 that source-sync and the apt cache pull from.  Two different concepts;
 the section name is historical.
 
+## First-run onboarding (the wizard)
+
+On the **first interactive launch** of a not-yet-set-up checkout, a one-time
+wizard runs before the prompt opens (skipped for `--headless` / `--cmd` /
+`--api` / `--yes`).  It establishes the box's identity so you don't have to
+wire it up by hand:
+
+1. **Role** — *first/origin* (bootstraps the federation; always distribution
+   mode) or *federation peer* (joins an existing mirror).
+2. **First system**: mode is forced to `distribution`; optionally enables a
+   publish mirror (generates the tier-1 key, `mirror init`, `mirror add`).
+3. **Federation peer**: registration is **mandatory** and its prerequisites are
+   validated up front — the tier-1 signing key must already be imported
+   (copied from the first system; it's the *private* key, since publish
+   re-signs the coord-head), then `mirror init` (if needed), `mirror add`, and
+   `mirror builders register`.  Only after that can the peer pick build vs
+   distribution mode.
+4. **Snapshot pin** for the build.
+
+The result is recorded in **`config/local.conf`** — an **untracked,
+machine-local** sidecar holding `[Local] Mode/Role/SetupComplete` and a
+`[Registration]` marker per mirror.  This is why a fresh `git pull` never
+inherits another machine's mode or mirror identity, and why a registered peer
+never has to re-register.  Mode is changed later with `set mode` (persisted
+here); more mirrors are added later with `mirror add`.
+
+> `set mode build` is refused on a first/origin system, and on any peer that
+> hasn't registered to a mirror yet (no `[Registration]` marker) — build mode
+> publishes a subset only an already-bootstrapped mirror accepts.
+
 ## Prerequisites
+
+> The onboarding wizard above performs all of these for you on a fresh box;
+> this table is the manual / re-check reference.
 
 | Required | Check |
 |---|---|
@@ -663,9 +696,9 @@ publish reconciles them.
 
 ## Migrating from the legacy `[Repo]` keys
 
-If `config/build.conf` still carries the pre-MIRROR-01 keys, they're
-dead text — readers were removed in commit `8cc803b`, but the file is
-hand-maintained so nothing has stripped them.  Safe to delete:
+The pre-MIRROR-01 publish keys have been **removed** from the shipped
+`config/build.conf` (they were dead — readers gone since `8cc803b`, and they
+leaked one machine's mirror identity into a tracked file):
 
 ```
 AptSourceURL     = http://…/asgard/
@@ -674,7 +707,10 @@ PublishSshKey    = config/repo_asgard.key
 ExternalEnabled  = true
 ```
 
-Keep `SigningKeyUid` (used by tier-1 GPG signing).  Keep every
+If an old checkout still has them, delete them.  Mirror endpoints now live
+per-machine in the **untracked** `config/mirror.<name>.state` files (created by
+`mirror add` / onboarding) and machine-local settings in `config/local.conf` —
+both gitignored.  Keep `SigningKeyUid` (used by tier-1 GPG signing).  Keep every
 `[Mirror.<name>]` section in the upstream area — those are **upstream
 Debian mirrors**, unrelated to MIRROR-01 publish targets.
 
