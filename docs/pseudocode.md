@@ -192,7 +192,7 @@ Living under `config/` rather than `cache/` so `clean cache` can't wipe it.
   THIS .deb/.udeb go?"
 - `all_deb_dirs()` returns the binary dirs maintenance walks should
   visit (main / main-udeb / doc / dbgsym / tests). Deliberately excludes
-  contrib / non-free / non-free-firmware so `package strip` can't NMU-strip
+  contrib / non-free / non-free-firmware so `repo repair strip` can't NMU-strip
   tunneled pristine passthrough binaries.
 
 ### `parse_pkg_list_groups(path)` and `parse_pkg_list_group_meta(path)`

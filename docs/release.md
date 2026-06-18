@@ -297,7 +297,7 @@ update cycles produce superseded local artifacts every round, and the
 |---|---|
 | `cache build` re-runs after snapshot change | Expected — snapshot pin changed, cache is invalidated.  Force is unnecessary. |
 | `mirror audit` flags signature failure | Pubkey on the consuming side is stale.  Re-roll the chroot (`chroot build` re-installs current keyring) or copy the keyring out manually. |
-| `source build` rebuilds the same package every run | Stale build record (`<pkg>.build.json`) from a prior force; or pristine filename matches a previously-stamped `+asg uN` (see `find_matching_artifact`).  `package strip` + `package audit_nmu` confirms repo state. |
+| `source build` rebuilds the same package every run | Stale build record (`<pkg>.build.json`) from a prior force; or pristine filename matches a previously-stamped `+asg uN` (see `find_matching_artifact`).  `repo repair strip` + `repo audit` confirms repo state. |
 | Update mode lists more packages than `source audit` does | Expected — `source audit` reports needs_build via filename match; update mode adds bump-targets whose pristine filename collides with a prior build.  See `docs/pseudocode.md` "source audit vs source build all". |
 | `mirror publish` fails at the remote re-index step | `dpkg-dev` not installed on the mirror host.  `sudo apt-get install -y dpkg-dev`. |
 | `mirror publish` BLOCKs with "federation gate" | A peer's `coord-head.neighbours` differs from local config.  Run `mirror reconcile-neighbours` to align peers, then retry. |

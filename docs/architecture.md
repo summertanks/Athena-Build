@@ -32,7 +32,7 @@ also run each command individually.
 cache build → cache parse → source sync → container init
    → source build → chroot build → chroot verify
    → iso build {live | installer | disk}
-   → repo index → mirror publish
+   → mirror publish   (repo indexing is automatic)
 ```
 
 | Stage | Command | Purpose | Major modules |
@@ -50,7 +50,7 @@ After the artifact lands, two more stages handle distribution:
 
 | Stage | Command | Purpose |
 |---|---|---|
-| 9. Repo index | `repo index full \| minimal` | `dpkg-scanpackages` over `repo/dists/<codename>{,-debug}/`, `apt-ftparchive release`, GPG-sign `Release` + clearsign `InRelease`. |
+| 9. Repo index | _(automatic)_ | `dpkg-scanpackages` over `repo/dists/<codename>{,-debug}/`, `apt-ftparchive release`, GPG-sign `Release` + clearsign `InRelease`.  Run automatically by `chroot build` / `mirror publish` when the `InRelease` is missing — not a separate operator command. |
 | 10. Mirror publish | `mirror publish [<name>]` | Per-file `.deb` push + Ed25519-signed claims + tier-1 GPG-signed `coord-head` to every configured mirror (or one).  Federation-gated; first-publish bootstraps the peer.  See [`docs/mirror-setup.md`](mirror-setup.md). |
 
 For incremental updates (advance the snapshot, rebuild only the changed
@@ -258,10 +258,11 @@ package and an 11-file `scripts/tui/` curses package.  Grouped by role:
   the parsed `Cache` + `DependencyTree` via pickle protocol 5 + gzip
   under `<dir_cache>/`; fingerprint-gated (config + mirror InReleases +
   fork tree-hashes + patch-set hashes + snapshot + arch + profiles)
-  so a `cache parse`-invalidating change refuses restore.  `save_session`
-  still writes the blob (dormant); the `resume` command / `--resume` flag
-  that consumed it were removed 2026-06-08 pending a relook, so the module
-  has no live restore consumer right now.
+  so a `cache parse`-invalidating change refuses restore.  Fully dormant:
+  the `resume` command / `--resume` flag that consumed it were removed
+  pending a relook, and the `save_session` call sites were dropped too, so
+  the blob is no longer written or read — the module is retained intact for
+  a future re-wire.
 - **`select_packages.py`** — curses-only interactive package picker
   behind `cache select`.
 
