@@ -399,10 +399,120 @@ def run_ownership_transfer(verbose=True):
     return {'ok': True}
 
 
+def run_divergence(verbose=True):
+    """Snapshot divergence: a peer BEHIND the mirror is warned to pull; after
+    a forward-adopt pull the divergence clears; a builder AHEAD of the mirror
+    gets an ADVANCE note."""
+    def _step(msg):
+        if verbose:
+            print(f"  ✓ {msg}")
+    with tempfile.TemporaryDirectory() as _td:
+        _lab = FederationLab(_td)
+        _owner = _lab.builder('owner', mode='distribution')
+        _peer = _lab.builder('peer', mode='build')
+        _owner.set_lists('foo\n', '')
+        _owner.fake_build('foo', '1.0')
+        _lab.publish(_owner, 'S1')
+        _owner.fake_build('foo', '2.0')
+        _lab.publish(_owner, 'S2')               # mirror current → S2
+        _cur = _head.read_coord_head(
+            _lab.mirror_coord, _lab.signing_home)['snapshot']['current']
+        assert _cur == 'S2'
+
+        _peer.pin = 'S1'                          # peer hasn't pulled
+        _note = _publish.snapshot_divergence_note(_peer.pin, _cur)
+        assert _note and _note.startswith('WARNING: mirror snapshot')
+        _step("peer behind (S1 < mirror S2) → behind-WARNING (pull first)")
+
+        _lab.pull(_peer)                          # forward-adopt to S2
+        assert _peer.pin == 'S2'
+        assert _publish.snapshot_divergence_note(_peer.pin, _cur) is None
+        _step("peer pulled → pin adopts S2; divergence clears")
+
+        _ahead = _publish.snapshot_divergence_note('S3', _cur)
+        assert _ahead and _ahead.startswith('snapshot: this publish ADVANCES')
+        _step("publisher ahead (S3 > mirror S2) → ADVANCE note")
+    return {'ok': True}
+
+
+def run_reclaim(verbose=True):
+    """RECLAIM-01: the owner rebuilds the SAME filename with different bytes.
+    A plain re-publish is frozen_bytes_blocked; a reclaim (carrying
+    reclaims_seq) is allowed, and superseding folds the old claim so the
+    hash-conflict scan stays clean."""
+    def _step(msg):
+        if verbose:
+            print(f"  ✓ {msg}")
+    with tempfile.TemporaryDirectory() as _td:
+        _lab = FederationLab(_td)
+        _owner = _lab.builder('owner', mode='distribution')
+        _owner.set_lists('foo\n', '')
+        _fn = _owner.fake_build('foo', '1.0')
+        _lab.publish(_owner, 'S1')
+        _old = _lab.owners()[_fn]
+        _old_seq, _new_sha = _old['seq'], 'e' * 64
+
+        _cand = {'filename': _fn, 'sha256': _new_sha, 'built_version': '1.0'}
+        _kept, _blk = _publish.filter_pending_by_ownership(
+            'owner', [_cand], _lab.owners())
+        assert not _kept and _blk and 'frozen pool copy' in _blk[0]['reason']
+        _step("owner rebuild, different bytes, no reclaim → frozen_bytes_blocked")
+
+        _recl = dict(_cand, reclaims_seq=_old_seq)
+        _kept, _blk = _publish.filter_pending_by_ownership(
+            'owner', [_recl], _lab.owners())
+        assert _kept and not _blk
+        _step("reclaim (reclaims_seq set) → allowed (sanctioned overwrite)")
+
+        _reclaim_claim = _schema.new_reclaim(
+            builder='owner', seq=_old_seq + 1, package='foo',
+            intended_version='1.0', built_version='1.0', filename=_fn,
+            sha256=_new_sha, size=1, snapshot='S1', built_at='T',
+            reclaims_seq=_old_seq)
+        _conf = _reconcile.detect_hash_conflicts(
+            {'owner': [_old['claim'], _reclaim_claim]})
+        assert not [_f for _f in _conf if _f.severity == 'CRITICAL'], \
+            "a reclaim must fold the old claim — no self-conflict"
+        _step("reclaim folds the old claim → hash-conflict scan stays clean")
+    return {'ok': True}
+
+
+def run_publish_halt(verbose=True):
+    """PUBLISH_HALT recovery: a set sentinel blocks publish; clearing it
+    (what `mirror conflict resolve` does) restores publishing."""
+    def _step(msg):
+        if verbose:
+            print(f"  ✓ {msg}")
+    with tempfile.TemporaryDirectory() as _td:
+        _lab = FederationLab(_td)
+        _owner = _lab.builder('owner', mode='distribution')
+        _owner.set_lists('foo\n', '')
+        _owner.fake_build('foo', '1.0')
+
+        def _pub():
+            return _publish.local_publish(
+                builder_id=_owner.id, config=_owner,
+                private_key_path=_owner.priv, public_key_path=_owner.pub,
+                snapshot_pin='S1', read_build_record=_utils.read_build_record)
+
+        _reconcile.write_publish_halt(_owner.dir_coord, 'hash conflict: foo_1.0')
+        assert _pub() == (0, 0), "publish must refuse while PUBLISH_HALT is set"
+        _step("PUBLISH_HALT set → local_publish refused (0 claims)")
+
+        os.remove(os.path.join(_owner.dir_coord, 'PUBLISH_HALT'))
+        assert _reconcile.publish_halt_reason(_owner.dir_coord) is None
+        assert _pub() == (1, 0), "publish must work after the halt is cleared"
+        _step("PUBLISH_HALT cleared → publish recovers (1 claim)")
+    return {'ok': True}
+
+
 if __name__ == '__main__':
-    print("federation_lab: build-mode peer end-to-end simulation")
-    print(f"\nPASS — happy path: {run(verbose=True)}")
-    print("\nfederation_lab: hash-conflict scenario")
-    print(f"\nPASS — hash conflict: {run_hash_conflict(verbose=True)}")
-    print("\nfederation_lab: ownership-transfer scenario")
-    print(f"\nPASS — ownership matrix: {run_ownership_transfer(verbose=True)}")
+    for _name, _fn in (
+            ('build-mode peer end-to-end', run),
+            ('hash-conflict', run_hash_conflict),
+            ('ownership-transfer', run_ownership_transfer),
+            ('snapshot divergence', run_divergence),
+            ('reclaim (same-version rebuild)', run_reclaim),
+            ('PUBLISH_HALT recovery', run_publish_halt)):
+        print(f"\nfederation_lab: {_name}")
+        print(f"PASS — {_name}: {_fn(verbose=True)}")
