@@ -591,6 +591,27 @@ def unsanctioned_local_ahead(ahead_rows: 'List[dict]',
     return [_a for _a in ahead_rows if _a.get('filename') not in _reclaimed]
 
 
+def snapshot_divergence_note(local_pin: str, remote_current: str) -> 'Optional[str]':
+    """Operator note when a publish's local snapshot pin diverges from the
+    mirror's current pin.  Returns an ADVANCE note (local ahead → other
+    builders' next pull moves forward), a behind-WARNING (mirror ahead →
+    pull recommended; owned packages may still publish above the base), or
+    None when the pins match or either is unknown."""
+    if not (local_pin and remote_current) or local_pin == remote_current:
+        return None
+    if local_pin > remote_current:
+        return (f"snapshot: this publish ADVANCES the mirror pin "
+                f"{remote_current} -> {local_pin}; every other builder's "
+                "next `mirror pull` will move its pin forward to it")
+    return (f"WARNING: mirror snapshot {remote_current} is AHEAD of your pin "
+            f"{local_pin} and you have not pulled. A peer may have published "
+            "newer packages; run `mirror pull` to sync. You may still "
+            "publish the filenames you OWN (no two builders own one "
+            "filename) as long as they are not below the mirror base -- but "
+            "verify your asg uN lineage is current first to keep bump "
+            "tracking monotonic.")
+
+
 def remote_publish(
     *,
     builder_id: str,
@@ -742,6 +763,14 @@ def remote_publish(
             f"loaded {len(_keyring)} peer pubkey(s), "
             f"{sum(len(v) for v in _by_builder.values())} prior claim(s) "
             f"across {len(_by_builder)} builder(s)")
+
+        # Snapshot divergence vs the mirror (informational; the hard floor is
+        # the snapshot.current < mirror.base refusal in the command layer).
+        _rsnap = (_head_dict or {}).get('snapshot') or {}
+        _div = snapshot_divergence_note(
+            snapshot_pin, str(_rsnap.get('current') or ''))
+        if _div:
+            _status(_div)
 
         # Step 3a — STA-30(a): stale-local-jsonl guard.  Step 6 assigns new
         # seqs from max_seq(our LOCAL jsonl) and Step 7 wholesale-replaces
