@@ -1,4 +1,4 @@
-"""API-01 — disk readers behind the read-only endpoints.
+"""Disk readers behind the read-only endpoints.
 
 Pure functions over the on-disk artifacts (build records, buildflags).
 No fastapi imports, no BuildSession — these run identically under the

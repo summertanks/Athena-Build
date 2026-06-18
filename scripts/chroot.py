@@ -1064,7 +1064,7 @@ class _ChrootMixin:
     def _setup_chroot_env(self):
         """Build the env for non-interactive dpkg in a chroot.
 
-        STA-53(c): a per-instance env dict (passed explicitly to the chroot
+        A per-instance env dict (passed explicitly to the chroot
         subprocess calls) rather than a permanent mutation of the process-wide
         os.environ — the old global write clobbered the TUI session's PATH and
         leaked DPKG_ROOT for the rest of the run (a later in-session dpkg could
@@ -1566,7 +1566,7 @@ class _ChrootMixin:
         tui.console.print("System configuration files written")
 
     def _install_signing_keyring(self):
-        """CONF-02 phase 3: copy the project's exported public signing
+        """Phase 3: copy the project's exported public signing
         keyring into the chroot at /usr/share/keyrings/.
 
         This is the conventional location for distro-signing keys —

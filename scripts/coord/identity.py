@@ -1,4 +1,4 @@
-"""COORD-01 builder identity — Ed25519 sign/verify, keyring load.
+"""Builder identity — Ed25519 sign/verify, keyring load.
 
 Backed by openssl(1) — no Python crypto dep required on the operator's
 host.  openssl 1.1.1+ supports Ed25519 natively (`openssl genpkey
@@ -93,7 +93,7 @@ def generate_keypair(identity_dir: str, builder_id: str,
 def _sign_bytes(private_path: str, data: bytes) -> bytes:
     """Raw Ed25519 signature over `data` (64 bytes).  Subprocess via
     openssl pkeyutl with -rawin (don't pre-hash; Ed25519 specifies
-    SHA-512 internally per RFC 8032)."""
+    Internally per RFC 8032)."""
     _fd_in, _in = tempfile.mkstemp(prefix='.coord_sign_in.', suffix='.bin')
     _fd_out, _out = tempfile.mkstemp(prefix='.coord_sign_out.', suffix='.bin')
     try:

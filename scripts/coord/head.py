@@ -1,4 +1,4 @@
-"""COORD-01 coord-head manifest — GPG-clearsigned canonical state.
+"""Coord-head manifest — GPG-clearsigned canonical state.
 
 The coord-head is the single point of authority for "what is the
 current state of the coord tree", signed by the tier-1 (InRelease)

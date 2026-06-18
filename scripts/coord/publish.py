@@ -1,4 +1,4 @@
-"""COORD-01 publish transaction — sign + push the claim layer.
+"""Publish transaction — sign + push the claim layer.
 
 Two entry points:
 
@@ -148,7 +148,7 @@ def emit_deprecation_claims(
     built_at: str,
     start_seq: int,
 ) -> List[dict]:
-    """SELECT-LOCK: build unsigned `deprecated` claims for every file we
+    """Build unsigned `deprecated` claims for every file we
     currently OWN+publish whose SOURCE is no longer selected.
 
     The authority is the selection lockfile (`closure_srcs` = the set of
@@ -203,7 +203,7 @@ def emit_obsolescence_claims(
     built_at: str,
     start_seq: int,
 ) -> List[dict]:
-    """LEDGER-01: build unsigned `obsolete` claims for every OLD-version
+    """Build unsigned `obsolete` claims for every OLD-version
     file we own+publish that a NEWER version of the same binary (same
     name + arch) supersedes.
 
@@ -278,7 +278,7 @@ def validate_reclaim_intents(
     intents: List[dict],
     snapshot_pin: str,
 ) -> Tuple[List[dict], List[str]]:
-    """RECLAIM-01 — re-validate operator-resolved reclaim intents
+    """Re-validate operator-resolved reclaim intents
     against the freshly fetched remote view and construct the pending
     reclaim claims (seq=0; caller assigns + stamps published at
     append, same as any pending claim).
@@ -373,7 +373,7 @@ def filter_pending_by_ownership(
     candidates: List[dict],
     existing_owners: Dict[str, dict],
 ) -> Tuple[List[dict], List[dict]]:
-    """MIRROR-02 chunk 8: apply the publish-time ownership decision
+    """Apply the publish-time ownership decision
     matrix to each candidate claim.
 
     Returns ``(kept_pending, blocked)`` where ``kept_pending`` is the
@@ -577,7 +577,7 @@ def _read_inrelease_sha256_and_date(inrelease_path: str) -> Tuple[str, str]:
 
 def unsanctioned_local_ahead(ahead_rows: 'List[dict]',
                              reclaim_intents: 'List[dict]') -> 'List[dict]':
-    """MIRROR-03 publish-hazard gate.  Of the local-ahead candidates (our own
+    """Publish-hazard gate.  Of the local-ahead candidates (our own
     already-published files whose on-disk bytes diverged at the SAME version),
     return those NOT covered by an explicit reclaim intent.
 

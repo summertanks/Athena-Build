@@ -242,7 +242,7 @@ class ConfigRunCommandsMixin(SessionState):
         """Run the full pipeline through to a pre-installed bootable qcow2
         disk image (COMP-09).
 
-        SURFACES-01: the disk image is mastered from its OWN minimal chroot
+        The disk image is mastered from its OWN minimal chroot
         (buildroot/disk, the [Disk] Groups closure) — decoupled from the
         live/GNOME chroot.  Gates the final step on iso_disk_ready.
         """
@@ -259,7 +259,7 @@ class ConfigRunCommandsMixin(SessionState):
         self._run_autorun_steps('autorun disk', _steps)
 
     def cmd_auto_run_build(self):
-        """MIRROR-02: run the build-mode pipeline through to a complete
+        """Run the build-mode pipeline through to a complete
         source build of every package in `config/build_pkg.list`.
 
         Stops at source_build_ready — no chroot or ISO assembly

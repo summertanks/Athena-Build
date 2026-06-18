@@ -205,7 +205,7 @@ def scan_repo_state(config: 'BuildConfig', subdir: str = 'main',
       'dbgsym'  -dbgsym side artifacts
       'tests'   -test / -tests side artifacts
 
-    CONF-01 Stage D (2026-05-22 fix-up): paths come from
+    (2026-05-22 fix-up): paths come from
     config.deb_dir_for(subdir), which routes to the new nested
     apt-repo layout (e.g. main → dists/<codename>/main/binary-<arch>/,
     dbgsym → dists/<codename>-debug/main/binary-<arch>/).  Pre-Stage-D
@@ -359,7 +359,7 @@ def iter_packages_all_versions(
     operate per-file (e.g. to delete older versions that scan_repo_state
     would hide).
 
-    CONF-01 Stage E (2026-05-22): replaces the per-file DebFile walk
+    Replaces the per-file DebFile walk
     in cmd_package_cleanup's _scan_for_obsoletes — was ~N×fork+exec+
     tar-extract+parse; now a single dpkg-scanpackages run (cached
     by scan_repo_state) + a fast apt_pkg.TagFile pass.  Order of
@@ -456,7 +456,7 @@ def _write_signed_manifest(path: str, packages_text: str,
     — AND removes any partially-written manifest so a future
     `_read_signed_manifest` returns '' (no false authority).
 
-    STA-21 (2026-05-28): previously logged WARNING + fell through on
+    Previously logged WARNING + fell through on
     broad exception during signing setup, leaving an UNSIGNED manifest on
     disk.  `_read_signed_manifest` only verifies when `.sig` is present,
     so a silently-unsigned write became a silently-trusted read on the
@@ -509,7 +509,7 @@ def _read_signed_manifest(path: str, config: 'BuildConfig') -> str:
     """Return the manifest text (signature-verified); '' if absent, if a
     present signature FAILS to verify, or if signing setup itself fails.
 
-    STA-21 (2026-05-28): previously, a broad exception during
+    Previously, a broad exception during
     `import signing` / homedir lookup logged WARNING and fell through to
     read the file UNVERIFIED.  A configuration error in signing must
     never cause the caller to trust unverified content — especially

@@ -1,4 +1,4 @@
-"""SURFACES-01 — per-surface package-set composition.
+"""Per-surface package-set composition.
 
 A "surface" is one shipped artifact: the LIVE image, the DISK image, or the
 installer ISO's /cdrom/pool.  Each surface is defined by a SEED set (pkg.list

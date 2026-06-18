@@ -817,7 +817,7 @@ class SourceCommandsMixin(SessionState):
             count.  The `ok` bucket is deliberately omitted from
             verbose listing — it's almost always the full corpus.
 
-        MIRROR-02: in `[Build] Mode = build`, `dep_tree.selected_srcs`
+        In `[Build] Mode = build`, `dep_tree.selected_srcs`
         IS the indl subset (chunk 2 sets it directly from build_pkg.list,
         no closure walk), so this audit naturally scopes to just
         those sources — no extra filter needed.  In dist mode it
@@ -1452,7 +1452,7 @@ class SourceCommandsMixin(SessionState):
         _bump_release,
         _profile_override,
     ) -> 'tuple[str, int]':
-        """COMP-03 Phase 4: one source's work unit.  Extracted from the
+        """One source's work unit.  Extracted from the
         old serial loop in cmd_source_build so the parallel
         ThreadPoolExecutor path can submit the same operation N at a
         time without duplicating the per-source check_build / skip_src

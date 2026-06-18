@@ -1,4 +1,4 @@
-"""API-01 — API-key handling for the HTTP interface.
+"""API-key handling for the HTTP interface.
 
 Deliberately fastapi-free so key generation/verification is importable
 and testable on hosts without python3-fastapi installed.  Pattern

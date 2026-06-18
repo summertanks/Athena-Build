@@ -1,4 +1,4 @@
-"""CONF-07 — CycloneDX 1.5 SBOM generation.
+"""CycloneDX 1.5 SBOM generation.
 
 Walks `dep_tree.selected_srcs` (∪ udeb tree) and emits a CycloneDX 1.5
 JSON document listing every source package that contributed to the

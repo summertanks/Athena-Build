@@ -1,4 +1,4 @@
-"""UX-04: session persistence — pickle Cache + DependencyTree + small
+"""Session persistence — pickle Cache + DependencyTree + small
 primitives to / from disk, gated by a fingerprint of every input that
 fed the saved state.
 

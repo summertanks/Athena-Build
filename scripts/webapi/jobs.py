@@ -1,4 +1,4 @@
-"""API-01 chunk 4 — job queue + Api console backend.
+"""Job queue + Api console backend.
 
 The command dispatcher is deliberately thin: an HTTP POST enqueues the
 raw command string; the **main thread** (running ``ApiBackend.wait()``,

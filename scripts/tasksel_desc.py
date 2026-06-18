@@ -1,4 +1,4 @@
-"""SURFACES-01 — generate the tasksel `.desc` from the selection groups.
+"""Generate the tasksel `.desc` from the selection groups.
 
 The installer's software-selection menu was a STATIC `.desc` compiled into
 the athena-tasksel fork (tasks/* → makedesc.pl), manually mirrored from

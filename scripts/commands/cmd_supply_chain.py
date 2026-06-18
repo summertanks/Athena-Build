@@ -18,7 +18,7 @@ logger = logging.getLogger('athena.build')
 
 class SupplyChainCommandsMixin(SessionState):
     def cmd_sbom(self, *args):
-        """CONF-07: emit a CycloneDX 1.5 JSON Software Bill of Materials.
+        """Emit a CycloneDX 1.5 JSON Software Bill of Materials.
 
         Walks dep_tree.selected_srcs (∪ udeb_dep_tree.selected_srcs)
         and writes one component per source — name + version + DSC
@@ -95,7 +95,7 @@ class SupplyChainCommandsMixin(SessionState):
         """Derive the `.cve.json` report path from an SBOM path, stripping a
         `.cdx.json` double-suffix (`foo.cdx.json` → `foo.cve.json`).
 
-        STA-48: the old `sbom_path.replace('.cdx.json', '.cve.json')` was a
+        The old `sbom_path.replace('.cdx.json', '.cve.json')` was a
         no-op on any name not ending `.cdx.json` (e.g. `sbom.json`), so the
         report path equalled the input and the write clobbered the operator's
         SBOM.  splitext-based derivation never collides with the input."""
@@ -105,7 +105,7 @@ class SupplyChainCommandsMixin(SessionState):
         return _root + '.cve.json'
 
     def cmd_cve(self, *args):
-        """CVE-01: scan the latest SBOM against Grype's vulnerability
+        """Scan the latest SBOM against Grype's vulnerability
         databases (NVD + GHSA + Debian Security Tracker).
 
         Reads a CycloneDX 1.5 JSON SBOM (produced by `sbom`) and

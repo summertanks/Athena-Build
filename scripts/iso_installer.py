@@ -796,7 +796,7 @@ def _select_pool_files(
 ) -> 'tuple[list[tuple[str, str]], int]':
     """Decide which files across `source_dirs` ship on the installer ISO.
 
-    CONF-01 Stage D (2026-05-22): `source_dirs` is a LIST (was single
+    `source_dirs` is a LIST (was single
     str pre-Stage D).  Multiple dirs because .debs and .udebs now
     live in separate dirs under the unified apt-repo layout
     (dists/<codename>/main/binary-<arch>/ vs main/debian-installer/
@@ -898,7 +898,7 @@ def _stage_pool(
 ) -> bool:
     """Copy a filtered subset of source_dirs → staging/pool/ (FLAT).
 
-    CONF-01 Stage D: `source_dirs` is a LIST of source dirs (was a
+    `source_dirs` is a LIST of source dirs (was a
     single `dir_repo` pre-Stage D).  Walks each, merges into one
     flat staging/pool/ — the apt-cdrom logic on the install target
     expects flat pool/, regardless of how the build host organises
@@ -1000,7 +1000,7 @@ def _run_grub_mkrescue(staging: str, iso_path: str,
                          password: str) -> bool:
     """Produce the hybrid BIOS+EFI bootable ISO from the staging tree.
 
-    COMP-14 fix path (b) — runs grub-mkrescue inside the build
+    Fix path (b) — runs grub-mkrescue inside the build
     container so the ISO embeds bookworm's GRUB toolchain instead of
     the build host's.  Container's apt is pinned to OUR snapshot, so
     `apt-get install grub-{common,pc-bin,efi-amd64-bin}` resolves to
@@ -1056,7 +1056,7 @@ def _run_grub_mkrescue(staging: str, iso_path: str,
 
 
 def _audit_staged_iso(staging: str, dir_image: str) -> bool:
-    """CONF-10 S3 — identity-residue scan over the staged ISO root.
+    """Identity-residue scan over the staged ISO root.
 
     Walks `staging` for Debian-name tokens that survived staging-time
     substitution.  Reuses identity_scan.audit_identity (same walker

@@ -750,7 +750,7 @@ class MirrorCommandsMixin(SessionState):
         self, mirror_name: str, mirror_state: dict,
         by_builder: 'dict',
     ) -> 'list[tuple[str, str, str]]':
-        """MIRROR-01 Phase 8 integrity sweep: cross-check the union of
+        """Integrity sweep: cross-check the union of
         claim `filename` fields (sidecar truth) against the actual
         ``.deb``/``.udeb`` files present in the mirror's pool dir.
 
@@ -1375,7 +1375,7 @@ class MirrorCommandsMixin(SessionState):
                  it's the file we built)
                - skip if local repo already has the file
                - else download .deb to its predicted local path; verify
-                 SHA-256 against the claim; abort that file on mismatch
+                 Against the claim; abort that file on mismatch
           4. Report counts (downloaded, skipped-own, skipped-present,
              verify-mismatch).
 
@@ -1580,7 +1580,7 @@ class MirrorCommandsMixin(SessionState):
     def cmd_mirror_reclaim(self, *args):
         """mirror reclaim [<source>|<file.deb|.udeb>] [<name>] [force]
 
-        RECLAIM-01 — the sanctioned exception to the published-filename-
+        The sanctioned exception to the published-filename-
         is-frozen-bytes INVARIANT.  Supersedes OUR live published claim
         for the SAME filename with the local rebuild's sha and pushes
         the new bytes (overwriting the remote pool copy) — for content
@@ -1718,7 +1718,7 @@ class MirrorCommandsMixin(SessionState):
     def _mirror_remote_has_coord_head(
         self, mirror_name: str, state: dict,
     ) -> bool:
-        """MIRROR-02 chunk 13: probe whether the mirror has a
+        """Probe whether the mirror has a
         coord-head on the remote.  Returns True iff a verified head
         is fetchable; False on absent / verify-failed / network
         error (the latter caller treats as "we can't tell —
@@ -1749,7 +1749,7 @@ class MirrorCommandsMixin(SessionState):
         return _ok and _head is not None
 
     def _mirror_recompute_base(self, mirror_name: str) -> str:
-        """MIRROR-02 chunk 12: recompute mirror.base from the latest
+        """Recompute mirror.base from the latest
         fetched claims.  Returns the oldest snapshot timestamp across
         all non-retracted claims; empty string when the cache is empty
         (preserves the seed-at-add-time value via the merge in
@@ -1797,7 +1797,7 @@ class MirrorCommandsMixin(SessionState):
         self, mirror_name: str,
         per_pkg: 'dict[str, list[tuple[dict, str]]]',
     ) -> None:
-        """MIRROR-02 chunk 10: per-package build.json writer for
+        """Per-package build.json writer for
         `cmd_mirror_pull`.
 
         For each source package in `per_pkg` (mapping

@@ -1,4 +1,4 @@
-"""COORD-01 reconciliation — 3-way audit (local, repo, cross).
+"""Reconciliation — 3-way audit (local, repo, cross).
 
 Three audit modes (per the COORD-01 plan):
 
@@ -474,7 +474,7 @@ def audit_repo(
 def check_federation_consistency(
     local_mirror_urls: 'List[str]', head: 'Optional[dict]',
 ) -> 'List[Finding]':
-    """MIRROR-01 Phase 2 — compare local config's mirror URL set against
+    """Compare local config's mirror URL set against
     coord-head.neighbours.  Returns empty list iff they match (under
     canonical normalisation: trailing-slash + case + sort + dedup).
 

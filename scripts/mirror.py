@@ -1,4 +1,4 @@
-"""MIRROR-01 — per-mirror state CRUD and the mirror command umbrella's
+"""Per-mirror state CRUD and the mirror command umbrella's
 non-network helpers.
 
 This module owns the durable state for every configured publish target —
@@ -728,7 +728,7 @@ def project_post_publish_state(local_state, remote_by_builder: dict):
     # Return type is `repo_audit.RepoState` — import lives inside the
     # body to keep the cross-module dep lazy (repo_audit doesn't always
     # import cleanly in trivial test harnesses).
-    """MIRROR-02 chunk 11: project the post-publish union state of the
+    """Project the post-publish union state of the
     mirror.  Combines the LOCAL repo's RepoState (which carries full
     Depends/Provides info per pkg) with the REMOTE claim ledger
     (filenames + versions only — no Depends; remote pkgs satisfy
@@ -806,7 +806,7 @@ def find_publish_closure_breaks(
     local_state, remote_by_builder: dict,
     our_pending_pkg_names: 'frozenset[str]',
 ) -> 'list[tuple]':
-    """MIRROR-02 chunk 11: the publish-time installability gate.
+    """The publish-time installability gate.
 
     Walks `audit_dep_closure` over the projected post-publish state,
     bounded to OUR pending packages as the consumer set.  Returns
@@ -834,7 +834,7 @@ def audit_inrelease_against_head(
     fetched_dir: str, ssh_key: 'Optional[str]' = None,
 ) -> 'tuple[Any, list[tuple[str, str, str]]]':
     """Pull the remote ``dists/<codename>/InRelease`` and verify its
-    SHA-256 matches what the coord-head pins.
+    Matches what the coord-head pins.
 
     Returns ``(parsed_release_or_None, findings)`` where each finding is
     ``(severity, kind, message)``.  ``parsed_release_or_None`` is a
@@ -1365,7 +1365,7 @@ def _classify_missing_claim(
     _row: dict, local_repo_dir: str, buildlog_dir: 'Optional[str]',
     closure_srcs: 'Optional[set]',
 ) -> 'tuple[str, str, str]':
-    """STA-25 follow-up: a live own-claim file missing on disk is CRITICAL —
+    """Follow-up: a live own-claim file missing on disk is CRITICAL —
     UNLESS the next `mirror publish` will RELEASE the claim, in which case it
     is a benign INFO (the operator just pruned before publishing).  Two
     CONFIRMABLE release paths (remote_publish Steps 6b/6c):
@@ -1464,7 +1464,7 @@ def local_ahead_candidates(
     our_builder_id: 'Optional[str]', local_repo_dir: str,
     buildlog_dir: 'Optional[str]' = None,
 ) -> 'list[dict]':
-    """RECLAIM-01: structured view of every own-claim file whose on-disk
+    """Structured view of every own-claim file whose on-disk
     bytes are AHEAD of the remote claim (local sha matches our
     build.json, remote claim's sha is older) — the exact candidate set
     `mirror reclaim` operates on.  Each entry::
@@ -1724,7 +1724,7 @@ def reconcile_neighbours(
     target_name: 'Optional[str]' = None,
     flock_timeout: int = 60,
 ) -> 'tuple[bool, str, list[dict]]':
-    """MIRROR-01 Phase 2: re-propagate the canonical neighbours list to
+    """Re-propagate the canonical neighbours list to
     every peer's coord-head.
 
     For each registered mirror (or just `target_name` when given):
