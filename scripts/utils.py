@@ -2135,8 +2135,6 @@ class BuildConfig:
     error_str: str
     config_path: str
 
-    dir_working: str
-    dir_pkglist: str
     dir_log: str
     dir_cache: str
     dir_temp: str
@@ -2551,9 +2549,8 @@ class BuildConfig:
             #   main udebs   → dists/<codename>/main/debian-installer/binary-<arch>/
             #   main sources → dists/<codename>/main/source/  (.dsc, .tar.*)
             # All dirs are mkdir+writability checked below.
-            _codename = self.build_codename if hasattr(self, 'build_codename') else 'thor'
-            # Strip stray surrounding quotes (build.conf VERSION="0.1" idiom)
-            _codename = _codename.strip('"').strip("'")
+            # build_codename was already quote-normalised at assignment.
+            _codename = self.build_codename
             self._codename_for_repo = _codename
             self.dir_repo_main = os.path.join(
                 self.dir_repo, 'dists', _codename, 'main',
