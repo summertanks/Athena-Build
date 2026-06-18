@@ -41,7 +41,7 @@ logger = logging.getLogger('athena')
 # - Cache / DependencyTree / Package / Source __getstate__ / __setstate__
 # - The pickle payload envelope shape
 # - The fingerprint JSON shape
-# v2 (SELECT-LOCK): DependencyTree gained _pins/_pinned_chosen — a v1 blob
+# v2: DependencyTree gained _pins/_pinned_chosen — a v1 blob
 # lacks them, so refuse-and-reparse rather than resume a pin-less tree.
 _FORMAT_VERSION       = 2
 _SESSION_FILENAME     = 'session.pkl.gz'

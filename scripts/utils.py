@@ -328,7 +328,7 @@ def _kernel_sort_key() -> 'Callable[[str], Any]':
 
 def latest_kernel_name(names: 'list[str]') -> 'Optional[str]':
     """Highest-ABI entry from a list of kernel artifact / package / .deb
-    names, version-aware (STA-31).  None if the list is empty."""
+    names, version-aware.  None if the list is empty."""
     if not names:
         return None
     return max(names, key=_kernel_sort_key())
@@ -740,7 +740,7 @@ def patch_set_hash(patch_dir: str, patch_files: list) -> str:
     return _h.hexdigest()
 
 
-# ─── OBS-01: canonical signed build record ──────────────────────────────────
+# ─── canonical signed build record ──────────────────────────────────
 #
 # `<pkg>.build.json` replaces the older `<pkg>.result` (PASS/FAIL one-liner)
 # and `<pkg>.patchhash` sidecars with a single signed JSON record per source
@@ -765,11 +765,11 @@ def patch_set_hash(patch_dir: str, patch_files: list) -> str:
 
 BUILD_RECORD_SCHEMA_VERSION = 5
 BUILD_RECORD_SUFFIX = '.build.json'
-# v1 → v2 (COORD-01): adds output_hashes {filename: sha256_hex}, the
+# v1 → v2: adds output_hashes {filename: sha256_hex}, the
 # per-emitted-binary digest that the coord layer pins into its claim
 # records.  v1 records survive unchanged (no field = empty hash dict);
 # the backfill_output_hashes() helper upgrades them in place when run.
-# v2 → v3 (MIRROR-02): adds two fields covering the federation's
+# v2 → v3: adds two fields covering the federation's
 # tunneled + pulled provenance signals.
 #   - `republished_from` {filename: {url, upstream_sha256}} —
 #     populated by cmd_tunnel_package; threads through to the claim's
@@ -781,7 +781,7 @@ BUILD_RECORD_SUFFIX = '.build.json'
 #     Distinguishes "we built it" from "we pulled it" in
 #     `source audit` without losing the record.
 # v2 records survive unchanged (defaults: {} and None respectively).
-# v3 → v4 (LEDGER-01): the record becomes the per-source LIFECYCLE
+# v3 → v4: the record becomes the per-source LIFECYCLE
 # document — tracking starts at `cache parse`, not at build.  Additive
 # fields (absent = legacy v3, all consumers unchanged):
 #   - `lifecycle_v` 1
@@ -947,7 +947,7 @@ def sudo(
     cmd_args: 'List[str]', password: str, capture: bool = True,
 ) -> 'subprocess.CompletedProcess':
     """Run `sudo -S <cmd_args>`, feeding `password` on stdin — the single
-    canonical sudo wrapper (ARCH-19), replacing the four byte-near-identical
+    canonical sudo wrapper, replacing the four byte-near-identical
     module-local `_sudo` copies (apt_repo / iso_installer / installer_chroot /
     disk_image).  `capture=False` lets the child inherit the parent's
     stdout/stderr for commands whose output should stream live."""
@@ -964,7 +964,7 @@ def sudo_askpass_env(password: str) -> 'Iterator[Dict[str, str]]':
     from a short-lived 0700 askpass helper instead of the command's stdin —
     freeing stdin for the command's OWN data (a partition script piped to
     sfdisk, a `find | cpio` pipeline) and dropping the `sudo -S bash -c
-    "… < file"` / `"… > file"` shell interpolation entirely (STA-40).
+    "… < file"` / `"… > file"` shell interpolation entirely.
 
     Robust regardless of the operator's sudo `timestamp_timeout` (no
     credential-cache dependency, unlike a pre-`sudo -v` then bare `sudo`).
@@ -1958,7 +1958,7 @@ def reconcile_snapshot_pin(config: 'BuildConfig') -> 'Optional[tuple[str, str]]'
         return None
     try:
         # Atomic rewrite of the operator's master build.conf — a crash
-        # mid-write must not truncate it (STA-43).  Preserve its existing
+        # mid-write must not truncate it.  Preserve its existing
         # mode (e.g. group-writable 0o664) rather than forcing 0o644.
         _atomic_write_bytes(
             config.config_path, ''.join(_lines).encode('utf-8'),
@@ -1998,7 +1998,7 @@ def write_snapshot_state(config: 'BuildConfig',
     os.makedirs(os.path.dirname(_path), exist_ok=True)
     # Atomic write: a crash mid-write must not truncate the pin —
     # read_snapshot_state swallows the resulting ValueError and the next
-    # build silently falls back to [Snapshot] Timestamp (STA-43).
+    # build silently falls back to [Snapshot] Timestamp.
     _atomic_write_bytes(
         _path,
         (json.dumps(_state, indent=2) + '\n').encode('utf-8'),

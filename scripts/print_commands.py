@@ -594,7 +594,7 @@ def _print_summary(session, *_extras) -> None:
     summary(session, timing=None)
 
 
-# ─── OBS-01: build-time views ───────────────────────────────────────────────
+# ─── build-time views ───────────────────────────────────────────────
 
 def _iter_build_records(session) -> 'list[dict]':
     """Load every `<pkg>.build.json` under log/build/ and verify each

@@ -50,7 +50,7 @@ class CacheCommandsMixin(SessionState):
             return
         # cache build depends on the snapshot pin — on a fresh system (no
         # base/current in config/snapshot.state) prompt the operator to select
-        # both before proceeding (UPD-01).
+        # both before proceeding.
         if not self._ensure_snapshot_pins():
             return
         console.print("Building Cache...", tui.COLOR_INFO)
@@ -340,7 +340,7 @@ class CacheCommandsMixin(SessionState):
         _spiner = Spinner("Parsing Dependencies")
         self.flags.dep_check_ready = False  # reset before the long parse
 
-        # ── SELECT-LOCK: load the signed selection lockfile up front ────────
+        # ── load the signed selection lockfile up front ────────
         # `_lock`/`_lstatus` drive the post-resolve closure guard; `_pins` feed
         # the resolver so a genuine multi-provider prompt resolves the SAME way
         # it did at baseline (no re-prompt, no false closure delta).  A present-
@@ -370,7 +370,7 @@ class CacheCommandsMixin(SessionState):
                     arch=self.config.arch, build_profiles=self.config.build_profiles,
                     pins=_pins)
 
-        # ── MIRROR-02 build-mode branch ─────────────────────────────────
+        # ── build-mode branch ─────────────────────────────────
         # In build mode the build host targets just the packages named in
         # `config/build_pkg.list` — no runtime dep closure walk, no live/installer/
         # pool extras, no chroot/ISO. selected_pkgs is populated directly from
@@ -784,7 +784,7 @@ class CacheCommandsMixin(SessionState):
 
         console.print(f"Selected {len(self.dep_tree.selected_srcs)} source packages", tui.COLOR_HIGHLIGHT)
 
-        # ── SELECT-LOCK: two-stage closure guard ────────────────────────────
+        # ── two-stage closure guard ────────────────────────────
         # Stage (a) = the closure we just resolved; stage (b) = the signed
         # lockfile loaded up front.  Asymmetric: a closure SHRINK (seed edit,
         # snapshot dropping a dep, or IncludeRecommends off) BLOCKS — the
@@ -802,7 +802,7 @@ class CacheCommandsMixin(SessionState):
                 self.dep_tree, self.udeb_dep_tree, self.config)
             _action, _added, _removed = selection_lock.classify(
                 _lstatus, _lock, _fresh)
-            # ── LEDGER-01: lifecycle layer inputs ───────────────────────
+            # ── lifecycle layer inputs ───────────────────────
             # Source→version union across BOTH trees (udeb-only sources
             # like anna/debootstrap included) + the snapshot pin.  The
             # touch itself runs on the non-blocked branches below.

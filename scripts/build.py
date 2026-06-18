@@ -390,7 +390,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         """Validate the sudo password without consuming any other input.
         Returns True iff `sudo -v` succeeds.  Used by clean handlers
         that need root before doing the actual `sudo find ... -exec rm`,
-        and by `_collect_validated_sudo_password` (ARCH-19) — the single
+        and by `_collect_validated_sudo_password` — the single
         `sudo -v` subprocess in the codebase.  `context` tags the log line.
         """
         _r = subprocess.run(['sudo', '-S', '-v'],

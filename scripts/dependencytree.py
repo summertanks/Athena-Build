@@ -1218,7 +1218,7 @@ class DependencyTree:
             _download_size += self.selected_srcs[_pkg].download_size
         return _download_size
 
-    # ── UX-04 pickle support ────────────────────────────────────────────
+    # ── pickle support ────────────────────────────────────────────
     # Drop the back-ref to Cache (rewired by persistence.restore_session
     # after Cache is rebuilt from disk + DT is unpickled) and flatten
     # __lookahead's defaultdict (lambdas can't pickle).  Both are

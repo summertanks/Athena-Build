@@ -1633,7 +1633,7 @@ class _ChrootMixin:
         registered mirror into the chroot, each line pinned to the
         project signing keyring via ``[signed-by=...]``.
 
-        Per-mirror URL precedence (MIRROR-01 Phase 6):
+        Per-mirror URL precedence:
           1. ``public_url`` (when set) — written verbatim.  This is the
              canonical apt-readable URL the `mirror add` flow derives
              from `<proto>://<host>/<dist-id>`; covers ssh:// publish
@@ -1700,7 +1700,7 @@ class _ChrootMixin:
         -m 644` (not `cp`) sets an explicit world-readable mode: cp would
         propagate the tempfile's 0600 mode when the destination doesn't
         pre-exist, shipping root-only /etc/{machine-id,hostname,fstab} and
-        apt sources into the image (STA-41).  Every file written here is
+        apt sources into the image.  Every file written here is
         world-readable config, so 0644 is always correct.
 
         Args:

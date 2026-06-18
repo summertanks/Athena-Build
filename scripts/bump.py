@@ -38,7 +38,7 @@ def parse_deb_filename(filename: str) -> 'Optional[tuple]':
 
     Convention: ``<name>_<version>_<arch>.{deb,udeb}`` — no underscore inside
     any of the three fields (Debian policy).  The single structural splitter
-    in the codebase (ARCH-19); every strict ``name_version_arch`` parse routes
+    in the codebase; every strict ``name_version_arch`` parse routes
     here.  Two deliberate contract points:
 
     * *name* keeps any directory prefix the caller passed, so a pool

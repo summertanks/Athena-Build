@@ -659,7 +659,7 @@ class RepoCommandsMixin(SessionState):
                     _hi_fn, _hi_ver = _fn, _ver
             _is_expected = _key is not None and _key in _expected_keys
             for _fn, _ver, _src_name, _size in _entries:
-                # Single-snapshot local repo (UPD-01): within any
+                # Single-snapshot local repo: within any
                 # pristine-base group ONLY the highest version is current —
                 # every lower version is superseded drift, SELECTED OR NOT.
                 # This is what prunes superseded PRODUCTION SIBLINGS (e.g.

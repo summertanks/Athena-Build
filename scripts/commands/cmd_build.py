@@ -119,7 +119,7 @@ class BuildCommandsMixin(SessionState):
             logger.error(f"BuildSystem() raised: {e}")
             return
 
-        # ── SURFACES-01: the live surface = closure([Live] Groups seeds ∪
+        # ── the live surface = closure([Live] Groups seeds ∪
         # live.list ∪ required/important), WITH Recommends extras.  The
         # closure (not the credit-based group deltas) decides membership.
         import surfaces
@@ -597,7 +597,7 @@ class BuildCommandsMixin(SessionState):
             _suite    = _codename
             # Tag the filename with the snapshot pin so an installer ISO from
             # the base snapshot is distinguishable from one built after
-            # stepping the snapshot (UPD-01).  Empty when snapshots off.
+            # stepping the snapshot.  Empty when snapshots off.
             _snap = utils.snapshot_iso_tag(self.config)
             _iso_basename = (
                 f"athena-installer-{_version}-{_snap}-amd64.iso" if _snap
@@ -720,7 +720,7 @@ class BuildCommandsMixin(SessionState):
                     "iso build installer: non-base groups exist but all "
                     "packages credited to earlier groups"
                 )
-            # ── SURFACES-01 pre-flight: surface config sanity ──────────
+            # ── pre-flight: surface config sanity ──────────
             # [Live]/[Disk] Groups must name real pkg.list groups; every
             # installer-defaults root must be in the selection (it ships
             # in the ISO pool for a d-i hook to install).
@@ -755,7 +755,7 @@ class BuildCommandsMixin(SessionState):
             _base_include = sorted(
                 _canonical - _extras - _live_excl - _pool_extras - _group_extras
             )
-            # ── SURFACES-01 manifest-driven pool: /cdrom/pool ships ONLY
+            # ── manifest-driven pool: /cdrom/pool ships ONLY
             # what something on the ISO can install —
             #   closure( [base] ∪ every non-base task group (the tasksel
             #            Keys) ∪ installer-defaults roots (d-i hooks)
@@ -999,7 +999,7 @@ class BuildCommandsMixin(SessionState):
 
         require_live_boot: the live-boot check (7) applies to the LIVE
         surface only — the disk-image chroot ships without live-boot by
-        design (SURFACES-01), so disk call sites pass False and the
+        design, so disk call sites pass False and the
         check is reported as SKIP without counting either way.
         """
         # Checks performed:
@@ -1109,7 +1109,7 @@ class BuildCommandsMixin(SessionState):
                _os_ok,
                _os_detail if _os_ok else 'missing — run build_bootable again')
 
-        # ── CONF-02 phase 3: signing keyring present? (informational) ──────────
+        # ── phase 3: signing keyring present? (informational) ──────────
         # Not a check — non-gating because the chroot is still a valid live
         # ISO without our keyring; the keyring matters for trusting future
         # apt sources pointing at the Athena repo.  Surfaced here so the

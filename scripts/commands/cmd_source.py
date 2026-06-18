@@ -1551,7 +1551,7 @@ class SourceCommandsMixin(SessionState):
                     f"mismatch; shipped unstamped this generation")
             return ('built', 0)
         if _build_result:
-            # Guard B (UPD-01): the build reported PASS but check_build
+            # Guard B: the build reported PASS but check_build
             # still can't find/match the predicted artifacts — non-
             # convergence (CONF-13 cross-run rebuild-loop shape).  Fail
             # loudly NOW.
