@@ -438,7 +438,7 @@ class RepoCommandsMixin(SessionState):
 
         # Filenames + Versions just shifted; the cached Packages
         # snapshot in dir_temp is now stale.
-        repo_audit.invalidate_cache(self.config.dir_repo)
+        repo_audit.invalidate_cache()
 
         _tun_tail = (f", {_tunneled_skipped} tunneled (preserved)"
                      if _tunneled_skipped else "")
@@ -1030,7 +1030,7 @@ class RepoCommandsMixin(SessionState):
         _bar.close()
 
         # repo state changed — audit's Packages snapshot is stale.
-        repo_audit.invalidate_cache(self.config.dir_repo)
+        repo_audit.invalidate_cache()
 
         console.print(
             f"\nCleanup complete: {_deleted} deleted, "
