@@ -2353,7 +2353,8 @@ class BuildConfig:
             ).strip()
             # CONF-02: optional network apt source for the INSTALLED system.
             # When set, build_chroot writes /etc/apt/sources.list.d/athena.list
-            self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
+            _skiptest_raw = config_parser.get('Source', 'SkipTest', fallback='')
+            self.skip_build_test = [p.strip() for p in _skiptest_raw.split(',') if p.strip()]
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
             self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]
             # BuildProfiles → DEB_BUILD_PROFILES (which Build-Depends a

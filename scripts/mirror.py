@@ -1179,7 +1179,8 @@ def audit_federation_walk(
             _visited.add(_peer_canon)
             # Display name — best-effort derive from host; fall back
             # to the URL itself if derive returns None.
-            _peer_name = (derive_name_from_url(_peer_url, host_type='ssh')
+            _peer_name = (derive_name_from_url(_peer_url, 'fqdn')
+                          or derive_name_from_url(_peer_url, 'ip')
                           or _peer_url)
             _coord_root = coord_root_for(_peer_url)
             _rsync_spec, _ = rsync_spec_for_url(_coord_root)

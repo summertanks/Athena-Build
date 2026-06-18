@@ -20656,13 +20656,13 @@ def test_reconstruct_historical_ledger_seeds_prior_generation_from_recorded_n():
     # Manifest advanced past the build: only u2 present, u1 dropped.
     _cur = {'python3.11': ['3.11.2-6+asg1u2']}
     _emis = {'python3.11_3.11.2-6+asg1u2_amd64.deb': ''}
-    _hist = _vb._reconstruct_historical_ledger(_src, _emis, _cur)
+    _hist = _vb._reconstruct_historical_ledger(_emis, _cur)
     # Seed recovers u1 → asg_next_n predicts u2 (== reality), manifest-independent.
     assert '3.11.2-6+asg1u1' in _hist['python3.11'], _hist
     assert asg_next_n(_hist['python3.11'], '3.11.2-6', 1) == 2, _hist
     # First-generation build (u1) seeds nothing — at-build high-water was empty.
     _hist1 = _vb._reconstruct_historical_ledger(
-        _src, {'python3.11_3.11.2-6+asg1u1_amd64.deb': ''},
+        {'python3.11_3.11.2-6+asg1u1_amd64.deb': ''},
         {'python3.11': ['3.11.2-6+asg1u1']})
     assert asg_next_n(_hist1['python3.11'], '3.11.2-6', 1) == 1, _hist1
 
@@ -23561,7 +23561,7 @@ def test_virtual_build_reconstruct_historical_ledger_pristine_build():
         'libfoo-data': ['1.0-1', '1.0-1+asg1u1'],
     }
     _hist = _vb._reconstruct_historical_ledger(
-        _Src(), _outputs, _current)
+        _outputs, _current)
     # Source N = 0 → keep entries with N < 0 (none) + non-asg entries.
     assert _hist['libfoo'] == ['1.0-1']
     assert _hist['libfoo-data'] == ['1.0-1']
@@ -23581,7 +23581,7 @@ def test_virtual_build_reconstruct_historical_ledger_stamped_build():
         '1.0-1+asg1u1', '1.0-1+asg1u2', '1.0-1+asg1u3',
     ]}
     _hist = _vb._reconstruct_historical_ledger(
-        _Src(), _outputs, _current)
+        _outputs, _current)
     # N=2 → keep N<2 (only u1).
     assert _hist['libfoo'] == ['1.0-1+asg1u1']
 
@@ -23722,7 +23722,7 @@ def test_virtual_build_reconstruct_historical_ledger_epoch_aware():
         'bind9-libs': ['1:9.18.49-1+asg1u1', '1:9.18.49-1+asg1u2'],
     }
     _hist = _vb._reconstruct_historical_ledger(
-        _Bind9(), _outputs, _current)
+        _outputs, _current)
     # N_built=1 → keep N<1 (nothing).
     assert _hist['bind9'] == []
     assert _hist['bind9-libs'] == []
@@ -23743,7 +23743,7 @@ def test_virtual_build_reconstruct_historical_ledger_preserves_other_pristine():
         '2.0-1+asg1u1',   # this pristine, N>=0 → drop
     ]}
     _hist = _vb._reconstruct_historical_ledger(
-        _Src(), _outputs, _current)
+        _outputs, _current)
     # Old-pristine u5 kept; current-pristine u1 dropped (N=0 floor).
     assert _hist['libfoo'] == ['1.0-1+asg1u5']
 
@@ -26980,17 +26980,38 @@ def test_normalize_built_artifacts_uses_uniform_n_across_siblings():
         f"(per-file N would have given {{1, 5}}); calls={_calls}")
 
 
-def test_humansize_thresholds():
-    """B / KiB / MiB / GiB thresholds at 1024-multiples; one-decimal
-    formatting matches the tunnel-output spec."""
+def test_hk07_behavior_fixes_pinned():
+    """Regression pins for the HK-07 behaviour corrections (f/g3/h/i2/i3)."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from commands import cmd_tunnel as _b
-    assert _b._humansize(0) == '0 B'
-    assert _b._humansize(1023) == '1023 B'
-    assert _b._humansize(1024) == '1.0 KiB'
-    assert _b._humansize(74425 * 1024) == '72.7 MiB'
-    assert _b._humansize(2 * 1024 * 1024 * 1024) == '2.0 GiB'
+
+    def _src(rel):
+        with open(os.path.join(_ROOT, 'scripts', rel)) as _f:
+            return _f.read()
+
+    # (f) pre_install no longer chgrp/chmods lastlog/btmp (don't exist yet)
+    _chroot = _src('chroot.py')
+    assert 'var/log/lastlog' not in _chroot
+    assert 'var/log/btmp' not in _chroot
+
+    # (h) federation peer name derives via fqdn-then-ip, not the dead 'ssh'
+    import mirror
+    assert "host_type='ssh'" not in _src('mirror.py')
+    assert mirror.derive_name_from_url(
+        'ssh://u@mirror.example.com/p', 'fqdn') == 'mirror-example-com'
+    assert mirror.derive_name_from_url(
+        'ssh://u@mirror.example.com/p', 'ssh') is None   # the dead host_type
+
+    # (i2) cmd_tunnel uses the shared size helpers, no local dupes
+    _tunnel = _src('commands/cmd_tunnel.py')
+    assert '_humansize' not in _tunnel and '_safe_filesize' not in _tunnel
+    assert 'human_size(' in _tunnel
+
+    # (g3) skip_build_test parsed with the strip-comprehension idiom
+    assert "'SkipTest').split(', ')" not in _src('utils.py')
+
+    # (i3) print groups sizes scan the real binary dirs, not the repo root
+    assert 'all_deb_dirs()' in _src('print_commands.py')
 
 
 def test_shorten_origin_compacts_long_pool_url():
@@ -36061,7 +36082,7 @@ def main() -> int:
         test_cmd_set_mode_same_value_is_noop_when_dep_check_ready,
         test_cmd_set_mode_same_value_surfaces_parse_hint_when_not_parsed,
         test_cmd_set_unknown_param_reports_available_list,
-        test_humansize_thresholds,
+        test_hk07_behavior_fixes_pinned,
         test_shorten_origin_compacts_long_pool_url,
         test_new_build_record_threads_component_field,
         test_new_claim_threads_component_field,
