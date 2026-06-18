@@ -29,9 +29,10 @@ class ConfigRunCommandsMixin(SessionState):
     def _set_mode(self, value: str) -> None:
         """`set mode <distribution|build>` — switch build mode in
         the running session.  Clears dep_check_ready so the next
-        pipeline step re-resolves under the new mode; does NOT
-        persist to build.conf (operator commits the change explicitly
-        if they want it durable)."""
+        pipeline step re-resolves under the new mode, and PERSISTS the
+        choice to the untracked config/local.conf so it survives a
+        restart (mode is a per-machine decision, not a repo-tracked one;
+        build.conf is never touched)."""
         _valid = ('distribution', 'build')
         if value not in _valid:
             console.print(
@@ -60,9 +61,17 @@ class ConfigRunCommandsMixin(SessionState):
         # and ALWAYS print the warning so the operator can't proceed
         # to source build / chroot / iso under a half-stale tree.
         self.flags.dep_check_ready = False
+        # Persist to the machine-local sidecar (config/local.conf) so the
+        # mode survives a restart.  A write failure must not abort the
+        # in-memory switch — warn and carry on (the session is already in
+        # the new mode; only durability is lost).
+        try:
+            utils.write_local_conf(self.config, mode=value)
+            _persist = "persisted to config/local.conf"
+        except OSError as _e:
+            _persist = f"WARNING: could not persist to local.conf ({_e})"
         console.print(
-            f"  mode  {_prev}  →  {value}  (session-local, "
-            "build.conf unchanged)", tui.COLOR_HIGHLIGHT)
+            f"  mode  {_prev}  →  {value}  ({_persist})", tui.COLOR_HIGHLIGHT)
         console.print(
             "  WARNING: mode change requires `cache parse` rerun",
             tui.COLOR_WARNING)

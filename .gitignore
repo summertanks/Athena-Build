@@ -35,6 +35,16 @@ config/*.key
 # to select both on the first `cache build` (UPD-01).
 config/snapshot.state
 
+# Machine-local onboarding sidecar — build Mode, system Role, SetupComplete,
+# and per-mirror registration markers.  Per-machine, never shared; a fresh
+# `git pull` must not inherit another box's mode or registration state.
+config/local.conf
+
+# Per-machine federation mirror endpoints (url, ssh-key name, public_url,
+# snapshot pins).  Created by `mirror add` / onboarding.  Tracking these would
+# leak one machine's mirror identity into the repo for everyone who pulls it.
+config/mirror.*.state
+
 # Per-checkout signed published-manifest (mirror of what's published; the
 # +asg bump authority).  Regenerated on publish; not shared (UPD-01).
 config/published.manifest
