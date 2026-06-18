@@ -14893,7 +14893,7 @@ def test_disk_image_regenerates_initramfs_for_fsck_tools():
     assert _fstab_i != -1 and _fstab_i < _i, \
         "update-initramfs must run after the fstab write"
     # non-fatal: warns, never aborts the image build
-    assert 'STA-26' in _src and 'image initramfs may lack' in _src, _src
+    assert 'image initramfs may lack' in _src, _src
 
 
 def test_build_system_sh_checks_disk_image_tools():
@@ -34964,7 +34964,7 @@ def test_iso_pool_manifest_excludes_unreachable_pool_roots():
     import inspect
     import commands.cmd_build as _cb
     _src = inspect.getsource(_cb)
-    _blk = _src[_src.index('SURFACES-01 manifest-driven pool'):]
+    _blk = _src[_src.index('manifest-driven pool'):]
     _blk = _blk[:2500]
     assert '_manifest_seeds.update(_di_roots)' in _blk
     assert 'self.config.installerlist_path' in _blk   # efibootmgr-class roots
