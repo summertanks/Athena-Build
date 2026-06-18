@@ -30217,7 +30217,6 @@ def test_coord_publish_local_skips_when_halt_set():
             builder_id='alice', config=_FakeConfig(),
             private_key_path='/dev/null', public_key_path='/dev/null',
             snapshot_pin='S', read_build_record=lambda *_a: None,
-            get_sha256=lambda *_a: '',
         )
         assert (_created, _skipped) == (0, 0)
 
@@ -31838,7 +31837,6 @@ def test_remote_publish_blocks_on_federation_drift():
                 remote_coord_spec='user@h:/asgard',
                 inrelease_local_path='/fake/InRelease',
                 read_build_record=lambda *_: None,
-                get_sha256=lambda *_: '',
                 local_mirror_urls=['ssh://a/p', 'ssh://b/p'],  # 2; remote has 1
                 ssh_host='user@h',
             )
@@ -31914,7 +31912,6 @@ def test_remote_publish_bootstrap_uploads_pubkey_when_no_head():
                 remote_coord_spec='user@h:/asgard',
                 inrelease_local_path=_inrelease,
                 read_build_record=lambda *_: None,
-                get_sha256=lambda *_: '',
                 local_mirror_urls=['ssh://a/p', 'ssh://b/p'],
                 ssh_host='user@h',
             )
@@ -32003,7 +32000,6 @@ def test_remote_publish_bootstrap_carries_v3_per_peer_records():
                 remote_coord_spec='user@h:/asgard',
                 inrelease_local_path=_inrelease,
                 read_build_record=lambda *_: None,
-                get_sha256=lambda *_: '',
                 local_mirror_urls=_local_records,
                 ssh_host='user@h',
             )
@@ -32343,7 +32339,6 @@ def test_remote_publish_pushes_debs_per_file_and_calls_progress():
                 pool_remote_spec='file:///srv/m1',
                 inrelease_local_path=_inrelease,
                 read_build_record=lambda *_: None,
-                get_sha256=lambda *_: '',
                 local_mirror_urls=['file:///srv/m1'],
                 ssh_host=None,  # local-fs needs no host
                 on_progress=_capture_progress,
@@ -32452,7 +32447,6 @@ def test_remote_publish_refuses_on_closure_break():
                 pool_remote_spec='file:///srv/m1',
                 inrelease_local_path=_inrelease,
                 read_build_record=lambda *_: None,
-                get_sha256=lambda *_: '',
                 local_mirror_urls=['file:///srv/m1'],
                 ssh_host=None,
                 install_corpus=frozenset({'foo'}),
@@ -32557,7 +32551,6 @@ def test_remote_publish_refuses_verify_failed_head():
                 remote_coord_spec='user@h:/asgard',
                 inrelease_local_path=_inrelease,
                 read_build_record=lambda *_: None,
-                get_sha256=lambda *_: '',
                 ssh_host='user@h',
             )
         assert _ok is False
@@ -32618,7 +32611,6 @@ def test_remote_publish_refuses_stale_local_jsonl():
                 remote_coord_spec='user@h:/asgard',
                 inrelease_local_path=_inrelease,
                 read_build_record=lambda *_: None,
-                get_sha256=lambda *_: '',
                 ssh_host='user@h',
             )
         assert _ok is False
@@ -32664,7 +32656,6 @@ def test_local_publish_no_seq_gap_on_append_failure():
                 builder_id='alice', config=_Cfg(),
                 private_key_path='/fake/priv', public_key_path='/fake/pub',
                 snapshot_pin='S', read_build_record=lambda *_: None,
-                get_sha256=lambda *_: '',
             )
         assert (_created, _skipped) == (2, 1), (_created, _skipped)
         # a→1, b fails (seq 2 NOT consumed), c reuses 2 → contiguous, no gap.
@@ -33389,7 +33380,6 @@ def test_remote_publish_drops_claim_when_push_fails():
                 pool_remote_spec='file:///srv/m1',
                 inrelease_local_path=_inrelease,
                 read_build_record=lambda *_: None,
-                get_sha256=lambda *_: '',
                 local_mirror_urls=['file:///srv/m1'],
                 ssh_host=None,
             )
@@ -34648,7 +34638,6 @@ def test_remote_publish_on_published_only_on_full_success():
                     pool_remote_spec='file:///srv/m1',
                     inrelease_local_path=_inrelease,
                     read_build_record=lambda *_: None,
-                    get_sha256=lambda *_: '',
                     local_mirror_urls=['file:///srv/m1'],
                     ssh_host=None,
                     on_published=lambda pkgs: _seen.append(pkgs),

@@ -1274,7 +1274,6 @@ class MirrorCommandsMixin(SessionState):
                     remote_coord_spec=_coord_spec,
                     inrelease_local_path=_inrelease,
                     read_build_record=utils.read_build_record,
-                    get_sha256=utils.get_sha256,
                     local_mirror_urls=_local_urls,
                     ssh_host=_ssh_host,
                     ssh_key=_ssh_key,

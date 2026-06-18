@@ -494,7 +494,6 @@ def local_publish(
     public_key_path: str,
     snapshot_pin: str,
     read_build_record: Callable,
-    get_sha256: Callable,
 ) -> Tuple[int, int]:
     """Single-host publish: sign + append every pending claim to the
     local jsonl, mark them published immediately (no remote round
@@ -602,7 +601,6 @@ def remote_publish(
     remote_coord_spec: str,
     inrelease_local_path: str,
     read_build_record: Callable,
-    get_sha256: Callable,
     local_mirror_urls: 'Optional[list]' = None,
     ssh_host: 'Optional[str]' = None,
     flock_path: str = '/var/lock/repo-coord.lock',
