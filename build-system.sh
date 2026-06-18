@@ -202,6 +202,16 @@ case "$PACKAGE" in
 esac
 echo "Using awk: ${PACKAGE:-unknown} — ${AWK_VERSION:-version unknown}"
 
+# Build mode ([Build] Mode in the config).  A build-mode peer only builds +
+# publishes packages (chroot/ISO/disk steps are refused in build mode), so it
+# needs Docker + the cache/source toolchain but NOT the ISO/disk host tools.
+# In that mode a missing ISO/disk tool is a note, not a fatal startup error.
+BUILD_MODE="distribution"
+if [ -f "$CONFIG_FILE" ] && grep -qiE '^[[:space:]]*Mode[[:space:]]*=[[:space:]]*build([[:space:]]|$)' "$CONFIG_FILE"; then
+    BUILD_MODE="build"
+    echo "Build mode = build — ISO/disk host tools are optional."
+fi
+
 # Checking ISO build tools (required for `iso build live` command only)
 echo "Checking ISO build tools..."
 ISO_TOOLS_OK=1
@@ -235,8 +245,12 @@ else
 fi
 
 if [[ $ISO_TOOLS_OK -eq 0 ]]; then
-    echo "E: one or more ISO build tools missing — run: sudo apt install squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso mtools" >&2
-    exit 1
+    if [[ "$BUILD_MODE" == "build" ]]; then
+        echo "Note: ISO build tools missing — skipped (Mode = build; iso steps are refused in build mode)."
+    else
+        echo "E: one or more ISO build tools missing — run: sudo apt install squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso mtools" >&2
+        exit 1
+    fi
 else
     echo "All ISO build tools found."
 fi
@@ -282,8 +296,12 @@ if [[ $DISK_TOOLS_OK -eq 0 ]]; then
     # Dedupe (util-linux covers losetup+sfdisk+blkid; would otherwise
     # appear 3× in the message).
     _UNIQ_PKGS=$(printf '%s\n' "${DISK_MISSING_PKGS[@]}" | sort -u | tr '\n' ' ')
-    echo "E: one or more disk image build tools missing: $_UNIQ_PKGS" >&2
-    exit 1
+    if [[ "$BUILD_MODE" == "build" ]]; then
+        echo "Note: disk image build tools missing — skipped (Mode = build): $_UNIQ_PKGS"
+    else
+        echo "E: one or more disk image build tools missing: $_UNIQ_PKGS" >&2
+        exit 1
+    fi
 else
     echo "All disk image build tools found."
 fi
