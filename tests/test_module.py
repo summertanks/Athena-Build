@@ -302,6 +302,87 @@ def test_buildconfig_mode_rejects_unknown_value():
         assert 'banana' in cfg.error_str
 
 
+def _write_local_conf(tmp: str, body: str) -> None:
+    """Drop a config/local.conf alongside the synthetic build.conf."""
+    with open(os.path.join(tmp, 'config', 'local.conf'), 'w') as fh:
+        fh.write(textwrap.dedent(body))
+
+
+def test_local_conf_mode_overrides_build_conf():
+    """LOCAL-CONF: config/local.conf [Local] Mode wins over build.conf
+    [Build] Mode — mode is a per-machine decision, the untracked sidecar
+    is authoritative."""
+    # build.conf says distribution; local.conf says build → build wins.
+    _body = _BASE_CONF_BODY.replace(
+        'MaxParallelBuilds = 1',
+        'MaxParallelBuilds = 1\n    Mode = distribution')
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _body.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        _write_local_conf(tmp, """
+            [Local]
+            Mode = build
+            Role = federation
+            SetupComplete = true
+        """)
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
+        assert cfg.build_mode == 'build', cfg.build_mode
+        assert cfg.system_role == 'federation'
+        assert cfg.setup_complete is True
+
+
+def test_local_conf_absent_falls_back_to_build_conf():
+    """LOCAL-CONF: no local.conf → build.conf/default still drives mode,
+    and the onboarding attrs default to un-onboarded."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
+        assert cfg.build_mode == 'distribution'
+        assert cfg.system_role == ''
+        assert cfg.setup_complete is False
+
+
+def test_local_conf_malformed_invalidates_config():
+    """LOCAL-CONF: a broken local.conf is the operator's machine state — it
+    must fail loudly (error_str), not silently fall back to distribution."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        # No section header → configparser.MissingSectionHeaderError.
+        _write_local_conf(tmp, "Mode = build\n")
+        cfg = _build_config_from(tmp, cfg_path)
+        assert not cfg.is_valid
+        assert 'local.conf' in cfg.error_str
+
+
+def test_write_local_conf_round_trips():
+    """LOCAL-CONF: write_local_conf merges fields (incl. the [Registration]
+    sidecar) and read_local_conf reads them back; a second write preserves
+    prior fields."""
+    import utils
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        utils.write_local_conf(cfg, mode='build', role='federation',
+                               setup_complete=True,
+                               registration={'alpha': 'builder-x'})
+        _p = utils.read_local_conf(cfg)
+        assert _p.get('Local', 'Mode') == 'build'
+        assert _p.get('Local', 'Role') == 'federation'
+        assert _p.getboolean('Local', 'SetupComplete') is True
+        assert _p.get('Registration', 'alpha') == 'builder-x'
+        # Merge: a second partial write keeps prior fields, adds a mirror.
+        utils.write_local_conf(cfg, registration={'beta': 'builder-y'})
+        _p2 = utils.read_local_conf(cfg)
+        assert _p2.get('Local', 'Mode') == 'build'          # preserved
+        assert _p2.get('Registration', 'alpha') == 'builder-x'
+        assert _p2.get('Registration', 'beta') == 'builder-y'
+
+
 def test_print_state_shows_mode_header():
     """MIRROR-02 chunk 6b: `print state` surfaces the active build
     mode at the top of the output.  In build mode the line also shows
@@ -26786,6 +26867,9 @@ def _build_session_for_setget(_tmp):
         snapshot_enabled = True
         snapshot_timestamp_config = '20260602T173733Z'
         max_parallel_builds = 3
+        # _set_mode persists to config/local.conf alongside build.conf;
+        # point config_path into the tmp dir so the write lands there.
+        config_path = os.path.join(_tmp, 'build.conf')
     _sess.config = _Cfg()
     _sess.flags = MagicMock(dep_check_ready=True)
     return _sess, _build_mod
@@ -26852,6 +26936,28 @@ def test_cmd_set_mode_switches_value_and_warns_to_re_run_cache_parse():
         _joined2 = '\n'.join(_printed2)
         assert 'cache parse' in _joined2, (
             "warning must print even when dep_check_ready was already False")
+
+
+def test_cmd_set_mode_persists_to_local_conf():
+    """`set mode` writes the choice to config/local.conf (untracked) so it
+    survives a restart; build.conf is never touched."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import utils
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess, _build_mod = _build_session_for_setget(_tmp)
+        _printed: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
+        _sess.cmd_set('mode', 'build')
+        # local.conf written alongside build.conf with the new mode.
+        _local = os.path.join(_tmp, 'local.conf')
+        assert os.path.isfile(_local), "local.conf not written"
+        _p = utils.read_local_conf(_sess.config)
+        assert _p.get('Local', 'Mode') == 'build'
+        assert 'config/local.conf' in '\n'.join(_printed)
+        # build.conf must NOT have been created/touched by the switch.
+        assert not os.path.isfile(os.path.join(_tmp, 'build.conf'))
 
 
 def test_cmd_set_mode_invalid_value_keeps_old_value():
@@ -35565,6 +35671,10 @@ def main() -> int:
         test_buildconfig_mode_defaults_to_distribution,
         test_buildconfig_mode_build_mode_parses,
         test_buildconfig_mode_rejects_unknown_value,
+        test_local_conf_mode_overrides_build_conf,
+        test_local_conf_absent_falls_back_to_build_conf,
+        test_local_conf_malformed_invalidates_config,
+        test_write_local_conf_round_trips,
         test_parse_build_pkg_list_strips_comments_dedups_preserves_order,
         test_print_state_shows_mode_header,
         test_cmd_auto_run_dispatch_routes_build_mode,
@@ -36557,6 +36667,7 @@ def main() -> int:
         test_cmd_get_lists_every_gettable_param_when_called_bare,
         test_cmd_get_named_param_returns_current_value,
         test_cmd_set_mode_switches_value_and_warns_to_re_run_cache_parse,
+        test_cmd_set_mode_persists_to_local_conf,
         test_cmd_set_mode_invalid_value_keeps_old_value,
         test_cmd_set_mode_same_value_is_noop_when_dep_check_ready,
         test_cmd_set_mode_same_value_surfaces_parse_hint_when_not_parsed,

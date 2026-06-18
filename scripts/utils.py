@@ -2007,6 +2007,66 @@ def write_snapshot_state(config: 'BuildConfig',
     _SNAPSHOT_TS_CACHE.clear()
 
 
+def local_conf_path(config: 'BuildConfig') -> str:
+    """Path to config/local.conf — the UNTRACKED, machine-local sidecar
+    holding build Mode, system Role (first|federation), the SetupComplete
+    flag, and per-mirror registration markers.  Lives alongside build.conf
+    so the repo (a fresh `git pull`) never inherits another machine's mode
+    or mirror identity."""
+    return os.path.join(os.path.dirname(config.config_path), 'local.conf')
+
+
+def read_local_conf(config: 'BuildConfig') -> 'configparser.ConfigParser':
+    """Read config/local.conf → ConfigParser; an empty parser if the file
+    is absent (a fresh, un-onboarded checkout).  A *malformed* file is NOT
+    swallowed here — BuildConfig.__init__ reads it strictly so a broken
+    local.conf surfaces as an invalid config rather than a silent fallback;
+    write-side callers only ever merge into a freshly-read parser."""
+    _parser = configparser.ConfigParser()
+    try:
+        _parser.read(local_conf_path(config))
+    except configparser.Error:
+        pass
+    return _parser
+
+
+def write_local_conf(config: 'BuildConfig', *,
+                     mode: 'Optional[str]' = None,
+                     role: 'Optional[str]' = None,
+                     setup_complete: 'Optional[bool]' = None,
+                     registration: 'Optional[dict[str, str]]' = None) -> None:
+    """Read-merge-write config/local.conf (mirrors write_snapshot_state's
+    shape: read existing, set only the provided fields, atomic write).
+
+    `registration` is a {mirror-name: builder-id} map merged into the
+    [Registration] section — the sidecar that lets onboarding skip a
+    re-register on a box that's already joined a mirror."""
+    import io
+    _path = local_conf_path(config)
+    _parser = read_local_conf(config)
+    if not _parser.has_section('Local'):
+        _parser.add_section('Local')
+    if mode is not None:
+        _parser.set('Local', 'Mode', mode)
+    if role is not None:
+        _parser.set('Local', 'Role', role)
+    if setup_complete is not None:
+        _parser.set('Local', 'SetupComplete',
+                    'true' if setup_complete else 'false')
+    if registration:
+        if not _parser.has_section('Registration'):
+            _parser.add_section('Registration')
+        for _mirror, _bid in registration.items():
+            _parser.set('Registration', _mirror, _bid)
+    _buf = io.StringIO()
+    _parser.write(_buf)
+    os.makedirs(os.path.dirname(_path), exist_ok=True)
+    _atomic_write_bytes(
+        _path, _buf.getvalue().encode('utf-8'),
+        mode=_existing_mode(_path),
+    )
+
+
 def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
     """Resolve the effective snapshot timestamp for this build.
 
@@ -2303,6 +2363,20 @@ class BuildConfig:
             # via keep-polling regardless — see buildcontainer._wait_for_exit).
             self.docker_timeout = config_parser.getint(
                 'Build', 'DockerTimeout', fallback=1800)
+            # Machine-local sidecar (config/local.conf, UNTRACKED): holds
+            # build Mode, system Role, the SetupComplete flag and per-mirror
+            # registration markers.  Read STRICTLY here — a malformed file is
+            # the operator's broken machine state and must fail loudly, not
+            # silently fall back.  Absent file = fresh/un-onboarded checkout.
+            _local_conf = configparser.ConfigParser()
+            _local_conf_path = os.path.join(
+                os.path.dirname(self.config_path), 'local.conf')
+            if os.path.isfile(_local_conf_path):
+                try:
+                    _local_conf.read(_local_conf_path)
+                except configparser.Error as _e:
+                    self.error_str = f"config/local.conf is malformed: {_e}"
+                    return
             # Build-mode switch.  `distribution` (default) drives the
             # full corpus through pkg.list/live.list/installer.list/pool.list
             # with runtime dep closure.  `build` works against just
@@ -2310,14 +2384,29 @@ class BuildConfig:
             # closure walk, no chroot/ISO; only the named packages get built
             # and published.  Used by team builders who own a subset of the
             # distribution rather than the whole thing.
-            self.build_mode = config_parser.get(
-                'Build', 'Mode', fallback='distribution').strip().lower()
+            #
+            # Precedence: local.conf [Local] Mode  >  build.conf [Build] Mode
+            # >  'distribution'.  Mode is a per-machine decision (a peer picks
+            # build or distribution), so the machine-local file wins; build.conf
+            # carries no Mode line on a fresh checkout (back-compat fallback).
+            _build_mode = config_parser.get(
+                'Build', 'Mode', fallback='distribution')
+            self.build_mode = (
+                _local_conf.get('Local', 'Mode', fallback=None)
+                or _build_mode).strip().lower()
             if self.build_mode not in ('distribution', 'build'):
                 self.error_str = (
-                    f"[Build] Mode must be 'distribution' or 'build', "
+                    f"Mode must be 'distribution' or 'build', "
                     f"got {self.build_mode!r}"
                 )
                 return
+            # Onboarding state, read from the same sidecar.  system_role is
+            # 'first' | 'federation' | '' (un-onboarded); setup_complete gates
+            # the first-run wizard (Phase 2) so it never re-prompts.
+            self.system_role = (
+                _local_conf.get('Local', 'Role', fallback='') or '').strip().lower()
+            self.setup_complete = _local_conf.getboolean(
+                'Local', 'SetupComplete', fallback=False)
             # default size for `iso build disk` output.  Sparse
             # qcow2 — actual on-disk footprint is much smaller (~chroot
             # size + metadata).  Operator overrides via `iso build disk
