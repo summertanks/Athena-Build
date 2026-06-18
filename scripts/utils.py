@@ -763,7 +763,7 @@ def patch_set_hash(patch_dir: str, patch_files: list) -> str:
 # fsync → os.replace.  POSIX rename(2) guarantees readers see either the
 # old valid file or the new valid file, never a torn write.
 
-BUILD_RECORD_SCHEMA_VERSION = 4
+BUILD_RECORD_SCHEMA_VERSION = 5
 BUILD_RECORD_SUFFIX = '.build.json'
 # v1 → v2 (COORD-01): adds output_hashes {filename: sha256_hex}, the
 # per-emitted-binary digest that the coord layer pins into its claim
@@ -1083,6 +1083,11 @@ def new_build_record(*, package: str,
         # record only carries the migrated markers.
         'lifecycle_v':      1,
         'history':          [],
+        # OBS-03 (v5): container resource telemetry, populated at the
+        # container_exited phase — {peak_rss_bytes, peak_rss_mb,
+        # mem_limit_bytes, peak_cpu_pct, samples}.  None until the build
+        # runs (or for pulled/tunneled records that never ran a container).
+        'resources':        None,
     }
 
 
@@ -1111,6 +1116,7 @@ def _build_history_line(record: dict) -> dict:
     _status = ('PASS' if _phase == 'done'
                else 'FAIL' if _phase == 'failed'
                else str(record.get('status') or _phase or 'unknown'))
+    _res = record.get('resources') or {}
     return {
         'ts': record.get('finished') or _utc_now_iso(),
         'package': record.get('package'),
@@ -1121,6 +1127,8 @@ def _build_history_line(record: dict) -> dict:
         'elapsed_seconds': record.get('elapsed_seconds'),
         'exit_code': record.get('exit_code'),
         'oom_killed': record.get('oom_killed'),
+        'peak_rss_mb': _res.get('peak_rss_mb'),     # OBS-03 telemetry
+        'peak_cpu_pct': _res.get('peak_cpu_pct'),
     }
 
 

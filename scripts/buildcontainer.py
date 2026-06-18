@@ -82,6 +82,27 @@ logger = logging.getLogger('athena.build')
 _REPO_DEST_LOCK = threading.Lock()
 
 
+def _container_cpu_pct(stats: dict) -> 'Optional[float]':
+    """OBS-03: container CPU% from a single `container.stats(stream=False)`
+    reading — the cpu_stats-vs-precpu_stats delta docker provides per call.
+    Returns None when the deltas aren't computable yet (first read, idle
+    interval, or a malformed payload)."""
+    try:
+        _cpu = stats['cpu_stats']
+        _pre = stats['precpu_stats']
+        _cd = (_cpu['cpu_usage']['total_usage']
+               - _pre['cpu_usage']['total_usage'])
+        _sd = _cpu['system_cpu_usage'] - _pre['system_cpu_usage']
+        if _sd <= 0 or _cd < 0:
+            return None
+        _ncpu = (_cpu.get('online_cpus')
+                 or len(_cpu['cpu_usage'].get('percpu_usage') or [])
+                 or 1)
+        return (_cd / _sd) * _ncpu * 100.0
+    except (KeyError, TypeError, ZeroDivisionError):
+        return None
+
+
 class BuildContainer:
 
     def __init__(self, config: BuildConfig, docker_server=None, cache=None):
@@ -524,6 +545,31 @@ class BuildContainer:
         """
         with self._live_lock:
             self._live.pop(container.short_id, None)
+
+    def _sample_resources(self, container, acc: dict,
+                          stop: 'threading.Event') -> None:
+        """OBS-03 poll thread: every ~2s sample the container's peak RSS and
+        CPU% into `acc` until `stop` is set.  Strictly best-effort — a stats()
+        hiccup (container gone, daemon blip) is swallowed; observability must
+        never disturb the build.  `stop.wait()` is an interruptible sleep so
+        the thread exits promptly when the build ends."""
+        while not stop.is_set():
+            try:
+                _s = container.stats(stream=False)
+                _mem = _s.get('memory_stats', {}) or {}
+                _usage = _mem.get('usage')
+                if isinstance(_usage, (int, float)):
+                    acc['peak_rss_bytes'] = max(acc['peak_rss_bytes'], int(_usage))
+                _lim = _mem.get('limit')
+                if isinstance(_lim, (int, float)) and _lim:
+                    acc['mem_limit_bytes'] = int(_lim)
+                _cpu = _container_cpu_pct(_s)
+                if _cpu is not None:
+                    acc['peak_cpu_pct'] = max(acc['peak_cpu_pct'], _cpu)
+                acc['samples'] += 1
+            except Exception as _e:
+                logger.debug(f"OBS-03 resource sample failed: {_e}")
+            stop.wait(2.0)
 
     def _record_phase(self, package: str, *, initial: 'Optional[dict]' = None,
                       **fields: object) -> None:
@@ -1153,6 +1199,7 @@ class BuildContainer:
         # mid-build — flow through the finally so a leftover container can
         # never accumulate in `docker ps -a` between runs.
         container = None
+        _res_stop = None     # OBS-03 resource sampler stop event (set in finally)
         # COMP-03 Phase 1: per-worker scratch repo dir.  The container's
         # final `cp *.deb /repo/` writes here, NOT into the shared
         # self.repo_path — so concurrent workers can't race on the
@@ -1189,6 +1236,15 @@ class BuildContainer:
                 **self._resource_kwargs(),
             )
             self._register_live(container)
+            # OBS-03: sample container resource usage (peak RSS + CPU%) while it
+            # runs; the peaks are stamped into the build.json record after wait().
+            _res_acc = {'peak_rss_bytes': 0, 'mem_limit_bytes': 0,
+                        'peak_cpu_pct': 0.0, 'samples': 0}
+            _res_stop = threading.Event()
+            threading.Thread(
+                target=self._sample_resources,
+                args=(container, _res_acc, _res_stop),
+                daemon=True, name=f"obs03-{src_pkg.package}").start()
             try:
                 _container_name = (
                     f"{container.name} ({container.short_id})")
@@ -1202,6 +1258,17 @@ class BuildContainer:
                 container,
                 os.path.join(self.buildlog_path, _filename_prefix),
             )['StatusCode']
+
+            # OBS-03: container exited — stop the sampler and snapshot the peaks.
+            if _res_stop is not None:
+                _res_stop.set()
+            _resources = {
+                'peak_rss_bytes': _res_acc['peak_rss_bytes'],
+                'peak_rss_mb': round(_res_acc['peak_rss_bytes'] / 1e6, 1),
+                'mem_limit_bytes': _res_acc['mem_limit_bytes'] or None,
+                'peak_cpu_pct': round(_res_acc['peak_cpu_pct'], 1),
+                'samples': _res_acc['samples'],
+            }
 
             # OBS-01: refresh container attrs so OOMKilled is current,
             # then capture both signals.  Docker exposes the OOM-killed
@@ -1251,6 +1318,7 @@ class BuildContainer:
                 src_pkg.package, phase='container_exited',
                 exit_code=_exit_code, oom_killed=_oom_killed,
                 finished=utils._utc_now_iso(), elapsed_seconds=_elapsed,
+                resources=_resources,
             )
 
             if not _build_result:
@@ -1433,6 +1501,10 @@ class BuildContainer:
                 # always — even on remove failure, the container is no
                 # longer being managed by this worker.
                 self._deregister_live(container)
+            # OBS-03: ensure the resource sampler can't outlive the container
+            # (it's a daemon thread, but stop it promptly on every exit path).
+            if _res_stop is not None:
+                _res_stop.set()
             # COMP-03 Phase 1: rmtree the per-worker scratch dir even on
             # failure paths (the container may have copied .debs in
             # before crashing).  ignore_errors so a fs issue here can't
