@@ -111,10 +111,12 @@ class ProgressBar:
         """Stop the bar and remove it from the widget list.
 
         `persist=True` prints the final rendered line to the console
-        tab so the operator sees it after the bar disappears."""
+        tab so the operator sees it after the bar disappears.  Backends
+        that don't render the unicode bar (the headless Cli) opt out via
+        `renders_widgets = False` and rely on their own [done] marker."""
         self._state = self.STOPPED
         b = _instance()
-        if persist and b is not None:
+        if persist and b is not None and getattr(b, 'renders_widgets', True):
             b.print(str(self))
         if b is not None:
             b.del_widget(self._widget_id)
