@@ -95,7 +95,7 @@ class ProgressBar:
 
     def set_max(self, value: int) -> None:
         self._max = max(1, value)
-        # UX-08(a): step() auto-STOPs at the old max.  When the REAL max
+        # step() auto-STOPs at the old max.  When the REAL max
         # arrives later (download_file grow-path, mirror-publish lazily-sized
         # bar seeded at maxvalue=1), un-freeze so the bar keeps animating
         # instead of sticking at 100% / 1-of-1.
@@ -183,7 +183,7 @@ class Spinner:
         return f'  {self._FRAMES[self._frame]}  {self._message}'
 
     def done(self) -> None:
-        # UX-08(g): idempotent — a Spinner that spans several passes (e.g.
+        # idempotent — a Spinner that spans several passes (e.g.
         # cmd_parse_dependency's "Parsing Dependencies") gets done() at the
         # end of one pass AND again on a later SELECT-LOCK return; without
         # this guard the "✓ … done" line prints twice.

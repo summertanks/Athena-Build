@@ -85,7 +85,7 @@ def generate_pending_claims(
         _phase = _rec.get('phase')
         if _phase not in ('done', 'tunneled'):
             continue
-        # LEDGER-01: a deprecated/retracted source must NOT regenerate
+        # a deprecated/retracted source must NOT regenerate
         # claims — its build record stays phase=done (the receipt is
         # kept), but the deprecation excluded its old claims from
         # `_known`, so without this guard the next publish would
@@ -96,7 +96,7 @@ def generate_pending_claims(
             continue
         _outputs = _rec.get('outputs') or []
         _hashes = _rec.get('output_hashes') or {}
-        # MIRROR-02: per-output upstream provenance for tunneled
+        # per-output upstream provenance for tunneled
         # passthrough.  Build record's `republished_from` field is
         # the {filename: {url, upstream_sha256}} dict written by
         # cmd_tunnel_package (chunk 9).  We pass each file's entry
@@ -405,7 +405,7 @@ def filter_pending_by_ownership(
         if _owner is None:
             _kept.append(_c)
             continue
-        # STA-47: an existing owner record means the remote pool already
+        # an existing owner record means the remote pool already
         # holds bytes under this filename (frozen).  If our rebuilt bytes
         # differ and this isn't a sanctioned reclaim, we must NOT publish:
         # Step 5b's push_single_deb uses --ignore-existing for non-reclaim
@@ -528,7 +528,7 @@ def local_publish(
     _skipped = 0
     _seq = _store.max_seq(config.dir_coord_claims, builder_id)
     for _claim in _pending:
-        # STA-30(d): commit the seq counter only on a successful append —
+        # commit the seq counter only on a successful append —
         # advancing before the try left a permanent sidecar_seq_gap on a
         # transient failure.
         _candidate_seq = _seq + 1
@@ -676,7 +676,7 @@ def remote_publish(
     if ssh_host is None and remote_coord_spec:
         if ':' in remote_coord_spec and '@' in remote_coord_spec.split(':', 1)[0]:
             ssh_host = remote_coord_spec.split(':', 1)[0]
-        # MIRROR-01 Phase 3b: local-fs mirrors (file://, /abs/path) have
+        # local-fs mirrors (file://, /abs/path) have
         # no ssh_host — flock-over-ssh is N/A.  Skip the lock step and
         # proceed; local-fs mirrors are dev/single-host workflows where
         # cross-host concurrency isn't a concern.
@@ -711,7 +711,7 @@ def remote_publish(
         import signing
         _signing_home = signing.signing_home(config)
         _head_dict = _head.read_coord_head(_fetched, _signing_home)
-        # STA-30(b): read_coord_head returns None for BOTH "no head on the
+        # read_coord_head returns None for BOTH "no head on the
         # remote" (legit first-publish bootstrap) AND "head present but GPG
         # verify FAILED / sig missing / homedir broken" (tamper or local
         # signing breakage).  Treating the latter as bootstrap would skip
@@ -854,7 +854,7 @@ def remote_publish(
                     f"publish blocked: {_b['filename']} "
                     f"(owner {_b['owner']!r} at {_b['owner_version']!r}, "
                     f"ours {_b['our_version']!r}) — {_b['reason']}")
-        # RECLAIM-01 — inject operator-resolved reclaim intents AFTER
+        # inject operator-resolved reclaim intents AFTER
         # the _remote_known filter (their filenames are by definition
         # already on the remote) and AFTER the ownership filter (the
         # same-filename owner is us).  Each intent is re-validated
@@ -873,7 +873,7 @@ def remote_publish(
             logger.warning(f"reclaim intent skipped: {_why}")
             _status(f"reclaim intent SKIPPED: {_why}")
         _pending.extend(_reclaims_ok)
-        # MIRROR-03 publish-hazard gate — refuse to silently overwrite frozen
+        # publish-hazard gate — refuse to silently overwrite frozen
         # published bytes.  The dist-tree rsync below pushes the whole repo, so
         # an already-published file rebuilt at the SAME version (new bytes, no
         # new claim) would land on the remote while its signed claim stayed at
@@ -900,7 +900,7 @@ def remote_publish(
             f"already on remote, {len(_ownership_blocked)} ownership-blocked"
             + (f", {len(_reclaims_ok)} reclaim(s)" if _reclaims_ok else '')
             + ")")
-        # MIRROR-02 chunk 11: post-publish installability gate.
+        # post-publish installability gate.
         # Project the union state (mirror's existing claims + our
         # pending) and walk audit_dep_closure with consumer_set =
         # our pending packages.  Any unresolved hard Depends → BLOCK
@@ -953,7 +953,7 @@ def remote_publish(
                 _breaks = []
         else:
             _breaks = []
-        # STA-27: act on _breaks AFTER the if/elif/else chain.  This block
+        # act on _breaks AFTER the if/elif/else chain.  This block
         # was previously nested inside the `else:` above (the no-pending
         # branch, where _breaks is unconditionally []), so the refusal was
         # unreachable — the `elif _pending:` branch computed the breaks and
@@ -1007,7 +1007,7 @@ def remote_publish(
                 _ok_push, _detail_push = _transport.push_single_deb(
                     local_path=_local_path, remote_spec=_remote_file,
                     ssh_key=ssh_key,
-                    # RECLAIM-01: a reclaim's remote file exists with the
+                    # a reclaim's remote file exists with the
                     # OLD bytes — --ignore-existing would silently skip
                     # the transfer and publish a claim whose bytes never
                     # shipped.  Overwrite for reclaim claims only.
@@ -1060,7 +1060,7 @@ def remote_publish(
         _seq = _store.max_seq(config.dir_coord_claims, builder_id)
         _appended = 0
         for _claim in _pending:
-            # STA-30(d): commit the seq counter ONLY on a successful append.
+            # commit the seq counter ONLY on a successful append.
             # The old code did `_seq += 1` before the try, so a transient
             # append failure CONSUMED a seq that never landed → a permanent
             # hole that `audit_sidecar_seq_integrity` flags as a CRITICAL
@@ -1106,7 +1106,7 @@ def remote_publish(
                 )
                 _dep_appended = 0
                 for _dc in _dep_claims:
-                    # STA-30(d): re-assign the seq sequentially and commit
+                    # re-assign the seq sequentially and commit
                     # only on success — the emit pre-assigns contiguous
                     # seqs, but `_seq = max(...)` before the append left a
                     # gap when one append failed.
@@ -1147,7 +1147,7 @@ def remote_publish(
             )
             _obs_appended = 0
             for _oc in _obs_claims:
-                # STA-30(d): re-assign sequentially, commit only on success.
+                # re-assign sequentially, commit only on success.
                 _candidate_seq = _seq + 1
                 _oc['seq'] = _candidate_seq
                 try:
@@ -1206,7 +1206,7 @@ def remote_publish(
             published=str(_state.get('published') or snapshot_pin),
             external=bool(_state.get('external', True)),
         )
-        # MIRROR-01 Phase 2/3: neighbours sourcing.
+        # neighbours sourcing.
         #   - bootstrap (first publish, no prior head) → from local config
         #   - subsequent publishes → preserve from the fetched head
         # Publish itself never adds or removes peers in steady state;
@@ -1246,7 +1246,7 @@ def remote_publish(
             f"; pushed {_pushed_count} .deb(s)"
             + (f" ({_push_fail_count} failed)" if _push_fail_count else "")
             if pool_remote_spec is not None else "")
-        # LEDGER-01: every failure path returned earlier — pool, jsonl AND
+        # every failure path returned earlier — pool, jsonl AND
         # coord-head pushes all succeeded.  Only NOW report the published
         # package set so the caller can stamp published_at on records.
         if on_published is not None:

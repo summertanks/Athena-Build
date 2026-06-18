@@ -10,7 +10,7 @@ import utils
 
 from typing import List, Dict, Any, Optional, Tuple
 
-# STA-33: `apt_pkg.config['APT::Build-Profiles']` is a PROCESS-GLOBAL that
+# `apt_pkg.config['APT::Build-Profiles']` is a PROCESS-GLOBAL that
 # `Source.build_depends` sets and then reads via `parse_src_depends`.
 # Under COMP-03 parallel builds (per-package profile overrides, ARCH-16),
 # worker A's set could be overwritten by worker B before A's parse ran,
@@ -20,7 +20,7 @@ _BUILD_PROFILES_LOCK = threading.Lock()
 
 logger = logging.getLogger('athena.cache')
 
-# UX-04: python-debian's Deb822 base uses an OrderedSet whose __keys
+# python-debian's Deb822 base uses an OrderedSet whose __keys
 # nodes hold weakrefs.  Those plus the parsed-relation mixin caches
 # can't pickle.  Drop them on __getstate__ — they're reconstructed on
 # load by re-initialising Deb822 with the captured field dict (Package)
@@ -409,7 +409,7 @@ class Package(Packages):
             _msg = (f"Invalid constraint '{constraint}' for package {self.package} "
                     f"version {self.version}, skipping")
             tui.console.print(f"WARNING: {_msg}")
-            logger.warning(_msg)   # UX-08(e): persist constraint faults to the log too
+            logger.warning(_msg)   # persist constraint faults to the log too
             return False
 
         # If the constraint is not added yet, add it
@@ -442,7 +442,7 @@ class Package(Packages):
             _msg = ("Cannot resolve conflicting constraints for "
                     f"{self.package} {_constraint} vs {old_constraint}, ignoring")
             tui.console.print(f"WARNING: {_msg}")
-            logger.warning(_msg)   # UX-08(e): persist constraint faults to the log too
+            logger.warning(_msg)   # persist constraint faults to the log too
             return False
 
     # ── UX-04 pickle support ────────────────────────────────────────────
@@ -643,7 +643,7 @@ class Source(Sources):
         candidate".  Without `cache`, no expansion happens (caller-driven
         opt-in, keeps the dep-tree-time parse a pure transform).
         """
-        # STA-33: hold the lock across the global set AND every parse that
+        # hold the lock across the global set AND every parse that
         # reads it, so a concurrent worker can't swap the profile set out
         # from under this source's parse.  parse is microseconds; the lock
         # is uncontended in the common single-build case.

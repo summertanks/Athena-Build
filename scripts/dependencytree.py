@@ -73,7 +73,7 @@ class DependencyTree:
 
         self.__recommended = select_recommended
         self.__cache = cache
-        # SELECT-LOCK: pinned alternative picks fed from selection.state so a
+        # pinned alternative picks fed from selection.state so a
         # genuine multi-provider prompt (mawk vs gawk for `awk`, telnet vs
         # inetutils-telnet for `telnet-client`) resolves deterministically and
         # NEVER re-prompts — otherwise a different pick would false-trigger the
@@ -129,7 +129,7 @@ class DependencyTree:
         self.live_exclusive_src_names: set = set()
         self.installer_exclusive_src_names: set = set()
 
-        # COMP-02 phase D follow-up: pool.list — packages that ship in
+        # phase D follow-up: pool.list — packages that ship in
         # the apt pool on the installer ISO but are NEVER installed in
         # any chroot (live, installer ramdisk, or target).  They go
         # through the resolver normally so their Depends are pulled in
@@ -537,7 +537,7 @@ class DependencyTree:
         # Also register every virtual name this package provides so that the L84 early-return
         # catches virtual-name lookups (e.g. 'awk' → gawk_pkg) without needing the L93 loop.
         #
-        # STA-45: a virtual Provides must NEVER clobber a REAL selected package of the same
+        # a virtual Provides must NEVER clobber a REAL selected package of the same
         # name — apt's "real package beats virtual Provides" rule.  The old unconditional
         # write let a later-resolved provider (B Provides: foo) overwrite an already-selected
         # real `foo`; consumers that filter `key == selected_pkgs[key]['Package']` then drop
@@ -708,7 +708,7 @@ class DependencyTree:
                     # "package breaks its own alias" (false positive) from a real break.
                     if self.selected_pkgs[_breaks_name] is self.selected_pkgs[_pkg]:
                         continue
-                    # COMP-02 phase D follow-up: pool.list contract — when
+                    # phase D follow-up: pool.list contract — when
                     # either side of the relationship is a pool extra,
                     # apt enforces at install time on the target.  We
                     # intentionally ship mutually-Breaking pool entries
@@ -774,7 +774,7 @@ class DependencyTree:
                     # "I am X and nothing else can be X". Not a real conflict with another package.
                     if self.selected_pkgs[_conflicts_name] is self.selected_pkgs[_pkg]:
                         continue
-                    # COMP-02 phase D follow-up: pool.list bypass — see
+                    # phase D follow-up: pool.list bypass — see
                     # the matching block in the Breaks loop above.
                     _real_conflicts_name = self.selected_pkgs[_conflicts_name]['Package']
                     if (_pkg in self.pool_extras_pkg_names or

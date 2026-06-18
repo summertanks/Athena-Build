@@ -37,7 +37,7 @@ import utils
 logger = logging.getLogger('athena')
 
 
-# ARCH-19: the canonical sudo wrapper lives in utils.sudo now.  Keep the
+# the canonical sudo wrapper lives in utils.sudo now.  Keep the
 # module-local `_sudo` NAME as an alias so call sites + test monkeypatching
 # (patch.object(apt_repo, '_sudo', …)) stay unchanged.  (utils is a low-level
 # module that does NOT import apt_repo, so no cycle — the old "local copy to
@@ -477,7 +477,7 @@ def _run_dpkg_scan(
     os.close(_tmp_fd)   # subprocess shell opens it via `>`
 
     try:
-        # STA-40: argv form, no shell.  cwd= replaces `cd`, the tempfile
+        # argv form, no shell.  cwd= replaces `cd`, the tempfile
         # handle replaces `> _tmp_path`, and stderr is CAPTURED — the old
         # `2>/dev/null` discarded the very stderr the failure handler below
         # claims to report.  dpkg-scan* doesn't read stdin, so under
@@ -652,7 +652,7 @@ def _write_subdir_release(
         f"Description: Athena installer media — {component}/{arch_label}\n"
     )
     _path = os.path.join(target_dir, 'Release')
-    # SEC-07: write a user-owned tempfile, then `sudo install -m 644`
+    # write a user-owned tempfile, then `sudo install -m 644`
     # it into place (root-owned next to the other index files) — the
     # same atomic-move pattern _run_dpkg_scan uses.  The previous
     # `sudo -S bash -c "cat > path"` with `input=password+content`

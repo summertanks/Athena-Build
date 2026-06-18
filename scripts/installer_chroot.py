@@ -49,7 +49,7 @@ _OVERLAY_MAP = [
     # cp -p preserves its +x bit.
     ('finish-install/05athena-default-source',
      'usr/lib/finish-install.d/05athena-default-source'),
-    # COMP-01: disable the install-disc apt source on the target post-install
+    # disable the install-disc apt source on the target post-install
     # (so apt doesn't block on "insert the disc").  Conditional on a network
     # source existing — see the script.  Numbered 11 (NOT 06) so it runs AFTER
     # 08hw-detect — that hook apt-installs queued microcode + vmware tools at
@@ -128,7 +128,7 @@ def build_installer_chroot(
     # their maintainer scripts only run at first boot under
     # rootskel + main-menu).
     #
-    # FORK-01 Steps 3+4 (2026-05-16/17) — moved into the
+    # 3+4 (2026-05-16/17) — moved into the
     # athena-installer-data udeb (dpkg-unpacked above with the rest
     # of the closure):
     #   - Step 3: mirror/protocol stub template
@@ -158,7 +158,7 @@ def build_installer_chroot(
 # ---------------------------------------------------------------------------
 
 
-# ARCH-19: canonical wrapper in utils.sudo; module-local `_sudo` kept as an
+# canonical wrapper in utils.sudo; module-local `_sudo` kept as an
 # alias so call sites + test monkeypatching stay unchanged.
 _sudo = utils.sudo
 

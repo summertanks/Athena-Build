@@ -194,13 +194,13 @@ class TunnelCommandsMixin(SessionState):
         import time as _time
         _buildlog_path = os.path.join(self.config.dir_log, 'build')
         _t_tunnel_start = _time.monotonic()
-        # OBS-04 observability accumulators (tunnel path) — best-effort,
+        # observability accumulators (tunnel path) — best-effort,
         # consumed by the verbose .buildlog written at the terminal.
         _purged_stale: 'list[str]' = []
         _strip_events: 'list[tuple[str, str]]' = []
         _stamp_events: 'list[tuple[str, str, str]]' = []
         try:
-            # LEDGER-01: the tunnel entry record RECREATES the file —
+            # the tunnel entry record RECREATES the file —
             # carry the lifecycle layer (+ prior-build stash) through.
             utils.write_build_record(
                 _buildlog_path,
@@ -320,7 +320,7 @@ class TunnelCommandsMixin(SessionState):
             _ledger = (getattr(self.container, 'asg_ledger', None)
                        if self.container is not None else None)
             if _ledger is None:
-                # STA-35: standalone `source tunnel` runs container-less, so
+                # standalone `source tunnel` runs container-less, so
                 # the asg ledger that `cmd_source_build` loads onto the
                 # container (`asg_ledger = published_ledger(config)`) is
                 # absent — without it a delta source tunnels with strip-only
@@ -426,7 +426,7 @@ class TunnelCommandsMixin(SessionState):
         _outputs_sorted = sorted(_final_paths.keys()) if _final_paths \
             else sorted(_upstream_files)
         try:
-            # LEDGER-01: resolve the prior-build stash — a re-tunnel at a
+            # resolve the prior-build stash — a re-tunnel at a
             # new version rolls the old episode into history as 'obsolete'.
             if _success:
                 utils.roll_prior_build_history(
@@ -448,7 +448,7 @@ class TunnelCommandsMixin(SessionState):
         except (OSError, FileNotFoundError) as _e:
             logger.warning(f"tunnel {src_pkg.package}: build-record terminal: {_e}")
 
-        # OBS-04: verbose tunnel narrative (log/build/<pkg>.buildlog).
+        # verbose tunnel narrative (log/build/<pkg>.buildlog).
         # Fully guarded — never reaches the tunnel control flow.
         try:
             _elapsed_t = round(_time.monotonic() - _t_tunnel_start, 3)

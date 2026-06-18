@@ -246,7 +246,7 @@ def scan_repo_state(config: 'BuildConfig', subdir: str = 'main',
 
     _temp_dir = config.dir_temp
     os.makedirs(_temp_dir, exist_ok=True)
-    # CONF-01 Stage D fix-up (2026-05-22): include a hash of the
+    # fix-up (2026-05-22): include a hash of the
     # source dir path in the cache filename.  Without it, a cached
     # audit-Packages-main from a pre-Stage-D scan (against the OLD
     # repo/main path, empty post-migration) would collide with the
@@ -404,7 +404,7 @@ def iter_packages_all_versions(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UPD-01 — remote ledger (the published archive of record)
+# remote ledger (the published archive of record)
 #
 # Local repo/ is single-snapshot; the REMOTE accumulates every version ever
 # published (base_snapshot..current_snapshot).  These helpers read the remote

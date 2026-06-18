@@ -87,7 +87,7 @@ class Cli:
     SEVERITY_WARNING = 2
     SEVERITY_INFO    = 3
 
-    # UX-05d: ANSI color codes for stdout when running attached to a TTY
+    # ANSI color codes for stdout when running attached to a TTY
     # and the operator hasn't set NO_COLOR.  UX-08(c): these MUST match
     # tui.render's COLOR_* numbering — command handlers pass the render
     # constants (`tui.COLOR_ERROR` etc.) opaquely into print(), and the
@@ -131,18 +131,18 @@ class Cli:
         self.renders_widgets: bool = False
         # exit_code is None while alive; an int sets the wait() loop to break.
         self._exit_code: Optional[int] = None
-        # UX-05a: --yes auto-answer.  Set by build.py:main() from argv.
+        # --yes auto-answer.  Set by build.py:main() from argv.
         # Consulted only by `Prompt(..., informational=True)` —  hard
         # prompts (sudo password, conflict-resolution OPTIONS) wait
         # for operator input regardless of the flag.
         self.auto_yes: bool = False
-        # UX-05d: ANSI colour for stdout when running attached to a TTY
+        # ANSI colour for stdout when running attached to a TTY
         # and the operator hasn't set NO_COLOR (https://no-color.org/).
         # Redirected output (`> log.txt`) gets plain text.
         import os
         self._use_color: bool = (
             sys.stdout.isatty() and 'NO_COLOR' not in os.environ)
-        # UX-05e: one-shot command queue.  build.py:main() populates from
+        # one-shot command queue.  build.py:main() populates from
         # `-c <cmd>` argv tokens; wait() dispatches each in order and
         # exits without entering the REPL when the queue is non-empty.
         self.one_shot_cmds: list = []

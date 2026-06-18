@@ -116,7 +116,7 @@ def get_build(buildlog_dir: str, package: str) -> 'Dict[str, Any]':
 # pattern.  An explicit allowlist — anything else 404s — so the route
 # can never be talked into serving an arbitrary file from the log dir.
 _ARTIFACT_SUFFIX = {
-    'buildlog': '.buildlog',     # OBS-04 narrative (small, KBs)
+    'buildlog': '.buildlog',     # narrative (small, KBs)
     'vbuildlog': '.vbuildlog',   # virtual prediction (small)
     'log': '',                   # raw container stdout (can be 200+ MB)
 }

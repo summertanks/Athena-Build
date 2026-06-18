@@ -335,7 +335,7 @@ def detect_hash_conflicts(
     # Index: filename → list of (builder, sha256, package_source_name)
     _by_fn: 'Dict[str, List[Tuple[str, str, str]]]' = {}
     for _bid, _claims in by_builder.items():
-        # STA-29: the canonical supersession fold.  Folds marker states
+        # the canonical supersession fold.  Folds marker states
         # (retracted/deprecated/obsolete) AND seqs named by a back-ref —
         # including a reclaim's reclaims_seq (a LIVE published claim, not a
         # marker): without that fold the same-filename old/new pair a

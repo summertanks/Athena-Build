@@ -42,7 +42,7 @@ class _ChrootMixin:
     _dir_chroot: str
     _dir_image: str
     _dir_repo: str
-    _dir_repo_main: str   # CONF-01 Stage D — dists/<codename>/main/binary-<arch>/
+    _dir_repo_main: str   # dists/<codename>/main/binary-<arch>/
     _dir_log: str
     _dir_preinstall_patch: str
     _dir_postinstall_patch: str
@@ -313,7 +313,7 @@ class _ChrootMixin:
                 f"build_chroot: incomplete — broken={sorted(_broken)} "
                 f"missing={_missing}"
             )
-            # STA-37: the dpkg-query Status diff is the "authoritative
+            # the dpkg-query Status diff is the "authoritative
             # pass/fail gate" the docstring promises — make it actually GATE.
             # A broken or never-installed PLANNED package means the surface
             # is incomplete (the 2026-06-11 python3-never-unpacked /
@@ -432,7 +432,7 @@ class _ChrootMixin:
             f'{_chroot}/proc',
         ]:
             _was_mounted = os.path.ismount(_dst)
-            # STA-42: peel EVERY stacked layer.  A SIGKILL'd / OOM-killed
+            # peel EVERY stacked layer.  A SIGKILL'd / OOM-killed
             # prior run can leave the host /dev bind-mounted MULTIPLE times
             # (each _mount_chroot_fs adds a layer when the prior finally
             # didn't run); a single umount removes only the top one, leaving
@@ -734,7 +734,7 @@ class _ChrootMixin:
         # above.  Aliases would inflate the graph with redundant nodes
         # and Kahn would never be able to retire them.
         #
-        # SURFACES-01: when `install_set` is given (a surfaces.
+        # when `install_set` is given (a surfaces.
         # surface_closure result — e.g. live = closure(base ∪ gnome-desktop
         # ∪ live.list, +extras)), it REPLACES the legacy exclusion math:
         # the graph is exactly canonical ∩ install_set − libc_seed.  The
@@ -1090,17 +1090,17 @@ class _ChrootMixin:
         removes from emitted .debs).
         """
         file_list = []
-        # CONF-01 Stage D: dir_repo_main is now dists/<codename>/main/
+        # dir_repo_main is now dists/<codename>/main/
         # binary-<arch>/, not repo/main/.  Mixin reads it from the
         # composer (BuildSystem).
         _main = self._dir_repo_main
-        # SURFACES-01: a surface closure with Recommends extras can include
+        # a surface closure with Recommends extras can include
         # -doc binaries, which the repo segregates into the sibling doc/
         # component (live-boot-doc, live-config-doc caught live).  Search
         # main first, then the doc component.
         _doc = _main.replace(f'{os.sep}main{os.sep}', f'{os.sep}doc{os.sep}')
         for pkg in pkg_list:
-            # STA-53(b): a hard-coded seed (e.g. the libc bootstrap) may be
+            # a hard-coded seed (e.g. the libc bootstrap) may be
             # absent on a minimal selection — skip+warn like the installer
             # counterpart rather than KeyError'ing after partial work.
             _entry = self._dependencytree.selected_pkgs.get(pkg)
@@ -1496,7 +1496,7 @@ class _ChrootMixin:
         # network source — apt-install fails loud rather than silently
         # pulling from upstream Debian.
         #
-        # FORK-02: the shipped sources.list carries NO upstream example
+        # the shipped sources.list carries NO upstream example
         # lines.  An earlier version emitted the build's [Mirror.*] URLs
         # as commented `# deb …` references "for operator convenience" —
         # but on an upstream-mirror build those render as literal
@@ -1552,7 +1552,7 @@ class _ChrootMixin:
         else:
             tui.console.print("systemd-firstboot: root password / hostname / machine-id configured")
 
-        # CONF-02 phase 3: install our public signing keyring at the
+        # phase 3: install our public signing keyring at the
         # conventional /usr/share/keyrings/ location so a future apt
         # source pinning via `[signed-by=...]` works without ceremony.
         # Skipped silently when no signing key has been generated yet.

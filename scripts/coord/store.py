@@ -214,7 +214,7 @@ def project_live_claims(
                     _retracted_seqs.add(_retracts)
                 continue
             if _c.get('claim_state') == _schema.CLAIM_STATE_DEPRECATED:
-                # SELECT-LOCK: deprecation RELEASES ownership — like a
+                # deprecation RELEASES ownership — like a
                 # retraction it drops the superseded published claim, and the
                 # deprecated claim itself is not "live-owned" here (the file
                 # stays in the pool, but it's no longer ours).  project_owners
@@ -224,7 +224,7 @@ def project_live_claims(
                     _retracted_seqs.add(_dep)
                 continue
             if _c.get('claim_state') == _schema.CLAIM_STATE_OBSOLETE:
-                # LEDGER-01: obsolescence supersedes the old version's
+                # obsolescence supersedes the old version's
                 # published claim; the obsolete claim itself is not part of
                 # the live (pkg,ver) map either — project_owners surfaces it
                 # per-filename with ownership retained.
@@ -232,7 +232,7 @@ def project_live_claims(
                 if isinstance(_obs, int):
                     _retracted_seqs.add(_obs)
                 continue
-            # RECLAIM-01: a reclaim is a LIVE claim (no continue) that
+            # a reclaim is a LIVE claim (no continue) that
             # erases the superseded same-(pkg,ver) claim via its back-ref;
             # the trailing post-filter drops the earlier-processed old
             # claim (reclaims always carry the higher seq).
@@ -308,7 +308,7 @@ def iter_live_claims_by_filename(
                 _o = _c.get('obsoletes_seq')
                 if isinstance(_o, int):
                     _retracted.add(_o)
-            # RECLAIM-01: a reclaim is itself a LIVE published claim, so
+            # a reclaim is itself a LIVE published claim, so
             # its back-ref is collected unconditionally (no state branch);
             # the superseded same-filename claim is erased and the reclaim
             # is yielded as the filename's single live assertion.
@@ -380,10 +380,10 @@ def project_owners(
         _winner = _sorted[0]
         _republished = _winner.get('republished_from')
         _is_tunneled = bool(_republished)
-        # SELECT-LOCK: a deprecated winner has RELEASED ownership — same
+        # a deprecated winner has RELEASED ownership — same
         # no-owner treatment as a tunneled claim, so another builder may take
         # the file over by republishing (filter_pending_by_ownership rule).
-        # LEDGER-01: an OBSOLETE winner is deliberately NOT here — version
+        # an OBSOLETE winner is deliberately NOT here — version
         # supersession is natural aging, the owner keeps the (old) file's
         # ownership; it just becomes a labeled prune candidate.
         _is_deprecated = (_winner.get('claim_state')

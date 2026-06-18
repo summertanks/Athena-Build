@@ -1661,7 +1661,7 @@ def virtual_publish_dry_run(
     # to the dry-run model.  Real ownership decisions only apply to
     # filenames we'd actually push.
     _existing = _merged.get(our_builder_id, [])
-    # LEDGER-01: 'obsolete' is deliberately NOT excluded here — an obsolete
+    # 'obsolete' is deliberately NOT excluded here — an obsolete
     # filename stays "existing" (it never re-claims; versions only move
     # forward), matching publish's _known semantics.
     _existing_fns: 'set[str]' = {

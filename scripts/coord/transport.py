@@ -278,14 +278,14 @@ def push_dist_tree(
             "before pushing")
     _src = local_dist_dir.rstrip('/') + '/'
     _dst = remote_dir_spec.rstrip('/') + '/'
-    # STA-28: EXCLUDE pool artifacts (not merely `--filter=P` protect).
+    # EXCLUDE pool artifacts (not merely `--filter=P` protect).
     # The pool .debs live INSIDE dists/<codename>/ (CONF-01 Stage D), so
     # this whole-subtree rsync would otherwise touch them.  A `--filter=P`
     # only stops receiver-side DELETION — rsync -aH still TRANSFERS/
     # overwrites any .deb whose size/mtime differs, so a local-ahead
     # rebuild (same filename, new bytes) silently rewrote the FROZEN
     # remote bytes on every publish, with no reclaim claim (the whole
-    # RECLAIM-01 invariant bypassed; STA-47 masked).  `--exclude` removes
+    # invariant bypassed; STA-47 masked).  `--exclude` removes
     # pool artifacts from the transfer set entirely AND (since they're
     # excluded, not just protected) keeps `--delete` from reaping them —
     # so this pass never overwrites NOR deletes a pool file.  Pool bytes
