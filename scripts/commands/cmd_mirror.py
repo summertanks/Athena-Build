@@ -1481,6 +1481,9 @@ class MirrorCommandsMixin(SessionState):
                     "`cache build` + `cache parse` to resolve at the new pin",
                     tui.COLOR_WARNING)
                 _snap = _adopt
+            # Refresh the canonical pkg.list/pool.list from the owner so
+            # source-select changes propagate to every builder.
+            self._apply_canonical_config(_fetched, _head)
             _keyring = _id.load_keyring(
                 os.path.join(_fetched, 'keyring', 'builders'))
             _revoked = _head.get('revoked_builders') or {}
@@ -2686,7 +2689,35 @@ class MirrorCommandsMixin(SessionState):
         console.print(
             f"registered builder '{_bid}' on mirror '{_name}'.",
             tui.COLOR_HIGHLIGHT)
+        # Adopt the owner's canonical pkg.list/pool.list (overwrite local on
+        # register) so this builder matches the federation's selection.
+        import coord.head as _head_mod
+        _fetched = os.path.join(
+            self.config.dir_cache, 'mirror', _name, 'fetched')
+        os.makedirs(_fetched, exist_ok=True)
+        _ok_f, _ = _transport.pull_remote_coord(
+            local_dest=_fetched, remote_spec=_coord_spec, ssh_key=_ssh_key)
+        if _ok_f:
+            _h = _head_mod.read_coord_head(
+                _fetched, signing.signing_home(self.config))
+            self._apply_canonical_config(_fetched, _h)
         return True
+
+    def _apply_canonical_config(self, fetched_dir, head):
+        """Verify + apply the mirror's canonical pkg.list/pool.list (from the
+        fetched coord tree) against the signed head's config_sha256.  Silent
+        no-op when the head carries no config pin (owner hasn't published one
+        yet); loud on a verified apply or a verify failure."""
+        import coord.config_manifest as _cfgman
+        _sha = head.get('config_sha256') if isinstance(head, dict) else None
+        if not _sha:
+            return
+        _ok, _detail = _cfgman.apply_canonical_config(
+            fetched_dir, str(_sha),
+            self.config.pkglist_path, self.config.poollist_path)
+        console.print(
+            f"  config: {_detail if _ok else 'NOT applied (' + _detail + ')'}",
+            tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_WARNING)
 
     def cmd_mirror_builders_decommission(self, *args):
         """mirror builders decommission <builder-id> [<mirror>] — retire a
