@@ -1,6 +1,6 @@
 """apt-repo metadata generators — Packages, Sources, Release, InRelease.
 
-CONF-01 Stage A (2026-05-22): lifted verbatim from iso_installer.py.
+Lifted verbatim from iso_installer.py.
 See docs/plans/conf-01-repo-layout-migration.md for the full migration
 plan.
 
@@ -431,7 +431,7 @@ def _run_dpkg_scan(
     Perl stdout through sudo's pipe doesn't surface lines mid-scan
     reliably even with `stdbuf -oL` (operator-observed 2026-05-22).
 
-    STA-22 (2026-05-28): consolidates the two prior near-parallel
+    Consolidates the two prior near-parallel
     shell-string subprocess patterns (`_scan_packages_to`,
     `_scan_sources_to` here; `_scan_packages_with_progress` in
     `scripts/repo_audit.py`).  The tempfile-then-install pattern is

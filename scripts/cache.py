@@ -426,7 +426,7 @@ class Cache:
         self, *, _path: str, _chosen_ext: str, _rel_sha: dict,
         _compressed_dst: str, _dst: str,
     ) -> 'tuple[bool, str]':
-        """STA-44: verify a freshly downloaded + decompressed index against
+        """Verify a freshly downloaded + decompressed index against
         the GPG-verified InRelease SHA256.
 
         The InRelease sha gates only the re-download SKIP (the cached-file

@@ -1,4 +1,4 @@
-"""COMP-09 — pre-installed bootable disk image output.
+"""Pre-installed bootable disk image output.
 
 `iso build disk [size_gb]` packs the live chroot into a sparse qcow2
 disk image that boots directly into the running OS (no installer

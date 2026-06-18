@@ -1,4 +1,4 @@
-"""COORD-01 schema — the on-the-wire data shapes.
+"""Schema — the on-the-wire data shapes.
 
 Three records cross the host boundary:
 
@@ -371,7 +371,7 @@ def new_reclaim(
     reclaims_seq: int,
     component: str = 'main',
 ) -> dict:
-    """RECLAIM-01: the sanctioned exception to the published-filename-
+    """The sanctioned exception to the published-filename-
     is-frozen-bytes invariant.  A NEW live claim for the SAME filename
     with a NEW sha256 — a same-version rebuild whose content
     legitimately changed without a version bump (Position-X OOB

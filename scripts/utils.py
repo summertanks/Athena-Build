@@ -625,7 +625,7 @@ def verify_inrelease(signed_path: str, keyring_path: str, work_dir: str) -> tupl
 def check_dep3_header(patch_path: str) -> list:
     """Inspect the leading prose of a patch file for required DEP-3 headers.
 
-    DEP-3 (https://dep-team.pages.debian.net/deps/dep3/) defines the
+    (https://dep-team.pages.debian.net/deps/dep3/) defines the
     pseudo-headers Debian expects above the `--- a/...` diff line:
 
       Description: (or Subject:)  what the patch does and why
@@ -635,7 +635,7 @@ def check_dep3_header(patch_path: str) -> list:
     Returns the list of required field names that are missing.  An
     empty list means the header passes; a non-empty list is what the
     caller surfaces in a warning.  We scan only the first ~40 lines —
-    DEP-3 headers must precede the diff hunks anyway.
+    Headers must precede the diff hunks anyway.
 
     Soft check: returns missing fields, does not raise.  The caller
     (cmd_parse_dependency) logs them as warnings; the patch is still
@@ -1104,13 +1104,13 @@ def write_build_record(buildlog_dir: str, record: dict) -> None:
 
 
 def _build_history_path(buildlog_dir: str) -> str:
-    """OBS-02: the cross-run ledger sits one level up from log/build/."""
+    """The cross-run ledger sits one level up from log/build/."""
     return os.path.join(
         os.path.dirname(os.path.normpath(buildlog_dir)), 'build-history.jsonl')
 
 
 def _build_history_line(record: dict) -> dict:
-    """OBS-02: project a build record (live or on-disk <pkg>.build.json) down
+    """Project a build record (live or on-disk <pkg>.build.json) down
     to the compact history summary stored one-per-run in the ledger."""
     _phase = record.get('phase')
     _status = ('PASS' if _phase == 'done'
@@ -1133,7 +1133,7 @@ def _build_history_line(record: dict) -> dict:
 
 
 def archive_build_record(buildlog_dir: str, record: 'Optional[dict]') -> None:
-    """OBS-02: append a COMPLETED build record to the append-only journal
+    """Append a COMPLETED build record to the append-only journal
     ``log/build-history.jsonl`` (sibling of *buildlog_dir*) just before the
     next build of the same source overwrites its ``<pkg>.build.json``.
 
@@ -1154,7 +1154,7 @@ def archive_build_record(buildlog_dir: str, record: 'Optional[dict]') -> None:
 
 
 def read_build_history(buildlog_dir: str) -> 'list[dict]':
-    """OBS-02: the cross-run build history as display summaries, oldest first.
+    """The cross-run build history as display summaries, oldest first.
 
     Merges the append-only journal (PRIOR runs — full build.json records moved
     there at overwrite time) with the current ``<pkg>.build.json`` (the LATEST
@@ -1272,7 +1272,7 @@ def update_build_record(buildlog_dir: str, package: str,
 
 def upsert_build_record(buildlog_dir: str, package: str,
                         **fields: object) -> dict:
-    """LEDGER-01: read-merge-resign-write that NEVER raises on a missing
+    """Read-merge-resign-write that NEVER raises on a missing
     record — the lifecycle layer's entry point.
 
     When no record exists (or HMAC verify fails — same treat-as-missing
@@ -1300,7 +1300,7 @@ def upsert_build_record(buildlog_dir: str, package: str,
 
 
 def preserve_lifecycle(old: 'Optional[dict]', new: dict) -> dict:
-    """LEDGER-01: carry the lifecycle layer through a record RE-CREATION.
+    """Carry the lifecycle layer through a record RE-CREATION.
 
     Record creators (build-start entry record, tunnel entry record)
     historically overwrite the whole record; that would wipe the
@@ -1339,7 +1339,7 @@ def preserve_lifecycle(old: 'Optional[dict]', new: dict) -> dict:
 
 def roll_prior_build_history(buildlog_dir: str, package: str,
                              new_built_version: 'Optional[str]') -> bool:
-    """LEDGER-01: resolve a `prior_build` stash at build completion.
+    """Resolve a `prior_build` stash at build completion.
 
     If the prior episode's built_version differs from the new one (a
     snapshot move or +asg bump superseded it), roll an 'obsolete'
@@ -1367,7 +1367,7 @@ def roll_prior_build_history(buildlog_dir: str, package: str,
 
 def lifecycle_touch_selected(buildlog_dir: str, selected: 'Dict[str, str]',
                              snapshot: str) -> dict:
-    """LEDGER-01: the `cache parse` lifecycle touch — tracking starts HERE.
+    """The `cache parse` lifecycle touch — tracking starts HERE.
 
     `selected` maps every selected SOURCE name (deb ∪ udeb trees) to its
     version string.  Per source:
@@ -1451,7 +1451,7 @@ def lifecycle_touch_selected(buildlog_dir: str, selected: 'Dict[str, str]',
 
 def lifecycle_mark_deprecated(buildlog_dir: str, srcs: 'Iterable[str]',
                               snapshot: str) -> int:
-    """LEDGER-01 intent-at-accept: record `selection='deprecated'` the
+    """Intent-at-accept: record `selection='deprecated'` the
     moment the operator ACCEPTS a closure shrink (`cache select accept`) —
     before any mirror publish.  The mirror-side deprecation claim (publish
     Step 6b) then PROPAGATES this intent; until it does, the coherence
@@ -1474,7 +1474,7 @@ def lifecycle_mark_deprecated(buildlog_dir: str, srcs: 'Iterable[str]',
 def roll_lifecycle_history(record: dict, *, state: str,
                            now: 'Optional[str]' = None,
                            extra: 'Optional[dict]' = None) -> dict:
-    """LEDGER-01: append the record's CURRENT lifecycle episode to its
+    """Append the record's CURRENT lifecycle episode to its
     `history` list — the single shape used for every roll:
 
       obsolete   — the selected version moved (snapshot change / +asg bump)
@@ -1837,7 +1837,7 @@ def snapshot_state_path(config: 'BuildConfig') -> str:
     Lives under config/ (NOT cache/) so `clean cache` can't wipe the
     operator-set current pin — has production impact.
 
-    MIRROR-01 Phase 1: schema reduced to `{current}`.  Legacy fields
+    Schema reduced to `{current}`.  Legacy fields
     `base`, `published`, `external` are READ-tolerantly (compat shims
     in build.py) but no longer WRITTEN — they move to per-mirror
     state in Phase 4."""
@@ -2845,7 +2845,7 @@ class BuildConfig:
         join(dir_repo, sub)`.  Order is stable (binaries first, udebs
         next, then doc/dbgsym/tests).
 
-        STA-38: derived from the single `_STALE_SCAN_SUBDIRS` canon so
+        Derived from the single `_STALE_SCAN_SUBDIRS` canon so
         this (strip) walk and `_scan_stale_files` (cleanup / gate) cover
         exactly the same build-output components and can't drift apart.
         Pristine tunneled binaries (contrib / non-free / non-free-firmware)
@@ -2860,7 +2860,7 @@ class BuildConfig:
           1. `[Source.<pkg>] BuildOptions = …` if present in build.conf
           2. global `[Source] BuildOptions = …`
 
-        ARCH-16: a per-invocation override (the `[nocheck]` bracket-token on
+        A per-invocation override (the `[nocheck]` bracket-token on
         `source build foo [nocheck]`) is layered ON TOP of this at the call
         site (buildcontainer.build's `options_override` kwarg) — that path
         is not visible here.
@@ -3316,7 +3316,7 @@ def get_sha256(filepath: str, use_cache: bool = True) -> str:
     When the recorded pair matches the current file stat, returns
     the cached hash without re-reading the file — a no-op verify
     run over hundreds of source tarballs drops from ~30 seconds of
-    SHA-256 to milliseconds of `stat()`+sidecar-read.
+    To milliseconds of `stat()`+sidecar-read.
 
     Sidecar format — single line, space-separated:
 
@@ -3378,7 +3378,7 @@ def get_sha256(filepath: str, use_cache: bool = True) -> str:
 
 
 def parse_build_pkg_list(path: str) -> 'list[str]':
-    """MIRROR-02: parse `config/build_pkg.list` — flat list of binary package
+    """Parse `config/build_pkg.list` — flat list of binary package
     names, one per line, `#` comments and blank lines tolerated.
 
     No grouping: build mode is narrow-scope (one team owns this list),

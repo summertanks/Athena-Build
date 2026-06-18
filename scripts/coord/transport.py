@@ -1,4 +1,4 @@
-"""COORD-01 transport — SSH/rsync fetch + push for the coord tree.
+"""Transport — SSH/rsync fetch + push for the coord tree.
 
 The shared sidecar lives at the publish host's `repo-coord/` tree
 (siblings of `repo/` — never served over HTTP).  Builders interact
@@ -357,7 +357,7 @@ def remote_flock_acquire(
     Returns None if the lock can't be acquired (spawn failure, `flock -w`
     timeout because a peer holds it, or the SSH session dies).
 
-    STA-30(c): the flock'd shell echoes `COORD_LOCK_ACQUIRED` BEFORE its
+    The flock'd shell echoes `COORD_LOCK_ACQUIRED` BEFORE its
     blocking `cat`, and we block reading stdout for that token (bounded by
     `flock -w` + a margin) before returning.  Previously the Popen was
     returned immediately and no caller read it, so publish raced ahead

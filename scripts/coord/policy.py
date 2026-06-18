@@ -1,4 +1,4 @@
-"""COORD-01 policy knobs — operator-tunable decisions.
+"""Policy knobs — operator-tunable decisions.
 
 These are facts the codebase consults, separated from the data layer
 (schema, store) and the audit layer (reconcile) so a future operator

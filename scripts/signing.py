@@ -1,6 +1,6 @@
 """Project signing key — generate, locate, inspect, verify.
 
-CONF-02 phase 1: the *key management* surface.  Sign-Release wiring
+Phase 1: the *key management* surface.  Sign-Release wiring
 into ``cmd_index_repo`` is a follow-on (CONF-01 / CONF-02 phase 2).
 
 What this module owns:

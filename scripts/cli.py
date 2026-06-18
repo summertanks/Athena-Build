@@ -164,7 +164,7 @@ class Cli:
     def print(self, message: str, attribute: Optional[int] = None) -> None:
         """Write *message* to stdout, one line.
 
-        UX-05d: if a non-None attribute maps to a known ANSI sequence
+        If a non-None attribute maps to a known ANSI sequence
         AND stdout is a TTY AND NO_COLOR isn't set, wrap the message in
         the colour escape + reset.  Redirected output (`> log.txt`,
         piped to a file) gets plain text — the isatty() check prevents

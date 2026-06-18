@@ -205,7 +205,7 @@ class CacheCommandsMixin(SessionState):
         )
 
     def _cache_parse_build_mode(self) -> bool:
-        """MIRROR-02: build-mode dep parse.  Populates
+        """Build-mode dep parse.  Populates
         `dep_tree.selected_pkgs` with the binaries named in
         `config/build_pkg.list` (latest version per name), then
         `dep_tree.selected_srcs` via `parse_sources` so the source
@@ -898,7 +898,7 @@ class CacheCommandsMixin(SessionState):
         self.flags.dep_check_ready = True
 
     def cmd_cache_select(self, *args):
-        """COMP-06 — interactive package-set selector (`cache select`).
+        """Interactive package-set selector (`cache select`).
 
         Opens a `select` tab where the operator toggles packages in
         `config/pkg.list` and adds new ones from the cache, then saves.

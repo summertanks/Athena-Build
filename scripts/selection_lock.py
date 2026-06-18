@@ -1,4 +1,4 @@
-"""SELECT-LOCK — the signed package-selection lockfile (`config/selection.state`).
+"""The signed package-selection lockfile (`config/selection.state`).
 
 The build resolves a package SELECTION from the seed lists (pkg.list, pool.list,
 live.list, installer.list) into a closure of binary + source names.  Historically

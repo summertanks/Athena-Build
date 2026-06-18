@@ -1,4 +1,4 @@
-"""COORD-01 local storage — per-builder JSONL append + fold-over reader.
+"""Local storage — per-builder JSONL append + fold-over reader.
 
 The on-disk layout under <repo_coord>/claims/:
 
@@ -328,7 +328,7 @@ def iter_live_claims_by_filename(
 def project_owners(
     by_builder: Dict[str, List[dict]],
 ) -> Dict[str, dict]:
-    """MIRROR-02: project the per-builder claim ledger into a
+    """Project the per-builder claim ledger into a
     per-filename ownership view.
 
     Returns ``{filename: owner_record}`` where ``owner_record`` is::

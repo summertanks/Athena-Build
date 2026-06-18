@@ -1,4 +1,4 @@
-"""API-01 — HTTP API for the build platform (FastAPI).
+"""HTTP API for the build platform (FastAPI).
 
 ``create_app()`` is the single entry point; everything fastapi-flavoured
 is imported lazily inside it so the rest of the build system (TUI, CLI,

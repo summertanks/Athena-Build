@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""COMP-02 phase B diagnostic: find malformed stanzas in the installer
+"""Phase B diagnostic: find malformed stanzas in the installer
 chroot's dpkg status file.
 
 main-menu's libdebian-installer parser ("parser_rfc822") segfaults on

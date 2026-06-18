@@ -180,7 +180,7 @@ class VirtualCommandsMixin(SessionState):
         return True
 
     def _write_virtual_buildlog(self, name, src, records, arch, release):
-        """OBS-04 companion: write `log/build/<pkg>.vbuildlog` — the virtual
+        """Companion: write `log/build/<pkg>.vbuildlog` — the virtual
         build's PREDICTED artifact set for one source, formatted to sit
         alongside (and diff against) the real `<pkg>.buildlog` an actual
         `source build` produces.

@@ -1,4 +1,4 @@
-"""OBS-04 — exhaustive per-package build/tunnel log.
+"""Exhaustive per-package build/tunnel log.
 
 Writes a verbose, human-readable narrative of EVERYTHING that happens to
 one source package during a build or a tunnel: resolved build-depends, the

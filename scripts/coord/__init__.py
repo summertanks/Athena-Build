@@ -1,4 +1,4 @@
-"""COORD-01: multi-builder repo coordination.
+"""Multi-builder repo coordination.
 
 Modules:
 

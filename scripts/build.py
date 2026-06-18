@@ -98,7 +98,7 @@ class BuildFlags:
     and checked as a prerequisite by later stages.  This prevents commands
     from running on stale or missing state without repeating the earlier work.
 
-    UX-04: when constructed via `BuildFlags.load(path)`, every flag
+    When constructed via `BuildFlags.load(path)`, every flag
     transition autosaves to a JSON sidecar (cheap, ~1 ms).  `restored_summary()`
     remains (dormant) for a future relook; the startup banner that consumed
     it was removed alongside the `resume` command 2026-06-08.
@@ -402,7 +402,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         return True
 
     def _collect_validated_sudo_password(self, context: str = 'sudo') -> 'Optional[str]':
-        """ARCH-19: prompt for a sudo password and validate it via
+        """Prompt for a sudo password and validate it via
         `_refresh_sudo` (`sudo -v`).  Returns the validated password, or
         None when the credential is rejected — in which case the local
         copy is scrubbed and the caller must return.  Every command
@@ -1015,7 +1015,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
     # ------------------------------------Command: build_bootable------------
 
     def _ensure_signing_key_verified(self) -> bool:
-        """CONF-02 phase 3: gate-keep the signing key before chroot work.
+        """Phase 3: gate-keep the signing key before chroot work.
 
         Runs `signing.verify_key` (a real sign+verify roundtrip).  On
         success, sets `flags.signing_key_verified` and prints the key's
@@ -1090,7 +1090,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         return True
 
     def _ensure_repo_indexed_for_chroot(self) -> bool:
-        """MIRROR-01 Phase 8: auto-index the local repo before chroot
+        """Auto-index the local repo before chroot
         bring-up.  `repo index` is no longer operator-visible — chroot
         build owns the side-effect.
 

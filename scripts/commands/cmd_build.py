@@ -158,7 +158,7 @@ class BuildCommandsMixin(SessionState):
 
 
     def _generate_tasks_desc(self) -> 'str':
-        """SURFACES-01: derive the tasksel `.desc` text from the SIGNED
+        """Derive the tasksel `.desc` text from the SIGNED
         lockfile's groups (the selection authority); fall back to a fresh
         pkg.list parse with a warning when the lockfile isn't trustworthy.
         Returns '' (skip staging) only when both sources fail."""
@@ -200,7 +200,7 @@ class BuildCommandsMixin(SessionState):
         return _text
 
     def cmd_build_chroot_disk(self, *args):
-        """SURFACES-01: assemble the DISK surface chroot — the minimal
+        """Assemble the DISK surface chroot — the minimal
         pre-installed system ([Disk] Groups closure, hard deps only, no
         Recommends extras) into buildroot/disk.  Decoupled from the live
         chroot so live (GNOME) and disk (console) can diverge.
@@ -869,7 +869,7 @@ class BuildCommandsMixin(SessionState):
 
 
     def cmd_build_iso_disk(self, *args):
-        """COMP-09 — Build a pre-installed bootable qcow2 disk image
+        """Build a pre-installed bootable qcow2 disk image
         from the DISK surface chroot (SURFACES-01: buildroot/disk, the
         minimal [Disk] Groups closure — decoupled from the live/GNOME
         chroot).

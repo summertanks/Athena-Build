@@ -112,7 +112,7 @@ class Prompt:
     def __init__(self, prompt_type: int, message: str,
                  options: Optional[List[str]] = None,
                  *, informational: bool = False) -> None:
-        """UX-05f: `informational=True` marks a YESNO prompt as
+        """`informational=True` marks a YESNO prompt as
         skippable under `--yes`.  Use it for "Proceed with X?"
         confirmations where defaulting to yes is safe under unattended
         operation.  Do NOT use it for hard-required prompts (sudo

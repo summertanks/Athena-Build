@@ -251,7 +251,7 @@ def _resolve_udeb_files(udeb_tree: 'dependencytree.DependencyTree',
     """Map udeb_tree.selected_pkgs canonical names → absolute .udeb
     paths.
 
-    CONF-01 Stage D: `dir_udebs` is now the dir holding .udeb files
+    `dir_udebs` is now the dir holding .udeb files
     directly (in the unified apt-repo layout that's
     repo/dists/<codename>/main/debian-installer/binary-<arch>/).
     Pre-CONF-01 the param was the top-level repo/ and we joined 'main';
@@ -441,7 +441,7 @@ def _audit_and_strip_chroot_hooks(
     installer_dir: str,
     password: str,
 ) -> bool:
-    """CONF-10 S2 — durable replacement for the hardcoded strip list.
+    """Durable replacement for the hardcoded strip list.
 
     Per the "Athena ships as Athena" principle
     (memory/project_filter_debian_specific_installer_hooks.md), every

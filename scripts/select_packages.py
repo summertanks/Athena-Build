@@ -1,4 +1,4 @@
-"""COMP-06 — interactive package-set selector TUI.
+"""Interactive package-set selector TUI.
 
 Lets the operator toggle packages in `config/pkg.list` AND `config/pool.list`
 (and add new ones from the apt cache) without hand-editing the files.  The

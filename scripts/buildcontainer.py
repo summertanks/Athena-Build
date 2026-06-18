@@ -83,7 +83,7 @@ _REPO_DEST_LOCK = threading.Lock()
 
 
 def _container_cpu_pct(stats: dict) -> 'Optional[float]':
-    """OBS-03: container CPU% from a single `container.stats(stream=False)`
+    """Container CPU% from a single `container.stats(stream=False)`
     reading — the cpu_stats-vs-precpu_stats delta docker provides per call.
     Returns None when the deltas aren't computable yet (first read, idle
     interval, or a malformed payload)."""
@@ -505,7 +505,7 @@ class BuildContainer:
         )
 
     def _resource_kwargs(self) -> dict:
-        """COMP-03 Phase 5: per-container CPU + RAM caps for
+        """Per-container CPU + RAM caps for
         containers.run().  Translates BuildConfig's BuildCpus /
         BuildMemory into docker-py's nano_cpus / mem_limit kwargs.
         Returns {} when both knobs are unset (current uncapped
@@ -528,7 +528,7 @@ class BuildContainer:
         return _kwargs
 
     def _register_live(self, container) -> None:
-        """COMP-03 Phase 2: track a freshly-started container in the
+        """Track a freshly-started container in the
         in-process registry.  Phase 3's reap_all_live() iterates this
         registry under _live_lock to force-remove every owned
         container on SIGINT.  Idempotent (re-registering an existing
@@ -538,7 +538,7 @@ class BuildContainer:
             self._live[container.short_id] = container
 
     def _deregister_live(self, container) -> None:
-        """COMP-03 Phase 2: drop a container from the registry after
+        """Drop a container from the registry after
         its build()/preview/grub-mkrescue finally-block reaches the
         normal cleanup path.  Idempotent (a missing key is fine —
         reap_all_live() may have removed it concurrently).
@@ -548,7 +548,7 @@ class BuildContainer:
 
     def _sample_resources(self, container, acc: dict,
                           stop: 'threading.Event') -> None:
-        """OBS-03 poll thread: every ~2s sample the container's peak RSS and
+        """Poll thread: every ~2s sample the container's peak RSS and
         CPU% into `acc` until `stop` is set.  Strictly best-effort — a stats()
         hiccup (container gone, daemon blip) is swallowed; observability must
         never disturb the build.  `stop.wait()` is an interruptible sleep so
@@ -573,7 +573,7 @@ class BuildContainer:
 
     def _record_phase(self, package: str, *, initial: 'Optional[dict]' = None,
                       **fields: object) -> None:
-        """OBS-01 phase transition.  Best-effort: a record-write OSError
+        """Phase transition.  Best-effort: a record-write OSError
         must never mask a build result, so we swallow and log.
 
         Pass `initial=<dict>` to write the entry-phase record (creates
@@ -610,7 +610,7 @@ class BuildContainer:
                         seg_events: 'list[tuple]',
                         final_paths: 'list[str]',
                         output_hashes: 'dict[str, str]') -> None:
-        """OBS-04: compose + write the verbose per-package build narrative
+        """Compose + write the verbose per-package build narrative
         to ``log/build/<pkg>.buildlog``.
 
         Strictly observability.  The entire body is wrapped so a formatting
@@ -734,7 +734,7 @@ class BuildContainer:
                 f"{getattr(src_pkg, 'package', '?')}: {_e}")
 
     def reap_all_live(self) -> int:
-        """COMP-03 Phase 3: force-remove every container currently in
+        """Force-remove every container currently in
         the live registry.  Iterates a snapshot of the registry (taken
         under _live_lock) so workers can keep deregistering as they
         notice their containers vanish.  Returns the count of reaped
@@ -766,7 +766,7 @@ class BuildContainer:
         return _reaped
 
     def request_shutdown(self) -> int:
-        """COMP-03 Phase 3: signal every parallel worker to stop and
+        """Signal every parallel worker to stop and
         force-reap every container they have in flight.  Sets
         self.shutdown_event (workers check between jobs) and calls
         reap_all_live() (force-removes in-flight containers so workers
@@ -1547,7 +1547,7 @@ class BuildContainer:
         plain_deps: 'list[str]',
         or_groups: 'list[list[str]]',
     ) -> bool:
-        """SEC-05 gate: run `apt-get install --simulate` in a transient
+        """Gate: run `apt-get install --simulate` in a transient
         container, print the captured output, prompt operator y/n.
 
         Returns True to proceed with the real build, False to skip this
@@ -1662,7 +1662,7 @@ class BuildContainer:
         """Run grub-mkrescue inside the build container so the produced
         ISO embeds BOOKWORM's GRUB toolchain instead of the host's.
 
-        COMP-14 fix path (b).  Eliminates host-GRUB contamination when
+        Fix path (b).  Eliminates host-GRUB contamination when
         the build host runs a non-bookworm release (e.g. trixie ships
         GRUB 2.12 vs our pinned 2.06).  The container's apt is already
         pinned to OUR snapshot (see self.mirrors), so
@@ -1838,7 +1838,7 @@ class BuildContainer:
         Failures are logged but don't propagate — best-effort normalisation;
         a missed strip surfaces later via `repo audit_nmu`.
 
-        OBS-04: when ``events`` is a list, this appends observability tuples
+        When ``events`` is a list, this appends observability tuples
         ``('strip', old_name, new_name)`` and
         ``('stamp', old_name, new_name, '+asgRuN')`` — purely additive,
         never alters the strip/stamp control flow.
@@ -2001,7 +2001,7 @@ class BuildContainer:
           dbgsym  -dbgsym side artifacts
           tests   -test / -tests side artifacts
 
-        COMP-03 Phase 1 contract: reads ONLY from `source_dir` —
+        Contract: reads ONLY from `source_dir` —
         never the shared repo root.  Concurrent workers see disjoint
         scratch dirs; the destination-side moves are serialised by
         `_REPO_DEST_LOCK` so two workers can't race on the same
@@ -2016,7 +2016,7 @@ class BuildContainer:
         Returns empty list on no-files-in-scratch (tunneled build,
         empty build, or rolled-back partial failure).
 
-        OBS-04: when ``events`` is a list, this appends observability
+        When ``events`` is a list, this appends observability
         tuples ``('relocate', filename, dest_dir)`` per moved file and
         ``('purge', filename, reason)`` per dropped duplicate — purely
         additive, never alters the move/rollback control flow.

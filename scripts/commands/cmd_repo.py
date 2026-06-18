@@ -28,7 +28,7 @@ class RepoCommandsMixin(SessionState):
     def cmd_index_repo(self, *args):
         """Generate apt-repo metadata IN-PLACE under repo/dists/.
 
-        CONF-01 Stage B (2026-05-22).  Produces:
+        (2026-05-22).  Produces:
           repo/dists/<codename>/Release, InRelease, Release.gpg
           repo/dists/<codename>/main/binary-amd64/Packages*
           repo/dists/<codename>/main/debian-installer/binary-amd64/Packages*
@@ -173,7 +173,7 @@ class RepoCommandsMixin(SessionState):
         )
 
     def cmd_index_repo_minimal(self, *args):
-        """UPD-02: STAGE the minimal (runtime) subset into publish/ in the SAME
+        """STAGE the minimal (runtime) subset into publish/ in the SAME
         nested layout as the full repo — so full and minimal are structurally
         identical and a single destination-side `dpkg-scanpackages` pass
         handles both with no clobber.
@@ -299,7 +299,7 @@ class RepoCommandsMixin(SessionState):
         return self._group_help('repo repair', _table, action)
 
     def cmd_repo_backfill_hashes(self, *args):
-        """COORD-01 one-shot: walk cache/log/build/*.build.json and add
+        """One-shot: walk cache/log/build/*.build.json and add
         output_hashes (SHA-256 over each emitted .deb/.udeb basename
         located under repo/) for records still on schema v1.
 
@@ -735,7 +735,7 @@ class RepoCommandsMixin(SessionState):
         return _orphans
 
     def _live_published_claim_filenames(self) -> 'set[str]':
-        """STA-25: filenames currently covered by a LIVE published claim in
+        """Filenames currently covered by a LIVE published claim in
         our local coord ledger (`config/coord/claims/<builder>.jsonl`).
 
         These are bytes a published claim on a mirror still names as live —
