@@ -848,7 +848,13 @@ def remote_publish(
                 return False, (
                     f"first-publish: pubkey upload failed: {_detail_pub}")
 
-        # Step 4 — hash conflict detection
+        # Step 4 — hash conflict detection.
+        # TOCTOU guarantee: the flock (Step 1) is held continuously through
+        # the fetch (Step 2), this conflict scan, the closure gate below, and
+        # the push (Step 5b+).  `_by_builder` is the freshly-fetched-under-
+        # lock claim view, so a publish that LANDED on the mirror between an
+        # operator's earlier `mirror audit` and now is seen here and re-
+        # validated — and any concurrent publish is blocked on this lock.
         _status("hash-conflict scan across all builders")
         _conf = _reconcile.detect_hash_conflicts(_by_builder)
         _crit = [_f for _f in _conf if _f.severity == 'CRITICAL']

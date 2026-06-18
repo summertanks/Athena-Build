@@ -29430,6 +29430,31 @@ def test_publish_lock_records_and_reports_holder():
         assert _tx.remote_flock_holder(ssh_host='h', lock_path='/l') is None
 
 
+def test_remote_publish_validates_under_lock_before_push():
+    """TOCTOU: remote_publish acquires the flock, then fetches the remote
+    tree, re-scans hash conflicts + closure, and only then pushes — in that
+    order, all under one lock.  So a publish that landed after an operator's
+    earlier `mirror audit` is re-validated here, not raced."""
+    import sys as _sys
+    import inspect
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    _src = inspect.getsource(_publish.remote_publish)
+
+    def _pos(_tok):
+        _i = _src.find(_tok)
+        assert _i != -1, f"{_tok} not found in remote_publish"
+        return _i
+    _lock = _pos('remote_flock_acquire')
+    _fetch = _pos('pull_remote_coord')
+    _conf = _pos('detect_hash_conflicts')
+    _closure = _pos('find_publish_closure_breaks')
+    _push = _pos('push_single_deb')
+    assert _lock < _fetch < _conf < _closure < _push, (
+        f"publish steps out of order: lock={_lock} fetch={_fetch} "
+        f"conflict={_conf} closure={_closure} push={_push}")
+
+
 def test_audit_inrelease_against_head_sha_match_returns_parsed_release():
     """Happy path: InRelease pulls successfully, sha matches the
     coord-head pin, deb822.Release parses cleanly, no findings."""
@@ -36456,6 +36481,7 @@ def main() -> int:
         test_snapshot_divergence_note,
         test_snapshot_adopt_forward_is_forward_only,
         test_publish_lock_records_and_reports_holder,
+        test_remote_publish_validates_under_lock_before_push,
         test_audit_inrelease_against_head_sha_match_returns_parsed_release,
         test_audit_inrelease_against_head_sha_mismatch_critical,
         test_audit_claims_vs_packages_flags_missing_and_mismatched,
