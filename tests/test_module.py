@@ -28994,6 +28994,54 @@ def test_build_mode_publish_implies_no_iso():
         "build mode must imply --no-iso in cmd_mirror_publish"
 
 
+def test_mirror_builders_register_gates_and_uploads():
+    """`mirror builders register` routes from the dispatcher and refuses
+    without a builder identity / signing key / known mirror; on the happy
+    path it uploads the pubkey to the mirror keyring."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    from unittest.mock import patch
+    import signing            # noqa: F401 (patched below)
+    import mirror             # noqa: F401
+    import coord.transport    # noqa: F401
+
+    _s = BuildSession.__new__(BuildSession)
+    _s.config = type('C', (), {})()
+
+    # dispatcher routes 'register' to the register method
+    with patch.object(BuildSession, 'cmd_mirror_builders_register',
+                      return_value='R') as _r:
+        assert _s.cmd_mirror_builders('register', 'm1') == 'R'
+        _r.assert_called_once_with('m1')
+
+    _keys = ('alice', '/priv.pem', '/alice.pub')
+    # no identity → refuse
+    with patch.object(BuildSession, '_coord_self_keys', return_value=None):
+        assert _s.cmd_mirror_builders_register('m1') is False
+    # bad signing key → refuse
+    with patch.object(BuildSession, '_coord_self_keys', return_value=_keys), \
+            patch('signing.verify_key', return_value=(False, 'no key')):
+        assert _s.cmd_mirror_builders_register('m1') is False
+    # unknown mirror → refuse
+    with patch.object(BuildSession, '_coord_self_keys', return_value=_keys), \
+            patch('signing.verify_key', return_value=(True, 'ok')), \
+            patch('mirror.read_mirror_state', return_value=None):
+        assert _s.cmd_mirror_builders_register('m1') is False
+    # happy path → pubkey uploaded, True
+    _st = {'url': 'ssh://u@h/p', 'ssh_key': None}
+    with patch.object(BuildSession, '_coord_self_keys', return_value=_keys), \
+            patch('signing.verify_key', return_value=(True, 'ok')), \
+            patch('mirror.read_mirror_state', return_value=_st), \
+            patch('mirror.coord_root_for', return_value='ssh://u@h/p-coord'), \
+            patch('mirror.rsync_spec_for_url',
+                  return_value=('u@h:/p-coord', None)), \
+            patch('coord.transport.push_jsonl',
+                  return_value=(True, '')) as _push:
+        assert _s.cmd_mirror_builders_register('m1') is True
+        assert _push.called
+
+
 def _new_pending_claim(builder: str, package: str, filename: str,
                        version: str, sha: str = 'f' * 64) -> dict:
     """Compact builder for filter_pending_by_ownership tests."""
@@ -36367,6 +36415,7 @@ def main() -> int:
         test_generate_pending_claims_non_tunneled_record_carries_none,
         test_generate_pending_claims_skips_pulled_from_peer,
         test_build_mode_publish_implies_no_iso,
+        test_mirror_builders_register_gates_and_uploads,
         test_mirror03_publish_hazard_gate_blocks_unsanctioned_local_ahead,
         test_filter_pending_by_ownership_no_existing_owner_keeps,
         test_filter_pending_by_ownership_own_claim_keeps,
