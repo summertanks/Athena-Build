@@ -190,8 +190,8 @@ def generate_cdx(buildconfig: Any,
         'version':      1,
         'metadata': {
             # CycloneDX requires UTC ISO-8601 with seconds precision.
-            'timestamp': datetime.datetime.utcnow().strftime(
-                '%Y-%m-%dT%H:%M:%SZ'),
+            'timestamp': datetime.datetime.now(
+                datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             'component': _meta_component,
             'tools': [{
                 'vendor': 'Athena Build',

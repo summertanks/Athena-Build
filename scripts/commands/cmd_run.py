@@ -314,7 +314,7 @@ class ConfigRunCommandsMixin(SessionState):
         console.print(
             f"{label}: starting (MODE = {_mode})", tui.COLOR_HIGHLIGHT)
         _t0    = time.monotonic()
-        _t0_dt = datetime.datetime.now()
+        _t0_dt = datetime.datetime.now(datetime.timezone.utc)
         _aborted_at: Optional[str] = None
 
         for _fn, _flag, _name in _steps:
@@ -328,7 +328,7 @@ class ConfigRunCommandsMixin(SessionState):
         if _aborted_at is None:
             console.print(f"{label}: all stages complete")
 
-        _t1_dt   = datetime.datetime.now()
+        _t1_dt   = datetime.datetime.now(datetime.timezone.utc)
         _elapsed = int(time.monotonic() - _t0)
         print_commands.summary(self, timing=print_commands.AutorunTiming(
             started=_t0_dt,

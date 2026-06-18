@@ -27060,6 +27060,25 @@ def test_normalize_built_artifacts_uses_uniform_n_across_siblings():
         f"(per-file N would have given {{1, 5}}); calls={_calls}")
 
 
+def test_all_datetime_emission_is_utc():
+    """Federation spans machines/timezones — every emitted timestamp must be
+    UTC.  No naive `datetime.now()` / `datetime.utcnow()` in scripts/; both
+    must be `datetime.now(timezone.utc)`."""
+    import glob
+    import re
+    _bad = []
+    for _f in glob.glob(os.path.join(_ROOT, 'scripts', '**', '*.py'),
+                        recursive=True):
+        with open(_f) as _fh:
+            for _i, _line in enumerate(_fh, 1):
+                if re.search(r'\bdatetime\.now\(\)', _line) or \
+                        re.search(r'\butcnow\(\)', _line):
+                    _bad.append(f"{os.path.relpath(_f, _ROOT)}:{_i}: {_line.strip()}")
+    assert not _bad, (
+        "naive datetime — use datetime.now(datetime.timezone.utc):\n"
+        + "\n".join(_bad))
+
+
 def test_hk07_behavior_fixes_pinned():
     """Regression pins for the HK-07 behaviour corrections (f/g3/h/i2/i3)."""
     import sys
@@ -36165,6 +36184,7 @@ def main() -> int:
         test_cmd_set_mode_same_value_is_noop_when_dep_check_ready,
         test_cmd_set_mode_same_value_surfaces_parse_hint_when_not_parsed,
         test_cmd_set_unknown_param_reports_available_list,
+        test_all_datetime_emission_is_utc,
         test_hk07_behavior_fixes_pinned,
         test_shorten_origin_compacts_long_pool_url,
         test_new_build_record_threads_component_field,

@@ -86,7 +86,8 @@ def setup_file_logging(log_dir: str, name: str = 'build') -> str:
     Returns the absolute path of the newly-opened log file.
     """
     os.makedirs(log_dir, exist_ok=True)
-    ts   = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
+    ts   = datetime.datetime.now(
+        datetime.timezone.utc).strftime('%Y-%m-%dT%H-%M-%S')
     path = os.path.abspath(os.path.join(log_dir, f'{name}-{ts}.log'))
 
     fh = logging.FileHandler(path, mode='w', encoding='utf-8')
