@@ -28994,6 +28994,63 @@ def test_build_mode_publish_implies_no_iso():
         "build mode must imply --no-iso in cmd_mirror_publish"
 
 
+def test_revoke_builder_adds_to_revoked_preserving_head():
+    """revoke_builder adds the id to the coord-head's revoked_builders and
+    re-signs, preserving every other field; idempotent when already revoked;
+    the decommission command refuses to revoke the LOCAL builder."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    from unittest.mock import patch
+
+    _cfg = type('C', (), {'dir_coord': '/c',
+                          'dir_coord_fetched': '/c/fetched'})()
+    _head_dict = {
+        'inrelease_sha256': 'a' * 64, 'snapshot': {'current': 'S'},
+        'last_seqs': {'alice': 3}, 'neighbours': [],
+    }
+    _written: dict = {}
+
+    def _write(_coord_dir, _head, _home):
+        _written['head'] = _head
+        return True
+
+    def _run(_read_val):
+        _written.clear()
+        with patch('coord.publish._reconcile.publish_halt_reason',
+                   return_value=None), \
+             patch('coord.publish._transport.pull_remote_coord',
+                   return_value=(True, '')), \
+             patch('coord.publish._head.read_coord_head',
+                   return_value=_read_val), \
+             patch('coord.publish._head.write_coord_head', _write), \
+             patch('coord.publish._transport.push_coord_head',
+                   return_value=(True, '')):
+            return _publish.revoke_builder(
+                builder_id_to_revoke='bob', config=_cfg,
+                remote_coord_spec='/c/remote', signing_homedir='/home',
+                ssh_host=None)
+
+    _ok, _msg = _run(dict(_head_dict))
+    assert _ok, _msg
+    assert 'bob' in _written['head']['revoked_builders']
+    assert _written['head']['last_seqs'] == {'alice': 3}      # preserved
+    assert _written['head']['snapshot'] == {'current': 'S'}    # preserved
+
+    # already revoked → no-op True, no re-sign
+    _already = dict(_head_dict, revoked_builders={'bob': 'T'})
+    _ok2, _msg2 = _run(_already)
+    assert _ok2 and 'already revoked' in _msg2
+    assert 'head' not in _written
+
+    # command refuses to revoke the LOCAL builder
+    from build import BuildSession
+    _s = BuildSession.__new__(BuildSession)
+    _s.config = type('C', (), {})()
+    with patch.object(BuildSession, '_coord_builder_id', return_value='me'):
+        assert _s.cmd_mirror_builders_decommission('me') is False
+
+
 def test_mirror_builders_register_gates_and_uploads():
     """`mirror builders register` routes from the dispatcher and refuses
     without a builder identity / signing key / known mirror; on the happy
@@ -36416,6 +36473,7 @@ def main() -> int:
         test_generate_pending_claims_skips_pulled_from_peer,
         test_build_mode_publish_implies_no_iso,
         test_mirror_builders_register_gates_and_uploads,
+        test_revoke_builder_adds_to_revoked_preserving_head,
         test_mirror03_publish_hazard_gate_blocks_unsanctioned_local_ahead,
         test_filter_pending_by_ownership_no_existing_owner_keeps,
         test_filter_pending_by_ownership_own_claim_keeps,

@@ -2591,9 +2591,14 @@ class MirrorCommandsMixin(SessionState):
             'list':     'local builder + the registered keyring',
             'register': 'register this builder on a mirror (upload pubkey + '
                         'adopt canonical lists; needs signing key + SSH write)',
+            'decommission': 'retire a builder <id>: revoke it so its claims '
+                            'drop and its packages become no-owner (peers '
+                            'take them)',
         }
         if action == 'register':
             return self.cmd_mirror_builders_register(*args)
+        if action == 'decommission':
+            return self.cmd_mirror_builders_decommission(*args)
         if action not in ('', 'list'):
             return self._group_help('mirror builders', _table, action)
         return self._cmd_builders_list()
@@ -2682,6 +2687,71 @@ class MirrorCommandsMixin(SessionState):
             f"registered builder '{_bid}' on mirror '{_name}'.",
             tui.COLOR_HIGHLIGHT)
         return True
+
+    def cmd_mirror_builders_decommission(self, *args):
+        """mirror builders decommission <builder-id> [<mirror>] — retire a
+        builder: add it to the coord-head's revoked_builders so its claims
+        drop federation-wide and every package it owned becomes no-owner
+        (peers take them on their next publish).  Needs the tier-1 signing
+        key + SSH write.  Targets one mirror, or all if none given."""
+        import mirror as _mirror
+        import coord.publish as _publish
+        import signing
+        if not args:
+            console.print(
+                "Usage: mirror builders decommission <builder-id> [<mirror>]")
+            return False
+        _target_id = args[0]
+        if _target_id == self._coord_builder_id():
+            console.print(
+                "mirror builders decommission: refusing to revoke the LOCAL "
+                "builder — you would lock yourself out of publishing.",
+                tui.COLOR_ERROR)
+            return False
+        _key_ok, _key_msg = signing.verify_key(self.config)
+        if not _key_ok:
+            console.print(
+                "mirror builders decommission: REFUSED — tier-1 signing key "
+                f"not verifiable ({_key_msg}).", tui.COLOR_ERROR)
+            return False
+        _resp = Prompt(
+            PROMPT_YESNO,
+            f"Revoke builder '{_target_id}' across the federation? Its "
+            "claims drop and its packages become no-owner.").get_response()
+        if not _resp:
+            console.print("decommission: cancelled.")
+            return False
+        _names = [args[1]] if len(args) > 1 else _mirror.list_mirrors(self.config)
+        if not _names:
+            console.print("decommission: no mirrors configured.",
+                          tui.COLOR_WARNING)
+            return False
+        _signing_home = signing.signing_home(self.config)
+        _our_bid = self._coord_builder_id()
+        _all_ok = True
+        for _n in _names:
+            _st = _mirror.read_mirror_state(self.config, _n)
+            if _st is None:
+                console.print(f"  unknown mirror '{_n}' — skipping",
+                              tui.COLOR_WARNING)
+                _all_ok = False
+                continue
+            _coord_spec, _ssh_host = _mirror.rsync_spec_for_url(
+                _mirror.coord_root_for(_st.get('url', '')))
+            _ok, _detail = _publish.revoke_builder(
+                builder_id_to_revoke=_target_id,
+                config=self.config,
+                remote_coord_spec=_coord_spec,
+                signing_homedir=_signing_home,
+                ssh_host=_ssh_host,
+                ssh_key=_st.get('ssh_key') or None,
+                our_builder_id=_our_bid,
+                on_status=lambda _m: console.print(f"  {_m}"))
+            console.print(
+                f"  {_n}: {_detail}",
+                tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+            _all_ok = _all_ok and _ok
+        return _all_ok
 
     def _coord_self_keys(self) -> 'Optional[tuple[str, str, str]]':
         """(builder_id, private_path, public_path) for this builder, or

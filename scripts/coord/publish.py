@@ -1320,6 +1320,99 @@ def _utc_now() -> str:
         '%Y-%m-%dT%H:%M:%SZ')
 
 
+def revoke_builder(
+    *,
+    builder_id_to_revoke: str,
+    config,
+    remote_coord_spec: str,
+    signing_homedir: str,
+    ssh_host: 'Optional[str]' = None,
+    flock_path: str = '/var/lock/repo-coord.lock',
+    flock_timeout: int = 60,
+    ssh_key: 'Optional[str]' = None,
+    our_builder_id: 'Optional[str]' = None,
+    on_status: 'Optional[Callable[[str], None]]' = None,
+) -> 'Tuple[bool, str]':
+    """Decommission a builder: add it to the coord-head's `revoked_builders`
+    under the publish lock, then re-sign + push the head.  The builder's
+    claims are dropped federation-wide by `read_all_claims`, so every
+    filename it owned becomes no-owner and other builders take it via the
+    normal ownership path.  Does NOT need the revoked builder's private key —
+    only the tier-1 signing key (to re-sign the head).  Idempotent: a
+    builder already revoked is reported and left unchanged.  Preserves every
+    other head field (snapshot, last_seqs, neighbours, InRelease pin)."""
+    def _status(msg: str) -> None:
+        if on_status is not None:
+            on_status(msg)
+
+    _halt = _reconcile.publish_halt_reason(config.dir_coord)
+    if _halt:
+        return False, f"PUBLISH_HALT set: {_halt}"
+
+    _lock_proc = None
+    if ssh_host:
+        _status(f"acquiring remote flock on {ssh_host} ({flock_path})")
+        _lock_proc = _transport.remote_flock_acquire(
+            ssh_host=ssh_host, lock_path=flock_path,
+            timeout_sec=flock_timeout, ssh_key=ssh_key,
+            builder_id=our_builder_id)
+        if _lock_proc is None:
+            _holder = _transport.remote_flock_holder(
+                ssh_host=ssh_host, lock_path=flock_path, ssh_key=ssh_key)
+            _by = (f" — builder '{_holder}' is publishing" if _holder
+                   else " — held by a peer, or SSH failed")
+            return False, f"could not acquire remote flock{_by}; retry shortly"
+    try:
+        _status("fetching remote coord tree (rsync)")
+        _fetched = config.dir_coord_fetched
+        _ok, _detail = _transport.pull_remote_coord(
+            local_dest=_fetched, remote_spec=remote_coord_spec, ssh_key=ssh_key)
+        if not _ok:
+            return False, f"pull failed: {_detail}"
+
+        _head_dict = _head.read_coord_head(_fetched, signing_homedir)
+        if _head_dict is None:
+            if os.path.isfile(_head.coord_head_path(_fetched)):
+                return False, (
+                    "coord-head present on the remote but FAILED to verify — "
+                    "refusing to rewrite it")
+            return False, "no coord-head on the mirror — nothing to revoke"
+
+        _revoked = dict((_head_dict.get('revoked_builders') or {}))
+        if builder_id_to_revoke in _revoked:
+            return True, (
+                f"builder '{builder_id_to_revoke}' already revoked "
+                f"({_revoked[builder_id_to_revoke]}) — no change")
+        _revoked[builder_id_to_revoke] = _utc_now()
+
+        _new_head = _schema.new_coord_head(
+            inrelease_sha256=str(_head_dict.get('inrelease_sha256') or ''),
+            snapshot=_head_dict.get('snapshot') or {},
+            last_seqs=dict(_head_dict.get('last_seqs') or {}),
+            head_time=_utc_now(),
+            neighbours=_head_dict.get('neighbours') or [],
+            revoked_builders=_revoked,
+        )
+        _status(f"signing coord-head (revoking {builder_id_to_revoke})")
+        if not _head.write_coord_head(
+                config.dir_coord, _new_head, signing_homedir):
+            return False, "coord-head write/sign failed"
+
+        _status("pushing coord-head to remote")
+        _ok, _detail = _transport.push_coord_head(
+            local_coord_dir=config.dir_coord,
+            remote_dir_spec=remote_coord_spec.rstrip('/') + '/',
+            ssh_key=ssh_key)
+        if not _ok:
+            return False, f"push coord-head failed: {_detail}"
+        return True, (
+            f"revoked builder '{builder_id_to_revoke}'; its packages are now "
+            "no-owner — peers can take them on their next publish")
+    finally:
+        if _lock_proc is not None:
+            _transport.remote_flock_release(_lock_proc)
+
+
 # ───────────────────────── conflict resolution ─────────────────────────
 
 
