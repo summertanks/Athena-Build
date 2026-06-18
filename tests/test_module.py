@@ -29051,6 +29051,62 @@ def test_revoke_builder_adds_to_revoked_preserving_head():
         assert _s.cmd_mirror_builders_decommission('me') is False
 
 
+def test_canonical_config_round_trip_and_verify():
+    """Owner writes pkg.list + pool.list into canonical.json (sha pinned in
+    the head); a peer applies it only when the sha matches the signed head;
+    mismatch / missing head pin → refused, local lists untouched."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import config_manifest as _cm
+    from coord import schema as _schema
+    with tempfile.TemporaryDirectory() as _td:
+        _owner_pkg = os.path.join(_td, 'pkg.list')
+        _owner_pool = os.path.join(_td, 'pool.list')
+        with open(_owner_pkg, 'w') as _f:
+            _f.write('firefox\nvlc\n')
+        with open(_owner_pool, 'w') as _f:
+            _f.write('grub-pc\n')
+        _coord = os.path.join(_td, 'coord')
+        _sha = _cm.write_canonical_config(_coord, _owner_pkg, _owner_pool)
+        assert len(_sha) == 64 and os.path.isfile(_cm.manifest_path(_coord))
+
+        # head carries the pin (back-compat: absent when not set)
+        _h = _schema.new_coord_head(
+            inrelease_sha256='a' * 64, snapshot={}, last_seqs={},
+            head_time='T', config_sha256=_sha)
+        assert _h.get('config_sha256') == _sha
+        _h2 = _schema.new_coord_head(
+            inrelease_sha256='a' * 64, snapshot={}, last_seqs={},
+            head_time='T')
+        assert 'config_sha256' not in _h2
+
+        # peer applies with matching sha → lists overwritten
+        _peer_pkg = os.path.join(_td, 'peer_pkg.list')
+        _peer_pool = os.path.join(_td, 'peer_pool.list')
+        with open(_peer_pkg, 'w') as _f:
+            _f.write('OLD\n')
+        _ok, _ = _cm.apply_canonical_config(_coord, _sha, _peer_pkg, _peer_pool)
+        assert _ok
+        with open(_peer_pkg) as _f:
+            assert _f.read() == 'firefox\nvlc\n'
+        with open(_peer_pool) as _f:
+            assert _f.read() == 'grub-pc\n'
+
+        # sha mismatch → refused, peer list unchanged
+        with open(_peer_pkg, 'w') as _f:
+            _f.write('KEEP\n')
+        _ok2, _d2 = _cm.apply_canonical_config(
+            _coord, 'b' * 64, _peer_pkg, _peer_pool)
+        assert not _ok2 and 'mismatch' in _d2
+        with open(_peer_pkg) as _f:
+            assert _f.read() == 'KEEP\n'
+
+        # no head pin → refused (never apply unverified config)
+        _ok3, _d3 = _cm.apply_canonical_config(
+            _coord, '', _peer_pkg, _peer_pool)
+        assert not _ok3 and 'no config_sha256' in _d3
+
+
 def test_mirror_builders_register_gates_and_uploads():
     """`mirror builders register` routes from the dispatcher and refuses
     without a builder identity / signing key / known mirror; on the happy
@@ -29085,18 +29141,28 @@ def test_mirror_builders_register_gates_and_uploads():
             patch('signing.verify_key', return_value=(True, 'ok')), \
             patch('mirror.read_mirror_state', return_value=None):
         assert _s.cmd_mirror_builders_register('m1') is False
-    # happy path → pubkey uploaded, True
+    # happy path → pubkey uploaded, True (config-adopt skipped via a failed
+    # coord fetch, keeping this test focused on the pubkey upload)
     _st = {'url': 'ssh://u@h/p', 'ssh_key': None}
-    with patch.object(BuildSession, '_coord_self_keys', return_value=_keys), \
-            patch('signing.verify_key', return_value=(True, 'ok')), \
-            patch('mirror.read_mirror_state', return_value=_st), \
-            patch('mirror.coord_root_for', return_value='ssh://u@h/p-coord'), \
-            patch('mirror.rsync_spec_for_url',
-                  return_value=('u@h:/p-coord', None)), \
-            patch('coord.transport.push_jsonl',
-                  return_value=(True, '')) as _push:
-        assert _s.cmd_mirror_builders_register('m1') is True
-        assert _push.called
+    with tempfile.TemporaryDirectory() as _dc:
+        _s.config = type('C', (), {
+            'dir_cache': _dc,
+            'pkglist_path': os.path.join(_dc, 'pkg'),
+            'poollist_path': os.path.join(_dc, 'pool')})()
+        with patch.object(BuildSession, '_coord_self_keys',
+                          return_value=_keys), \
+                patch('signing.verify_key', return_value=(True, 'ok')), \
+                patch('mirror.read_mirror_state', return_value=_st), \
+                patch('mirror.coord_root_for',
+                      return_value='ssh://u@h/p-coord'), \
+                patch('mirror.rsync_spec_for_url',
+                      return_value=('u@h:/p-coord', None)), \
+                patch('coord.transport.push_jsonl',
+                      return_value=(True, '')) as _push, \
+                patch('coord.transport.pull_remote_coord',
+                      return_value=(False, 'skip')):
+            assert _s.cmd_mirror_builders_register('m1') is True
+            assert _push.called
 
 
 def _new_pending_claim(builder: str, package: str, filename: str,
@@ -36474,6 +36540,7 @@ def main() -> int:
         test_build_mode_publish_implies_no_iso,
         test_mirror_builders_register_gates_and_uploads,
         test_revoke_builder_adds_to_revoked_preserving_head,
+        test_canonical_config_round_trip_and_verify,
         test_mirror03_publish_hazard_gate_blocks_unsanctioned_local_ahead,
         test_filter_pending_by_ownership_no_existing_owner_keeps,
         test_filter_pending_by_ownership_own_claim_keeps,

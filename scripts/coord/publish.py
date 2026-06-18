@@ -1264,6 +1264,21 @@ def remote_publish(
             _neighbours = local_mirror_urls
         else:
             _neighbours = (_head_dict or {}).get('neighbours') or []
+        # Canonical config (pkg.list + pool.list) propagation: the
+        # distribution-mode OWNER publishes its lists into the coord tree and
+        # pins their sha256 in the signed head.  A build-mode peer never owns
+        # the canonical config — it preserves the fetched head's pin.
+        import coord.config_manifest as _cfgman
+        _config_sha = (_head_dict or {}).get('config_sha256')
+        _wrote_config = False
+        if getattr(config, 'build_mode', 'distribution') != 'build':
+            _sha = _cfgman.write_canonical_config(
+                config.dir_coord,
+                getattr(config, 'pkglist_path', ''),
+                getattr(config, 'poollist_path', ''))
+            if _sha:
+                _config_sha = _sha
+                _wrote_config = True
         _new_head = _schema.new_coord_head(
             inrelease_sha256=_ir_sha,
             snapshot=_ss,
@@ -1271,12 +1286,26 @@ def remote_publish(
             head_time=_utc_now(),
             neighbours=_neighbours,
             revoked_builders=(_head_dict or {}).get('revoked_builders'),
+            config_sha256=_config_sha,
         )
         _status(f"signing coord-head (last_seqs[{builder_id}]={_seq})")
         _ok = _head.write_coord_head(
             config.dir_coord, _new_head, _signing_home)
         if not _ok:
             return False, "coord-head write/sign failed"
+
+        # Push the canonical config BEFORE the head (owner only) so a peer
+        # never sees a head whose config_sha256 points at a not-yet-pushed
+        # file (it would just refuse + retry, but ordering keeps it clean).
+        if _wrote_config:
+            _status("pushing canonical config (pkg.list/pool.list)")
+            _ok_cfg, _detail_cfg = _transport.push_jsonl(
+                local_path=_cfgman.manifest_path(config.dir_coord),
+                remote_spec=(remote_coord_spec.rstrip('/')
+                             + '/config/canonical.json'),
+                ssh_key=ssh_key)
+            if not _ok_cfg:
+                return False, f"push canonical config failed: {_detail_cfg}"
 
         # Step 9 — push the new coord-head to the remote
         _status("pushing coord-head to remote")

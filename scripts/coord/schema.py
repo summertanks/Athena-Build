@@ -476,6 +476,7 @@ def new_coord_head(
     head_time: str,
     neighbours: 'Optional[list]' = None,
     revoked_builders: 'Optional[Dict[str, str]]' = None,
+    config_sha256: 'Optional[str]' = None,
 ) -> dict:
     """The signed canonical state snapshot.  GPG-clearsigned by the
     tier-1 (InRelease) signing key, stored at <mirror-root>/coord-head.json.
@@ -511,6 +512,11 @@ def new_coord_head(
     }
     if revoked_builders:
         _head['revoked_builders'] = dict(revoked_builders)
+    # sha256 of <coord>/config/canonical.json (the owner's pkg.list +
+    # pool.list) — peers verify the fetched config against this before
+    # applying it.  Optional + back-compat: absent on pre-config heads.
+    if config_sha256:
+        _head['config_sha256'] = str(config_sha256)
     return _head
 
 
