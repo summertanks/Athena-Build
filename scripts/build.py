@@ -1247,7 +1247,10 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 return self.cmd_build_chroot_live(*_rest)
             return self.cmd_build_chroot_live(*args)
         if action == 'verify':
-            return self.cmd_verify_chroot(*args)
+            if args:
+                console.print("Usage: chroot verify  (takes no arguments)")
+                return None
+            return self.cmd_verify_chroot()
         return self._group_help('chroot', _table, action)
 
     def cmd_iso(self, action: str = '', *args):
