@@ -688,12 +688,16 @@ def remote_publish(
         _lock_proc = _transport.remote_flock_acquire(
             ssh_host=ssh_host, lock_path=flock_path,
             timeout_sec=flock_timeout, ssh_key=ssh_key,
+            builder_id=builder_id,
         )
         if _lock_proc is None:
+            _holder = _transport.remote_flock_holder(
+                ssh_host=ssh_host, lock_path=flock_path, ssh_key=ssh_key)
+            _by = (f" — builder '{_holder}' is publishing" if _holder
+                   else " — held by a peer, or SSH failed")
             return False, (
                 f"could not acquire remote flock on {ssh_host} "
-                f"({flock_path}) — held by a peer, or SSH failed; "
-                "retry shortly")
+                f"({flock_path}){_by}; retry shortly")
 
     try:
         # Step 2 — fetch remote coord tree (under lock)
