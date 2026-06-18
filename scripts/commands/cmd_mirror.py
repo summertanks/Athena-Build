@@ -1123,7 +1123,18 @@ class MirrorCommandsMixin(SessionState):
         # ISOs exist in image/.  `--no-iso` bypasses for an incremental
         # publish (reclaim / single-package hotfix / stale-index re-push);
         # the index then carries whatever ISO set is present.
-        _no_iso = '--no-iso' in args or 'no-iso' in args
+        # Build mode publishes packages only — it never builds ISOs (chroot/
+        # iso steps are refused in build mode) and its mirror snapshot may run
+        # ahead of any ISO snapshot — so a build-mode peer implies --no-iso.
+        _publish_mode = getattr(self.config, 'build_mode', 'distribution')
+        _no_iso = ('--no-iso' in args or 'no-iso' in args
+                   or _publish_mode == 'build')
+        if _publish_mode == 'build' and not (
+                '--no-iso' in args or 'no-iso' in args):
+            console.print(
+                "mirror publish: Mode = build — publishing packages only "
+                "(--no-iso implied; ISOs come from a distribution build).",
+                tui.COLOR_INFO)
         _pos_args = [_a for _a in args if _a not in ('--no-iso', 'no-iso')]
         _release_isos, _missing_isos = self._release_iso_descriptors()
         if _missing_isos and not _no_iso:

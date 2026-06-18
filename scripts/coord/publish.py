@@ -85,6 +85,15 @@ def generate_pending_claims(
         _phase = _rec.get('phase')
         if _phase not in ('done', 'tunneled'):
             continue
+        # A package we PULLED from a peer (mirror pull stamps `pulled_from`
+        # on its build record) belongs to that peer — never re-claim it.
+        # It would be ownership-blocked anyway, but skipping avoids the noise
+        # and the reverse-sync footgun where a publisher that pulled a peer's
+        # packages tries to take ownership of them on its next publish.
+        # (Tunneled-from-upstream records carry `republished_from`, not
+        # `pulled_from`, and stay claimable as no-owner.)
+        if _rec.get('pulled_from'):
+            continue
         # a deprecated/retracted source must NOT regenerate
         # claims — its build record stays phase=done (the receipt is
         # kept), but the deprecation excluded its old claims from
