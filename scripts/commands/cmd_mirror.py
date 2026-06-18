@@ -103,8 +103,10 @@ class MirrorCommandsMixin(SessionState):
                                            'hash conflicts, cross-mirror pool drift',
             'query <pkg> [<name>]':        'show claims matching <pkg> from '
                                            'the last fetched view of each mirror',
-            'builders':                    'list registered builders (local + '
-                                           'fetched keyring)',
+            'builders <list|register>':    'federation builder registry: list, '
+                                           'or register this builder on a '
+                                           'mirror (upload pubkey + adopt the '
+                                           'canonical lists)',
             'conflict resolve <pkg>':      'retract our claim for <pkg>; clear '
                                            'PUBLISH_HALT',
         }
@@ -2577,17 +2579,28 @@ class MirrorCommandsMixin(SessionState):
             f"keyring/builders/{_bid}.pub")
         return True
 
-    def cmd_mirror_builders(self, *args):
-        """List registered builders across the federation.
+    def cmd_mirror_builders(self, action: str = '', *args):
+        """mirror builders <list|register> — federation builder registry.
 
-        Usage: mirror builders
-
-        Shows:
-          - the local builder (per coord/BUILDER_ID) with its pubkey path
-          - every <id>.pub in coord/fetched/keyring/builders/ — fetched
-            by the most recent `mirror pull` / `mirror audit`
+        list      — local builder + the <id>.pub keyring fetched by the most
+                    recent `mirror pull` / `mirror audit`.
+        register  — register THIS builder on a mirror (upload our pubkey;
+                    adopt the canonical pkg.list/pool.list).
         """
-        del args
+        _table = {
+            'list':     'local builder + the registered keyring',
+            'register': 'register this builder on a mirror (upload pubkey + '
+                        'adopt canonical lists; needs signing key + SSH write)',
+        }
+        if action == 'register':
+            return self.cmd_mirror_builders_register(*args)
+        if action not in ('', 'list'):
+            return self._group_help('mirror builders', _table, action)
+        return self._cmd_builders_list()
+
+    def _cmd_builders_list(self):
+        """List registered builders: the local builder (coord/BUILDER_ID) +
+        every <id>.pub in the fetched keyring."""
         import coord.identity as _id
         _self = self._coord_builder_id()
         if _self:
@@ -2616,6 +2629,58 @@ class MirrorCommandsMixin(SessionState):
         else:
             console.print(
                 f"\nno registered remote builders at {_keyring_dir}")
+        return True
+
+    def cmd_mirror_builders_register(self, *args):
+        """mirror builders register <mirror> — register THIS builder on a
+        mirror: upload our Ed25519 pubkey to keyring/builders/ so peers can
+        verify our claims.  Gated on a verified tier-1 signing key AND SSH
+        write access (the upload proves it)."""
+        import mirror as _mirror
+        import coord.transport as _transport
+        import signing
+        if not args:
+            console.print("Usage: mirror builders register <mirror-name>")
+            return False
+        _name = args[0]
+        # Gate: builder identity present (mirror init)
+        _keys = self._coord_self_keys()
+        if _keys is None:
+            return False
+        _bid, _priv, _pub = _keys
+        # Gate: tier-1 signing key verifiable (same gate as `mirror add`)
+        _key_ok, _key_msg = signing.verify_key(self.config)
+        if not _key_ok:
+            console.print(
+                "mirror builders register: REFUSED — tier-1 signing key not "
+                f"verifiable ({_key_msg}).  Run `key generate` + `key verify` "
+                "first.", tui.COLOR_ERROR)
+            return False
+        # Resolve the target mirror
+        _st = _mirror.read_mirror_state(self.config, _name)
+        if _st is None:
+            console.print(
+                f"mirror builders register: unknown mirror '{_name}' — run "
+                "`mirror add` first (or `mirror list`).", tui.COLOR_ERROR)
+            return False
+        _coord_spec, _ = _mirror.rsync_spec_for_url(
+            _mirror.coord_root_for(_st.get('url', '')))
+        _ssh_key = _st.get('ssh_key') or None
+        _remote_pub = (_coord_spec.rstrip('/')
+                       + f'/keyring/builders/{_bid}.pub')
+        console.print(
+            f"mirror builders register: uploading {_bid}.pub -> {_name} "
+            "keyring/builders/", tui.COLOR_HIGHLIGHT)
+        _ok, _detail = _transport.push_jsonl(
+            local_path=_pub, remote_spec=_remote_pub, ssh_key=_ssh_key)
+        if not _ok:
+            console.print(
+                f"mirror builders register: pubkey upload FAILED ({_detail}) "
+                f"— check SSH write access to {_name}.", tui.COLOR_ERROR)
+            return False
+        console.print(
+            f"registered builder '{_bid}' on mirror '{_name}'.",
+            tui.COLOR_HIGHLIGHT)
         return True
 
     def _coord_self_keys(self) -> 'Optional[tuple[str, str, str]]':
