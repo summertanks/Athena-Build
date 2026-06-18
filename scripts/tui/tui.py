@@ -127,8 +127,9 @@ class Tui:
         # Input pump — blocking getkey -> KeyEvent.
         start_input_pump(self._stdscr, self.dispatcher)
 
-        # Dispatcher loop runs on this thread (so curses redraws happen
-        # here — same thread as initscr, required by curses).
+        # Dispatcher loop (and thus all curses redraws) runs on a dedicated
+        # non-daemon `tui-dispatch` thread; run() returns to the caller and
+        # wait() joins it.
         self._dispatcher_thread = threading.Thread(
             target=self._run_dispatcher, daemon=False, name='tui-dispatch')
         self._dispatcher_thread.start()
