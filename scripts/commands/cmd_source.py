@@ -20,7 +20,6 @@ import subprocess
 
 import apt_pkg
 import buildcontainer
-import persistence
 import repo_audit
 import tui
 import utils
@@ -2106,7 +2105,4 @@ class SourceCommandsMixin(SessionState):
             return
 
         self.flags.source_build_ready = True
-        # UX-04: refresh the session pickle so last_source_build_counts
-        # is captured for the print summary on a future resume.
-        persistence.save_session(self, self.config.dir_cache)
 

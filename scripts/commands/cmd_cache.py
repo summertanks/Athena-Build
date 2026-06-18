@@ -15,7 +15,6 @@ from typing import Optional
 
 import buildcontainer
 import dependencytree
-import persistence
 import selection_lock
 import tui
 import utils
@@ -878,7 +877,6 @@ class CacheCommandsMixin(SessionState):
                     "publish`.", tui.COLOR_HIGHLIGHT)
                 self.flags.dep_check_ready = True
                 _spiner.done()
-                persistence.save_session(self, self.config.dir_cache)
                 return
             if _action == selection_lock.ACTION_BOOTSTRAP:
                 selection_lock.write_selection_state(self.config, _state)
@@ -898,10 +896,6 @@ class CacheCommandsMixin(SessionState):
             _lc_touch()
 
         self.flags.dep_check_ready = True
-        # UX-04: persist Cache + DT to dir_cache/session.pkl.gz so
-        # `resume` (next process) can skip cache build + cache parse.
-        # Best-effort: a save failure is logged but the build continues.
-        persistence.save_session(self, self.config.dir_cache)
 
     def cmd_cache_select(self, *args):
         """COMP-06 — interactive package-set selector (`cache select`).
