@@ -302,7 +302,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
     # all` to consolidate confirmation into a single up-front prompt.
 
     def _wipe_dir_contents(self, label: str, path: str,
-                           sudo: bool, password: str = '',
+                           sudo: bool,
                            skip_prompt: bool = False) -> bool:
         """Remove every entry inside `path` (the dir itself is preserved,
         so BuildConfig's user-owned-dir invariants stay intact).

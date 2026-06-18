@@ -113,13 +113,8 @@ class _ChrootMixin:
         # unbreakable cycle remains after libc-seed handling — surface it
         # before touching the chroot so the operator sees the dep problem
         # without first sitting through unrelated dpkg activity.
-        try:
-            batches = self._compute_install_batches(
-                libc_seed_set, install_set=install_set)
-        except RuntimeError as e:
-            tui.console.print(f"ERROR: cannot order packages — {e}")
-            logger.error(f"_compute_install_batches: {e}")
-            return False
+        batches = self._compute_install_batches(
+            libc_seed_set, install_set=install_set)
 
         # batches is List[Tuple[List[str], bool]]; len(b) on the tuple
         # is always 2 — use b[0] for the actual package list.
@@ -707,11 +702,9 @@ class _ChrootMixin:
         the seed are dropped so other packages see those deps as
         already satisfied.
 
-        Raises:
-            RuntimeError only if Kahn produces no acyclic batches AND the
-            graph has more than one disjoint SCC large enough to suggest
-            a genuinely pathological state (every package in one cycle).
-            Practical Debian dep graphs do not hit this.
+        A no-progress Kahn round force-splits the remaining cycle into
+        sub-batches (handled with --force-depends) rather than raising, so
+        this always returns a batch list.
         """
         selected = self._dependencytree.selected_pkgs
         # Depth-1 Recommends pulled into selected_pkgs for the repo (and

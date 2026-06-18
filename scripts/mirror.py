@@ -744,7 +744,6 @@ def project_post_publish_state(local_state, remote_by_builder: dict):
     `consumer_set` = the package names of our pending claims, so the
     closure walk is bounded to what we're about to push.
     """
-    import dataclasses as _dc
     import repo_audit as _repo_audit
     # Build a mutable copy of local packages, then layer in remote-only
     # entries.  Local entries have the rich control data (Depends,

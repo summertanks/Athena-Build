@@ -362,7 +362,7 @@ class MirrorCommandsMixin(SessionState):
             primary_name=_name, primary_url=_normalised,
             primary_public_url=_public_url,
             net_new=_net_new_peers, dropped=_dropped,
-            proto=_proto, ssh_key=_parsed['ssh_key'])
+            proto=_proto)
 
         # ── Step 8: operator confirm ──────────────────────────────
         if not _parsed['yes']:
@@ -531,7 +531,7 @@ class MirrorCommandsMixin(SessionState):
         self, *, primary_name: str, primary_url: str,
         primary_public_url: str,
         net_new: 'list[dict]', dropped: 'list[dict]',
-        proto: 'Optional[str]', ssh_key: 'Optional[str]',
+        proto: 'Optional[str]',
     ) -> None:
         """The "this is what would happen" preview the operator confirms.
         Lists every state file we'd write + every sources.list.d entry
@@ -570,7 +570,6 @@ class MirrorCommandsMixin(SessionState):
             console.print(
                 f"+ athena-{_peer_name}.list: deb [signed-by={_keyring}] "
                 f"{_peer_public} {_codename} main", tui.COLOR_INFO)
-        del ssh_key  # informational — already plumbed via state
         if dropped:
             console.print(
                 f"\nDROPPING {len(dropped)} unreachable peer(s) from the "
