@@ -28824,6 +28824,33 @@ def _new_pending_claim(builder: str, package: str, filename: str,
     )
 
 
+def test_mirror03_publish_hazard_gate_blocks_unsanctioned_local_ahead():
+    """MIRROR-03: a same-version rebuild that diverged on disk (local-ahead)
+    but isn't being reclaimed must BLOCK publish — otherwise the dist-tree
+    rsync overwrites the frozen remote bytes while no claim is emitted,
+    stranding the signed claim (claim_apt_sha_mismatch).  The pure gate
+    returns the not-reclaimed rows; remote_publish aborts on them BEFORE the
+    dist-tree push and exempts reclaim intents."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import coord.publish as _publish
+    _ahead = [{'filename': 'a_1_all.deb'}, {'filename': 'b_1_all.deb'}]
+    # reclaiming only 'a' leaves 'b' unsanctioned → blocks
+    assert _publish.unsanctioned_local_ahead(
+        _ahead, [{'filename': 'a_1_all.deb'}]) == [{'filename': 'b_1_all.deb'}]
+    # every divergence reclaimed → nothing blocks (the reclaim path)
+    assert _publish.unsanctioned_local_ahead(
+        _ahead, [{'filename': 'a_1_all.deb'},
+                 {'filename': 'b_1_all.deb'}]) == []
+    # nothing ahead → nothing blocks (the normal publish)
+    assert _publish.unsanctioned_local_ahead([], []) == []
+    # the gate runs ahead of the dist-tree push inside remote_publish
+    _src = inspect.getsource(_publish.remote_publish)
+    assert 'unsanctioned_local_ahead' in _src and 'local_ahead_fn' in _src
+    assert _src.index('unsanctioned_local_ahead') < _src.index('pushing dist tree')
+
+
 def test_filter_pending_by_ownership_no_existing_owner_keeps():
     """Decision matrix row 1: no claim → KEEP (we become owner)."""
     import sys as _sys
@@ -36074,6 +36101,7 @@ def main() -> int:
         test_mirror_pull_write_build_records_empty_input_is_no_op,
         test_generate_pending_claims_threads_republished_from_per_output,
         test_generate_pending_claims_non_tunneled_record_carries_none,
+        test_mirror03_publish_hazard_gate_blocks_unsanctioned_local_ahead,
         test_filter_pending_by_ownership_no_existing_owner_keeps,
         test_filter_pending_by_ownership_own_claim_keeps,
         test_filter_pending_by_ownership_tunneled_keeps_takes_ownership,
