@@ -1013,8 +1013,15 @@ class CacheCommandsMixin(SessionState):
         ).get_response()
         if _resp.strip().lower() == 'accept':
             self.cmd_parse_dependency('force', 'accept-removals')
-            console.print("cache select: ACCEPTED — selection.state "
-                          "re-baselined.", tui.COLOR_HIGHLIGHT)
+            # UX-08(g): don't claim "re-baselined" unless the accept-removals
+            # re-resolution actually converged.
+            if self.flags.dep_check_ready:
+                console.print("cache select: ACCEPTED — selection.state "
+                              "re-baselined.", tui.COLOR_HIGHLIGHT)
+            else:
+                console.print("cache select: accept FAILED — dependency "
+                              "re-resolution did not converge; selection.state "
+                              "left unchanged.", tui.COLOR_ERROR)
         else:
             self._restore_select_lists(backup)
             self.flags.dep_check_ready = False
@@ -1112,7 +1119,13 @@ class CacheCommandsMixin(SessionState):
             return
 
         from print_commands import _fmt_dep, _fmt_dep_group
-        pkg = pkgs[0]   # best candidate (highest version)
+        # UX-08(f): get_packages returns mirror-parse order, NOT version order —
+        # pick the genuinely highest version for the headline (apt's semantics).
+        import apt_pkg
+        import functools
+        pkg = max(pkgs, key=functools.cmp_to_key(
+            lambda _a, _b: apt_pkg.version_compare(
+                str(_a.get('Version', '')), str(_b.get('Version', '')))))
 
         def _size(p):
             try:

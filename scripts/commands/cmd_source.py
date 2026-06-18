@@ -1510,6 +1510,9 @@ class SourceCommandsMixin(SessionState):
                 logger.warning(f"Tunnel {_src_pkg.package} [TUNNELED]")
                 return ('tunneled', 0)
             logger.error(f"Tunnel {_src_pkg.package} [FAIL]")
+            # UX-08(e): the live-build summary reports counts only — name the
+            # failing package on the console too, not just the log tab.
+            console.print(f"  Tunnel {_src_pkg.package} [FAIL]", tui.COLOR_ERROR)
             return ('failed', 0)
 
         # Bump-target: same-base re-spin whose current-generation +asg uN
@@ -1558,8 +1561,14 @@ class SourceCommandsMixin(SessionState):
                 f"Building Package {_src_pkg.package} [FAIL] — built but "
                 f"check_build still false (predicted artifact missing or "
                 f"unmatched): expected {_expected_files}")
+            # UX-08(e): surface the failing package on the console, not just log.
+            console.print(
+                f"  Building {_src_pkg.package} [FAIL] — built but artifacts "
+                "missing/unmatched", tui.COLOR_ERROR)
             return ('failed', 0)
         logger.error(f"Building Package {_src_pkg.package} [FAIL]")
+        # UX-08(e): surface the failing package on the console, not just log.
+        console.print(f"  Building {_src_pkg.package} [FAIL]", tui.COLOR_ERROR)
         return ('failed', 0)
 
     def cmd_source_build(self, *args):

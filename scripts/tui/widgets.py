@@ -181,6 +181,12 @@ class Spinner:
         return f'  {self._FRAMES[self._frame]}  {self._message}'
 
     def done(self) -> None:
+        # UX-08(g): idempotent — a Spinner that spans several passes (e.g.
+        # cmd_parse_dependency's "Parsing Dependencies") gets done() at the
+        # end of one pass AND again on a later SELECT-LOCK return; without
+        # this guard the "✓ … done" line prints twice.
+        if self._done:
+            return
         self._done = True
         b = _instance()
         if b is not None:
