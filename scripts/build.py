@@ -1604,7 +1604,10 @@ def main(banner: str) -> None:
               f"(docs: /docs; key: config/api.key)")
 
     tui_inst.wait()
-    Exit(0)
+    # Propagate the backend's resolved exit code to the process — 1 on a
+    # one-shot (`--cmd`) failure, 130 on SIGINT.  Hardcoding 0 here made
+    # every headless run report success regardless of outcome.
+    Exit(getattr(tui_inst, '_exit_code', 0) or 0)
 
 
 if __name__ == '__main__':

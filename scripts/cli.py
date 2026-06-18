@@ -125,6 +125,10 @@ class Cli:
         # doesn't draw widgets, so the dict's contents are otherwise unused.
         self._widget_ids: Dict[int, object] = {}
         self._next_widget_id = 0
+        # Headless backend draws its own [start]/[done] markers, not the
+        # curses unicode bar — so ProgressBar.close(persist=True) skips its
+        # str() render here (it'd print a meaningless block bar to a log).
+        self.renders_widgets: bool = False
         # exit_code is None while alive; an int sets the wait() loop to break.
         self._exit_code: Optional[int] = None
         # UX-05a: --yes auto-answer.  Set by build.py:main() from argv.
@@ -210,10 +214,9 @@ class Cli:
         Combined with the start line from add_widget, the operator gets
         bracketed visibility on every staged loop.  Spinner is silent —
         its own done() handler prints `… done` (and would race with us
-        if we printed too).  Note: ProgressBar.close(persist=True) ALSO
-        prints the bar's str() before calling del_widget; in CLI that
-        renders an unhelpful unicode-block bar but doesn't conflict
-        semantically with our [done] marker — both fire, in that order.
+        if we printed too).  ProgressBar.close(persist=True) skips its
+        unicode-bar render here (renders_widgets=False), so this [done]
+        marker is the single closing line.
         """
         widget = self._widget_ids.pop(wid, None)
         if widget is not None and _is_progress_bar(widget):
@@ -313,11 +316,16 @@ class Cli:
             self._exit_code = 0
 
     def _run_one_shot(self) -> None:
-        """UX-05e: dispatch every queued command in order, then exit.
-        Exit code reflects the worst outcome (0 if all OK, 1 if any
-        handler raised, 130 if interrupted mid-queue)."""
+        """Dispatch every queued command in order, then exit.  Exit code
+        reflects the worst outcome (0 if all OK, 1 if any handler raised,
+        130 if interrupted mid-queue).
+
+        The queue is consumed up-front so a re-entrant wait() (build.py's
+        Exit() calls wait() again during shutdown) can't replay it."""
+        _queue = self.one_shot_cmds
+        self.one_shot_cmds = []
         _failed = 0
-        for _cmd in self.one_shot_cmds:
+        for _cmd in _queue:
             print(f'{self._PROMPT_IDLE}{_cmd}')
             try:
                 _ok = self._dispatch_one(_cmd)
@@ -358,7 +366,9 @@ class Cli:
 
         entry = self._cmds.get(cmd)
         if entry is None:
-            print(f'  Unknown command: "{cmd}"  — type "help" for a list')
+            # Diagnostic → stderr, so a `--cmd` run's stdout stays clean for
+            # a script capturing command output.
+            self.ERROR(f'Unknown command: "{cmd}"  — type "help" for a list')
             return False
 
         fn = entry[0]

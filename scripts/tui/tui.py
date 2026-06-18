@@ -148,7 +148,9 @@ class Tui:
         self.dispatcher.post(Shutdown(code))
 
     def sig_shutdown(self, signum: int, frame: Any) -> None:
-        self.exit(signum)
+        # 128 + SIGINT(2) = 130, the POSIX convention — same code the Cli
+        # backend reports, so a Ctrl-C'd run exits 130 in either mode.
+        self.exit(130)
 
     # ─── Legacy-compatibility proxy methods ──────────────────────────────
     # The existing `scripts/tui.py:Console` facade resolves

@@ -2673,6 +2673,31 @@ def test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits():
     assert _c._exit_code == 0
 
 
+def test_one_shot_queue_consumed_not_replayed_on_reentry():
+    """The one-shot queue runs exactly once even if wait() is re-entered
+    — build.py's Exit() calls wait() again during shutdown.  Regression:
+    one_shot_cmds was never cleared, so every `--cmd` executed twice
+    (latent double `mirror publish` / `cache build`)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import patch
+    import cli
+    _c = object.__new__(cli.Cli)
+    _c._cmds = {}
+    _c._widget_ids = {}
+    _c._next_widget_id = 0
+    _c._exit_code = None
+    _c.auto_yes = False
+    _c._use_color = False
+    _c.one_shot_cmds = ['tick']
+    _runs = []
+    _c._cmds['tick'] = (lambda *a: _runs.append(1), '')
+    with patch('builtins.print'):
+        _c.wait()      # first pass — runs the queue
+        _c.wait()      # re-entry (as Exit() does) — must NOT replay
+    assert _runs == [1], _runs
+    assert _c.one_shot_cmds == []
+
+
 def test_ux05e_one_shot_exit_code_nonzero_when_a_command_fails():
     """UX-05e: a `-c` command that's unknown OR whose handler raises must
     drive the process exit code to 1, so CI / scripted installs detect the
@@ -14461,18 +14486,19 @@ def test_cli_register_command_dispatches_via_wait():
 
 
 def test_cli_unknown_command_does_not_crash_repl():
-    """Typing an unknown command prints a hint and continues the REPL."""
+    """Typing an unknown command prints a hint (to stderr, so a `--cmd`
+    run's stdout stays clean) and continues the REPL."""
     cli, out, err, restore = _fresh_cli()
     try:
         import io
         sys.stdin = io.StringIO('nonexistent\nquit\n')
         cli.wait()
     finally:
-        out_v = out.getvalue()
+        err_v = err.getvalue()
         sys.stdin = sys.__stdin__
         restore()
-    assert 'Unknown command' in out_v
-    assert 'nonexistent' in out_v
+    assert 'Unknown command' in err_v
+    assert 'nonexistent' in err_v
 
 
 def test_cli_handler_exception_does_not_kill_repl():
@@ -35293,6 +35319,7 @@ def main() -> int:
         test_ux08_cache_info_picks_highest_version,
         test_ux08_spinner_done_idempotent,
         test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits,
+        test_one_shot_queue_consumed_not_replayed_on_reentry,
         test_ux05e_one_shot_exit_code_nonzero_when_a_command_fails,
         test_ux05g_cmd_methods_reset_flags_on_entry,
         # SEC-05: opt-in build-dep audit gate
