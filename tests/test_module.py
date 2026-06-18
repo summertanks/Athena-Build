@@ -29051,6 +29051,18 @@ def test_revoke_builder_adds_to_revoked_preserving_head():
         assert _s.cmd_mirror_builders_decommission('me') is False
 
 
+def test_federation_lab_build_mode_peer_workflow():
+    """End-to-end build-mode peer federation simulation over a local-fs
+    'mirror' (no SSH/Docker): owner publish → peer register + pull (snapshot
+    auto-adopt + canonical-config adopt) → peer build + publish (build-mode,
+    owned-only) → owner sync-back → decommission (claims drop).  Exercises the
+    real coord/ machinery; full harness in tests/federation_lab.py."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'tests'))
+    import federation_lab
+    assert federation_lab.run(verbose=False)['ok']
+
+
 def test_closure_gate_runs_in_both_modes():
     """The publish closure gate is wired regardless of [Build] Mode — the
     install corpus is built from the dep trees unconditionally and passed to
@@ -36558,6 +36570,7 @@ def main() -> int:
         test_revoke_builder_adds_to_revoked_preserving_head,
         test_canonical_config_round_trip_and_verify,
         test_closure_gate_runs_in_both_modes,
+        test_federation_lab_build_mode_peer_workflow,
         test_mirror03_publish_hazard_gate_blocks_unsanctioned_local_ahead,
         test_filter_pending_by_ownership_no_existing_owner_keeps,
         test_filter_pending_by_ownership_own_claim_keeps,
