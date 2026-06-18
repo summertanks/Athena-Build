@@ -242,24 +242,6 @@ class RepoCommandsMixin(SessionState):
             'repair':         'umbrella for repo-state fixups: strip, cleanup, '
                               'backfill-hashes',
         }
-        if action == 'tunnel':
-            console.print(
-                "`repo tunnel` moved to `source tunnel` (the endpoint is a "
-                "built .deb — same shape as source build).  Use "
-                "`source tunnel [pkg…]`.",
-                tui.COLOR_WARNING)
-            return False
-        if action == 'index':
-            # Retired as an operator command — kept as a redirect hint for
-            # muscle memory.  The handler still exists for the auto-index
-            # paths (chroot build / mirror publish); it just isn't dispatched
-            # here.  `repo audit`'s test pins this shape.
-            console.print(
-                "`repo index` is no longer operator-visible — `chroot build` "
-                "and `mirror publish` auto-index when needed.  Use "
-                "`repo repair` if you suspect a stale index.",
-                tui.COLOR_WARNING)
-            return False
         if action == 'audit':
             return self.cmd_audit(*args)
         if action == 'repair':

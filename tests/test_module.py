@@ -4161,14 +4161,12 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
     )
 
 
-def test_cmd_repo_dispatcher_routes_index_action():
-    """`repo index` was RETIRED as an operator command (MIRROR-01
-    Phase 8): chroot build + mirror publish auto-index when needed
-    (incl. the 2026-06-11 stale-index guard).  The dispatcher must
-    KEEP the 'index' action as a deprecation hint (so operators with
-    muscle memory get pointed at the new flow) and must NOT dispatch
-    to cmd_index_repo — which still exists for the auto-index paths.
-    Pin via code inspection."""
+def test_cmd_repo_dispatcher_drops_index_and_tunnel_hints():
+    """`repo index` / `repo tunnel` were retired and their redirect hints
+    removed — the dispatcher no longer special-cases either action; both
+    fall through to the `_group_help` unknown-action listing.  The
+    `cmd_index_repo` handler itself still exists for the auto-index paths
+    (chroot build / mirror publish).  Pin via code inspection."""
     _body = _session_source()
     import re
     _m = re.search(
@@ -4177,12 +4175,11 @@ def test_cmd_repo_dispatcher_routes_index_action():
     )
     assert _m, 'cmd_repo dispatcher not found'
     _fn = _m.group(0)
-    assert "action == 'index'" in _fn, _fn
-    assert 'no longer operator-visible' in _fn, (
-        "the 'index' action must carry the retirement hint")
-    assert 'return self.cmd_index_repo' not in _fn, (
-        "'index' must NOT dispatch — the command is retired; "
-        "auto-index owns the side-effect")
+    assert "action == 'index'" not in _fn, (
+        "the retired 'index' hint must be gone — not special-cased")
+    assert "action == 'tunnel'" not in _fn, (
+        "the retired 'tunnel' hint must be gone — not special-cased")
+    assert 'return self.cmd_index_repo' not in _fn
     # cmd_index_repo itself must still exist (auto-index entry point).
     assert 'def cmd_index_repo(' in _body
 
@@ -7303,12 +7300,13 @@ def test_cmd_iso_build_requires_subaction():
 
 # ─── COMP-02: repo index minimal/full + publish ssh/local ───────────────────
 
-def test_repo_index_dispatch_retired_in_phase_8():
-    """MIRROR-01 Phase 8: `repo index` is no longer operator-visible.
-    The handlers (cmd_index_repo, cmd_index_repo_minimal) survive as
-    internal callables (chroot build + mirror publish auto-index); the
-    dispatch route prints a deprecation hint and returns False without
-    calling either handler."""
+def test_repo_index_dispatch_falls_through_after_hint_removal():
+    """`repo index` was retired and its redirect hint removed — the
+    dispatcher no longer special-cases it, so it falls through to the
+    group-help "Unknown repo action" listing without invoking either
+    auto-index handler.  The handlers (cmd_index_repo,
+    cmd_index_repo_minimal) survive as internal callables (chroot build +
+    mirror publish auto-index)."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
@@ -7324,17 +7322,17 @@ def test_repo_index_dispatch_retired_in_phase_8():
     build.console.print = lambda *a, **k: _lines.append(
         ' '.join(str(x) for x in a))
     try:
-        _r = _sess.cmd_repo('index', 'full')
-        _r2 = _sess.cmd_repo('index')
-        _r3 = _sess.cmd_repo('index', 'minimal')
+        _sess.cmd_repo('index', 'full')
+        _sess.cmd_repo('index')
+        _sess.cmd_repo('index', 'minimal')
     finally:
         build.console.print = _orig
-    # No handler call from operator-visible route
+    # No auto-index handler is invoked from the operator route
     assert _calls == [], _calls
-    # Each invocation returns False + prints the deprecation hint
-    assert (_r, _r2, _r3) == (False, False, False)
     _joined = '\n'.join(_lines)
-    assert 'no longer operator-visible' in _joined, _joined
+    # Falls through to the group help — no deprecation hint anymore
+    assert 'no longer operator-visible' not in _joined, _joined
+    assert "Unknown repo action: 'index'" in _joined, _joined
     # The handlers themselves still exist on the class (internal API)
     assert callable(getattr(BuildSession, 'cmd_index_repo', None))
     assert callable(getattr(BuildSession, 'cmd_index_repo_minimal', None))
@@ -15288,11 +15286,11 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
 
 
 def test_repo_dispatcher_advertises_merged_package_actions():
-    """After the package→repo merge, the cmd_repo dispatcher must
-    advertise the former cmd_package actions (tunnel/reload/audit)
-    alongside its own (repair/index).  audit_nmu was absorbed into
-    'audit' itself in P3 (2026-05-23).  strip/cleanup moved under
-    'repair' (P1)."""
+    """After the package→repo merge, the cmd_repo dispatcher exposes the
+    consolidated actions (audit, repair).  audit_nmu was absorbed into
+    'audit' itself; strip/cleanup moved under 'repair'.  index/tunnel were
+    retired (auto-index / `source tunnel`) and their redirect hints
+    removed, so they're no longer dispatched here."""
     _body = _session_source()
     import re
     # Body of cmd_repo.
@@ -15302,9 +15300,7 @@ def test_repo_dispatcher_advertises_merged_package_actions():
     )
     assert _m, "cmd_repo dispatcher not found"
     _disp = _m.group(0)
-    # 'tunnel' MOVED to cmd_source in MIRROR-01 Phase 8 — cmd_repo
-    # still carries the deprecation hint, no longer the working dispatch
-    for _action in ('audit', 'repair', 'index'):
+    for _action in ('audit', 'repair'):
         assert f"'{_action}'" in _disp, (
             f"cmd_repo dispatcher missing action {_action!r}"
         )
@@ -35204,7 +35200,7 @@ def main() -> int:
         test_cache_purge_empty_dir_is_noop,
         # — iso build live | iso build installer split
         test_cmd_iso_build_requires_subaction,
-        test_repo_index_dispatch_retired_in_phase_8,
+        test_repo_index_dispatch_falls_through_after_hint_removal,
         test_deb_excluded_from_minimal,
         test_generate_apt_repo_tolerates_empty_udeb_component,
         test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
@@ -36278,7 +36274,7 @@ def main() -> int:
         test_apt_repo_generate_repo_indexes_walks_all_suites_and_components,
         test_apt_repo_generate_repo_indexes_skips_when_binary_dir_missing,
         test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others,
-        test_cmd_repo_dispatcher_routes_index_action,
+        test_cmd_repo_dispatcher_drops_index_and_tunnel_hints,
         test_stage_d_no_old_repo_subdir_paths_in_production_code,
         test_stage_d_buildconfig_paths_use_new_nested_layout,
         test_iso_installer_stage_grub_cfg_copies_background_when_present,
