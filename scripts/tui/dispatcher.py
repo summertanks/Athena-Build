@@ -323,6 +323,12 @@ class Dispatcher:
             self.state.dirty = True
             return
 
+        # Too-small overlay says "Press Q to exit" — honor it.  The command
+        # line is inert while the overlay is up, so this is the only way out.
+        if self.state.too_small and key in ('q', 'Q'):
+            self.post(Shutdown(0))
+            return
+
         # ── Per-tab key interceptor (COMP-06 selector) ───────────────────
         # Consulted FIRST, but only while its owner tab is active.
         # Returns True to swallow; False falls through to normal

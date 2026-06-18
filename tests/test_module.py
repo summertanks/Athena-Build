@@ -15573,6 +15573,33 @@ def test_tui_page_rows_subtracts_widgets_on_console_only():
     assert d._page_rows() == 1
 
 
+def test_ux09g_too_small_q_key_posts_shutdown():
+    """The too-small overlay says "Press Q to exit" — a q/Q keystroke while
+    state.too_small must actually post Shutdown (the only escape, since the
+    command line is inert under the overlay).  When not too-small, q is an
+    ordinary keystroke and posts no Shutdown."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.dispatcher import Dispatcher
+    from tui.events import Shutdown
+
+    def _drain(_d):
+        _evs = []
+        while not _d._events.empty():
+            _evs.append(_d._events.get_nowait())
+        return _evs
+
+    d = Dispatcher(_v2_fake_renderer())
+    d.state.too_small = True
+    d._on_key('q')
+    assert any(isinstance(e, Shutdown) for e in _drain(d))
+
+    d2 = Dispatcher(_v2_fake_renderer())
+    d2.state.too_small = False
+    d2._on_key('q')
+    assert not any(isinstance(e, Shutdown) for e in _drain(d2))
+
+
 def test_v2_cmdline_edit_and_history():
     """CmdLine matches legacy _Commands semantics (cursor edit + history)."""
     import sys
@@ -35636,6 +35663,7 @@ def main() -> int:
         test_v2_wrap_helpers_round_trip,
         test_v2_state_append_and_scroll,
         test_tui_page_rows_subtracts_widgets_on_console_only,
+        test_ux09g_too_small_q_key_posts_shutdown,
         test_v2_cmdline_edit_and_history,
         test_v2_dispatcher_key_events_gated_without_prompt,
         test_v2_dispatcher_status_bar_includes_network,
