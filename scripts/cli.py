@@ -276,6 +276,35 @@ class Cli:
         (the REPL loop runs on the main thread inside ``wait()``)."""
         return
 
+    def _enable_line_editing(self) -> None:
+        """Turn on Up/Down history recall + line editing for the REPL.
+
+        Python's `input()` only gets arrow-key history + editing once the
+        `readline` module is imported — importing it installs the hook
+        `input()` delegates to.  Without it the Up-arrow emits a raw escape
+        sequence instead of recalling the previous command.  Best-effort:
+        skipped for piped stdin (no TTY) and when readline is unavailable
+        (e.g. Windows without pyreadline).  History persists across runs in
+        ~/.athena_history."""
+        if not sys.stdin.isatty():
+            return
+        try:
+            import readline
+            import atexit
+            import os
+        except ImportError:
+            return
+        _hist = os.path.expanduser('~/.athena_history')
+        try:
+            readline.read_history_file(_hist)
+        except OSError:
+            pass            # no history file yet, or unreadable — fine
+        readline.set_history_length(1000)
+        try:
+            atexit.register(readline.write_history_file, _hist)
+        except OSError:
+            pass
+
     def wait(self) -> None:
         """REPL loop OR one-shot dispatcher.
 
@@ -295,6 +324,7 @@ class Cli:
             self._run_one_shot()
             return
 
+        self._enable_line_editing()
         while self._exit_code is None:
             try:
                 line = input(self._PROMPT_IDLE)
