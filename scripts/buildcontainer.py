@@ -568,7 +568,7 @@ class BuildContainer:
                     acc['peak_cpu_pct'] = max(acc['peak_cpu_pct'], _cpu)
                 acc['samples'] += 1
             except Exception as _e:
-                logger.debug(f"OBS-03 resource sample failed: {_e}")
+                logger.debug(f"resource sample failed: {_e}")
             stop.wait(2.0)
 
     def _record_phase(self, package: str, *, initial: 'Optional[dict]' = None,
@@ -1564,14 +1564,14 @@ class BuildContainer:
             src_pkg, plain_deps, or_groups)
         if _preview_text is None:
             tui.console.print(
-                f"SEC-05: build-dep preview FAILED for {src_pkg.package} "
+                f"build-dep preview FAILED for {src_pkg.package} "
                 f"— skipping build per audit-gate policy.  Set "
                 f"[Security] AuditBuildDeps = false to bypass.",
                 tui.COLOR_ERROR)
             return False
 
         tui.console.print(
-            f"\n=== SEC-05 build-dep preview: {src_pkg.package} ==="
+            f"\n=== build-dep preview: {src_pkg.package} ==="
             f"\n  ({len(plain_deps)} plain dep(s), {len(or_groups)} "
             f"OR-group(s) — apt -y --simulate output below)\n"
             f"{_preview_text}"
@@ -1585,10 +1585,10 @@ class BuildContainer:
         ).get_response()
         if _resp.lower() not in ('y', 'yes'):
             tui.console.print(
-                f"SEC-05: operator declined — skipping {src_pkg.package}.",
+                f"operator declined — skipping {src_pkg.package}.",
                 tui.COLOR_WARNING)
             logger.warning(
-                f"SEC-05: build of {src_pkg.package} skipped by operator")
+                f"build of {src_pkg.package} skipped by operator")
             return False
         return True
 
@@ -1637,7 +1637,7 @@ class BuildContainer:
             _text = _buf.decode('utf-8', errors='replace')
             if _exit != 0:
                 logger.warning(
-                    f"SEC-05 preview {src_pkg.package}: container exited "
+                    f"build-dep preview {src_pkg.package}: container exited "
                     f"{_exit}; tail: {_text[-400:]}")
                 # honour the docstring contract — a non-zero exit
                 # with no useful output returns None (caller treats as a hard
@@ -1647,7 +1647,7 @@ class BuildContainer:
             return _text
         except docker.errors.APIError as e:
             logger.error(
-                f"SEC-05 preview {src_pkg.package}: docker error: {e}")
+                f"build-dep preview {src_pkg.package}: docker error: {e}")
             return None
         finally:
             if container is not None:

@@ -373,7 +373,7 @@ def build_disk_image(
             _spin_initrd.done()
         if _r.returncode != 0:
             logger.warning(
-                f"update-initramfs -u (STA-26 fsck tools) rc={_r.returncode}: "
+                f"update-initramfs -u rc={_r.returncode}: "
                 f"{_r.stderr.strip()[:200]}")
             tui.console.print(
                 "W: update-initramfs -u failed — image initramfs may lack "
