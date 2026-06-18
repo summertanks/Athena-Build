@@ -26,12 +26,9 @@ Host prerequisites (checked at command entry):
   - qemu-img        (qemu-utils package — final raw→qcow2 conversion)
   - losetup/sfdisk/mkfs.ext4/grub-install/blkid (util-linux + grub-*)
 
-Known v1 limitation: grub-install runs on the host, so the produced
-disk image's GRUB binaries reflect the BUILD HOST'S GRUB version
-(trixie 2.12 on a trixie host, etc.) — analogous to the pre-COMP-14
-ISO leakage.  Follow-up will move grub-install inside the build
-container (COMP-14 path-b pattern) to pin GRUB to the snapshot's
-bookworm 2.06.
+grub-install + update-initramfs run via `chroot` into the disk's own
+(snapshot) root, so the installed boot binaries reflect the IMAGE's GRUB
+version — not the build host's.
 """
 from __future__ import annotations
 
@@ -110,11 +107,11 @@ def build_disk_image(
     Returns True on success, False on any error (full transcript in
     the run log; operator-facing failure messages printed via tui).
 
-    container: accepted but unused in v1 — present so the COMP-14
-    follow-up can later route grub-install through it without
-    breaking the caller signature.
+    container: accepted but unused — kept for signature parity with the
+    ISO builders (grub-install already chroots, so nothing routes through
+    a container here).
     """
-    del container   # v1: all on host; follow-up moves grub-install in-container
+    del container   # unused; signature parity with the ISO builders
     logger.info(
         f"build_disk_image: {dir_chroot} → {output_qcow2} ({size_gb}G)"
     )

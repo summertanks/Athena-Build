@@ -368,7 +368,7 @@ class SnapshotCommandsMixin(SessionState):
         _cur = self._snapshot_current()
         if not _cur:
             console.print("snapshot select: current pin unresolved — set one "
-                          "with `snapshot select current <ts>`", tui.COLOR_ERROR)
+                          "with `snapshot select <ts>`", tui.COLOR_ERROR)
             return
         _latest = self._snapshot_latest()
         if not _latest:

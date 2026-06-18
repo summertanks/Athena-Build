@@ -1021,7 +1021,7 @@ class RepoCommandsMixin(SessionState):
     def cmd_reload_fork(self, *pkgs):
         """Light-touch rebuild of a fork pkg after a content edit.
 
-        Usage: package reload <pkg>...
+        Usage: source fork <pkg>...
 
         For each named fork pkg the command:
 
@@ -1060,7 +1060,7 @@ class RepoCommandsMixin(SessionState):
         """
         if not pkgs:
             console.print(
-                "Usage: package reload <pkg>...  "
+                "Usage: source fork <pkg>...  "
                 "(name(s) of fork/source/<pkg>/ to reload)",
                 tui.COLOR_INFO,
             )
@@ -1070,7 +1070,7 @@ class RepoCommandsMixin(SessionState):
         if not (self.flags.cache_ready and self.flags.dep_check_ready
                 and self.flags.build_container_ready):
             console.print(
-                "package reload requires cache build + cache parse + container "
+                "source fork requires cache build + cache parse + container "
                 "init to have run earlier in this session.  For first-run, "
                 "use `autorun installer` or the per-step sequence.",
                 tui.COLOR_ERROR,
@@ -1084,14 +1084,14 @@ class RepoCommandsMixin(SessionState):
             _pkg_dir = os.path.join(self.config.dir_fork_source, _pkg)
             if not os.path.isdir(_pkg_dir):
                 console.print(
-                    f"package reload: {_pkg} is not a fork "
+                    f"source fork: {_pkg} is not a fork "
                     f"(no {self.config.dir_fork_source}/{_pkg}/) — skipping",
                     tui.COLOR_INFO,
                 )
                 continue
             if not os.path.isfile(os.path.join(_pkg_dir, 'debian', 'control')):
                 console.print(
-                    f"package reload: {_pkg} missing debian/control — skipping",
+                    f"source fork: {_pkg} missing debian/control — skipping",
                     tui.COLOR_INFO,
                 )
                 continue
@@ -1166,7 +1166,7 @@ class RepoCommandsMixin(SessionState):
                     _copied += 1
                 except OSError as e:
                     console.print(
-                        f"package reload: copy {_basename} → source/ failed: {e}",
+                        f"source fork: copy {_basename} → source/ failed: {e}",
                         tui.COLOR_ERROR,
                     )
             if _copied == 0:
