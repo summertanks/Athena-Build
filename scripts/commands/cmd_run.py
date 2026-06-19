@@ -143,6 +143,17 @@ class ConfigRunCommandsMixin(SessionState):
     _SETTABLE: 'dict[str, Callable]' = {}    # populated below
     _GETTABLE: 'dict[str, Callable]' = {}
 
+    def cmd_configure(self, *args) -> None:
+        """configure — first-run / re-run setup wizard.
+
+        Establishes the system role (first/origin vs federation peer), the
+        federation registration handshake for a peer, build mode, and the
+        snapshot pin; records it in the untracked config/local.conf.  Until it
+        succeeds, the command gate refuses the build pipeline.  Re-runnable any
+        time to add a mirror or change mode."""
+        import onboarding
+        onboarding.run_onboarding(self)
+
     def cmd_set(self, *args) -> None:
         """set <param> <value> — change a session-local config param.
 

@@ -27,12 +27,18 @@ A mirror is **not** the same as a `[Mirror.<name>]` section in
 that source-sync and the apt cache pull from.  Two different concepts;
 the section name is historical.
 
-## First-run onboarding (the wizard)
+## First-run setup (the `configure` command)
 
-On the **first interactive launch** of a not-yet-set-up checkout, a one-time
-wizard runs before the prompt opens (skipped for `--headless` / `--cmd` /
-`--api` / `--yes`).  It establishes the box's identity so you don't have to
-wire it up by hand:
+A fresh checkout is **un-configured**: until you run `configure`, the startup
+banner shows a `⚠ not configured` notice and the command gate refuses the
+build pipeline (only `configure`, `get`, `print` are allowed).  Run:
+
+```
+configure
+```
+
+It's an ordinary command (so its prompts behave like any other), and it
+establishes the box's identity so you don't have to wire it up by hand:
 
 1. **Role** — *first/origin* (bootstraps the federation; always distribution
    mode) or *federation peer* (joins an existing mirror).
@@ -48,10 +54,12 @@ wire it up by hand:
 
 The result is recorded in **`config/local.conf`** — an **untracked,
 machine-local** sidecar holding `[Local] Mode/Role/SetupComplete` and a
-`[Registration]` marker per mirror.  This is why a fresh `git pull` never
-inherits another machine's mode or mirror identity, and why a registered peer
-never has to re-register.  Mode is changed later with `set mode` (persisted
-here); more mirrors are added later with `mirror add`.
+`[Registration]` marker per mirror.  Once `SetupComplete` is set the gate
+opens and the startup banner shows a `Configured: role=… mode=…` confirmation
+instead of the warning.  This is why a fresh `git pull` never inherits another
+machine's mode or mirror identity, and why a registered peer never has to
+re-register.  Mode is changed later with `set mode`; re-run `configure` any
+time to add a mirror.
 
 > `set mode build` is refused on a first/origin system, and on any peer that
 > hasn't registered to a mirror yet (no `[Registration]` marker) — build mode
@@ -59,8 +67,8 @@ here); more mirrors are added later with `mirror add`.
 
 ## Prerequisites
 
-> The onboarding wizard above performs all of these for you on a fresh box;
-> this table is the manual / re-check reference.
+> `configure` performs all of these for you on a fresh box; this table is the
+> manual / re-check reference.
 
 | Required | Check |
 |---|---|

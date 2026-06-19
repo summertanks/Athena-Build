@@ -450,10 +450,9 @@ def _onboarding_patched(answers, *, verify_ok):
          onboarding.console.print) = _saved
 
 
-def test_needs_onboarding_guards():
-    """LOCAL-CONF/onboarding: the wizard runs ONLY for an interactive,
-    not-yet-set-up box — every non-interactive signal and a set-up box skip
-    it."""
+def test_command_allowed_gates_until_configured():
+    """CONFIGURE: before setup_complete only the allowlist runs; after, all
+    commands are allowed."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import onboarding
@@ -461,15 +460,38 @@ def test_needs_onboarding_guards():
     class _C:
         setup_complete = False
     _c = _C()
-    _base = {'headless': False, 'api': False, 'one_shot': False,
-             'auto_yes': False}
-    assert onboarding.needs_onboarding(_c, **_base) is True
-    for _kw in ('headless', 'api', 'one_shot', 'auto_yes'):
-        _k = dict(_base)
-        _k[_kw] = True
-        assert onboarding.needs_onboarding(_c, **_k) is False, _kw
+    # Unconfigured: allowlist passes, everything else is gated.
+    for _ok in ('configure', 'get', 'print'):
+        assert onboarding.command_allowed(_c, _ok) is True, _ok
+    for _gated in ('cache', 'source', 'mirror', 'chroot', 'iso'):
+        assert onboarding.command_allowed(_c, _gated) is False, _gated
+    # Configured: everything allowed.
     _c.setup_complete = True
-    assert onboarding.needs_onboarding(_c, **_base) is False
+    for _name in ('cache', 'source', 'mirror', 'configure'):
+        assert onboarding.command_allowed(_c, _name) is True, _name
+
+
+def test_configured_summary_reports_state_and_warns_unregistered():
+    """CONFIGURE: the startup summary names role/mode + registered mirrors,
+    and warns when a federation peer has no registration marker."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    import utils
+    with tempfile.TemporaryDirectory() as _tmp:
+        cfg_path = _write_test_config(
+            _tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(_tmp, cfg_path)
+        # Federation peer, registered → summary names the mirror.
+        cfg.system_role = 'federation'
+        cfg.build_mode = 'build'
+        utils.write_local_conf(cfg, registration={'origin': 'bid-1'})
+        _s = onboarding.configured_summary(cfg)
+        assert 'federation' in _s and 'build' in _s and 'origin' in _s
+        # Federation peer, NO registration → warning.
+        os.remove(os.path.join(_tmp, 'config', 'local.conf'))
+        _s2 = onboarding.configured_summary(cfg)
+        assert 'NO mirror is registered' in _s2
 
 
 def test_onboarding_first_system_declines_mirror():
@@ -528,50 +550,6 @@ def test_onboarding_federation_aborts_without_tier1_key():
         _p = utils.read_local_conf(_sess.config)
         # SetupComplete never written → reads False.
         assert _p.getboolean('Local', 'SetupComplete', fallback=False) is False
-
-
-def test_cli_run_startup_runs_hook_once_before_repl():
-    """Cli.run_startup defers a hook to wait(), which runs it once before the
-    REPL and clears it (a re-entrant wait() must not replay onboarding)."""
-    import sys
-    import io
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tuimod
-    import cli
-    _saved_singleton = getattr(_tuimod, 'tui_instance', None)
-    _saved_stdin = sys.stdin
-    try:
-        c = cli.Cli()
-        ran: 'list[str]' = []
-        c.run_startup(lambda: ran.append('x'))
-        sys.stdin = io.StringIO('')          # immediate EOF → REPL exits
-        c.wait()
-        assert ran == ['x'], ran             # hook ran exactly once
-        # Second wait(): hook was cleared, so it must NOT replay.
-        sys.stdin = io.StringIO('')
-        c._exit_code = None
-        c.wait()
-        assert ran == ['x'], "hook replayed on re-entrant wait()"
-    finally:
-        sys.stdin = _saved_stdin
-        _tuimod.tui_instance = _saved_singleton
-
-
-def test_tui_run_startup_sets_hook_and_opens_gate():
-    """Tui.run_startup stores the hook and releases the shell-thread gate so
-    onboarding runs in-thread (where prompts are serviceable)."""
-    import sys
-    import threading
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui import Tui
-    t = Tui.__new__(Tui)                 # skip curses init
-    t._startup_hook = None
-    t._startup_gate = threading.Event()
-    assert not t._startup_gate.is_set()
-    _h = lambda: None                    # noqa: E731
-    t.run_startup(_h)
-    assert t._startup_hook is _h
-    assert t._startup_gate.is_set()      # shell can now proceed past the gate
 
 
 def test_print_state_shows_mode_header():
@@ -35910,12 +35888,11 @@ def main() -> int:
         test_local_conf_absent_falls_back_to_build_conf,
         test_local_conf_malformed_invalidates_config,
         test_write_local_conf_round_trips,
-        test_needs_onboarding_guards,
+        test_command_allowed_gates_until_configured,
+        test_configured_summary_reports_state_and_warns_unregistered,
         test_onboarding_first_system_declines_mirror,
         test_onboarding_federation_happy_path_registers_and_records,
         test_onboarding_federation_aborts_without_tier1_key,
-        test_cli_run_startup_runs_hook_once_before_repl,
-        test_tui_run_startup_sets_hook_and_opens_gate,
         test_parse_build_pkg_list_strips_comments_dedups_preserves_order,
         test_print_state_shows_mode_header,
         test_cmd_auto_run_dispatch_routes_build_mode,

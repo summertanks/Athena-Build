@@ -92,14 +92,10 @@ class Tui:
         # Re-rendered after every command so the 'status' tab is current.
         self._status_provider: 'Optional[Callable[[], list]]' = None
 
-        # First-run onboarding hook + gate.  The shell thread blocks on the
-        # gate before its command loop; build.py opens it (via run_startup)
-        # once the session is ready, optionally with a hook the shell runs
-        # in-thread.  Onboarding prompts MUST run on the shell thread — the
-        # main thread can't (its request_prompt collides with the shell's
-        # idle prompt and gets cancelled).
-        self._startup_hook: 'Optional[Callable[[], None]]' = None
-        self._startup_gate = threading.Event()
+        # Optional command gate: name -> bool.  When set (build.py wires it to
+        # onboarding.command_allowed), _shell refuses non-allowlisted commands
+        # until the box is configured, pointing the operator at `configure`.
+        self.command_gate: 'Optional[Callable[[str], bool]]' = None
 
         # Register as the singleton tui_instance — exposed at the
         # package level via tui/__init__.py.  Console / Prompt /
@@ -142,13 +138,6 @@ class Tui:
         self._dispatcher_thread = threading.Thread(
             target=self._run_dispatcher, daemon=False, name='tui-dispatch')
         self._dispatcher_thread.start()
-
-    def run_startup(self, hook: 'Optional[Callable[[], None]]') -> None:
-        """Hand the shell thread an optional startup hook and release its
-        gate.  MUST be called once after the session is built (even with
-        hook=None) or the shell stays blocked and never accepts commands."""
-        self._startup_hook = hook
-        self._startup_gate.set()
 
     def wait(self) -> None:
         if hasattr(self, '_dispatcher_thread'):
@@ -308,20 +297,6 @@ class Tui:
 
     # ─── Shell loop ──────────────────────────────────────────────────────
     def _shell(self) -> None:
-        # Block until build.py has built the session + opened the gate.  Then
-        # run the onboarding hook (if any) IN THIS THREAD so its prompts are
-        # serviced by the dispatcher exactly like a normal command's prompts.
-        self._startup_gate.wait()
-        if self._startup_hook is not None:
-            try:
-                self._startup_hook()
-            except SystemExit:
-                raise
-            except Exception as e:                       # noqa: BLE001
-                self.dispatcher.post(PrintEvent(f'  onboarding error: {e}'))
-                import logging
-                logging.getLogger(LOGGER_NAME).error(
-                    f'onboarding: {type(e).__name__}: {e}')
         while not self.dispatcher.state.quit:
             try:
                 line = self.dispatcher.request_prompt('> ', mode='line').strip()
@@ -344,6 +319,11 @@ class Tui:
             if entry is None:
                 self.dispatcher.post(PrintEvent(
                     f'  Unknown command: "{parts[0]}"  — type "help"'))
+                continue
+            if self.command_gate is not None and not self.command_gate(parts[0]):
+                self.dispatcher.post(PrintEvent(
+                    f'  "{parts[0]}" is unavailable until this build system '
+                    'is configured — run `configure` first.'))
                 continue
             fn, _tip = entry
             try:
