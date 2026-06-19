@@ -552,6 +552,69 @@ def test_onboarding_federation_aborts_without_tier1_key():
         assert _p.getboolean('Local', 'SetupComplete', fallback=False) is False
 
 
+def test_adopt_snapshot_forward_from_head():
+    """A peer adopts the mirror's snapshot pin FORWARD from the coord head:
+    empty local → adopt; forward → adopt; equal → no-op; disabled → None.
+    Uses the cheap snapshot.state pin (never a networked resolve)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tuimod
+    import utils
+    from commands.cmd_mirror import MirrorCommandsMixin
+    # _stub_tui leaves a prompt-less _FakeTui in the global; save + restore so
+    # this test can't pollute a later prompt-using test.
+    _saved_tui = (_tuimod.console, getattr(_tuimod, 'tui_instance', None))
+    _stub_tui()
+
+    class _Flags:
+        cache_ready = True
+        dep_check_ready = True
+
+    class _Sess:
+        pass
+
+    try:
+        with tempfile.TemporaryDirectory() as _tmp:
+            class _Cfg:
+                snapshot_enabled = True
+                dir_config = _tmp
+            _s = _Sess()
+            _s.config = _Cfg()
+            _s.flags = _Flags()
+            _adopt = MirrorCommandsMixin._adopt_snapshot_forward_from_head
+
+            # Empty local (fresh peer) → adopt the mirror's pin outright.
+            _head = {'snapshot': {'current': '20260602T173733Z'}}
+            assert _adopt(_s, _head, 'mirror x') == '20260602T173733Z'
+            assert (utils.read_snapshot_state(_s.config).get('current')
+                    == '20260602T173733Z')
+            assert _s.flags.cache_ready is False        # invalidated
+            assert _s.flags.dep_check_ready is False
+
+            # Forward → adopt the newer pin.
+            _s.flags.cache_ready = True
+            assert _adopt(_s, {'snapshot': {'current': '20260701T000000Z'}},
+                          'mirror x') == '20260701T000000Z'
+            assert _s.flags.cache_ready is False
+
+            # Equal (already at the mirror's pin) → no-op, flags untouched.
+            _s.flags.cache_ready = True
+            assert _adopt(_s, {'snapshot': {'current': '20260701T000000Z'}},
+                          'mirror x') is None
+            assert _s.flags.cache_ready is True
+
+            # Backward (older than local) → never roll back.
+            assert _adopt(_s, {'snapshot': {'current': '20250101T000000Z'}},
+                          'mirror x') is None
+
+            # Snapshots disabled → None, no write.
+            _s.config.snapshot_enabled = False
+            assert _adopt(_s, {'snapshot': {'current': '20270101T000000Z'}},
+                          'mirror x') is None
+    finally:
+        _tuimod.console, _tuimod.tui_instance = _saved_tui
+
+
 def test_print_state_shows_mode_header():
     """MIRROR-02 chunk 6b: `print state` surfaces the active build
     mode at the top of the output.  In build mode the line also shows
@@ -16118,8 +16181,21 @@ def test_status_lines_compact_snapshot():
     assert '[·] dep_parse' in _text         # · for a not-ready flag
     assert '[✓] source_build' in _text
     assert 'ISO live' in _text and 'Disk image' in _text
-    assert 'athena-1-amd64.iso' in _text
+    # Predicted ISO name carries the snapshot tag, derived CHEAPLY from the
+    # pin (no networked resolve) — see the no-network guard below.
+    assert 'athena-1-20260602T173733Z-amd64.iso' in _text
     assert 'asgard-1-amd64.qcow2' in _text
+
+    # Guard: the status render must NEVER call the networked
+    # resolve_snapshot_timestamp (it runs at startup, even on an un-configured
+    # box).  Patch it to explode; status_lines must still render the tag.
+    import unittest.mock as _mock2
+    import utils as _u
+    with _mock2.patch.object(
+            _u, 'resolve_snapshot_timestamp',
+            side_effect=AssertionError('status_lines must not resolve')):
+        _t3 = '\n'.join(_t for _t, _ in print_commands.status_lines(_Sess()))
+    assert 'athena-1-20260602T173733Z-amd64.iso' in _t3
 
     # signing_key_verified is an in-memory flag (False here), but when the
     # key is PREPARED on disk the row shows ✓ (prepared), not a bare "·".
@@ -35893,6 +35969,7 @@ def main() -> int:
         test_onboarding_first_system_declines_mirror,
         test_onboarding_federation_happy_path_registers_and_records,
         test_onboarding_federation_aborts_without_tier1_key,
+        test_adopt_snapshot_forward_from_head,
         test_parse_build_pkg_list_strips_comments_dedups_preserves_order,
         test_print_state_shows_mode_header,
         test_cmd_auto_run_dispatch_routes_build_mode,

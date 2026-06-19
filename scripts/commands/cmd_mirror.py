@@ -2707,7 +2707,42 @@ class MirrorCommandsMixin(SessionState):
             _h = _head_mod.read_coord_head(
                 _fetched, signing.signing_home(self.config))
             self._apply_canonical_config(_fetched, _h)
+            # Adopt the federation's snapshot pin from the head — a peer builds
+            # against the MIRROR's snapshot, not the tracked build.conf default.
+            if _h is not None:
+                self._adopt_snapshot_forward_from_head(_h, f"mirror '{_name}'")
         return True
+
+    def _adopt_snapshot_forward_from_head(self, head, source_label):
+        """Adopt the federation's snapshot pin FORWARD from a verified coord
+        head — the mirror's snapshot is authoritative; never roll backward.
+        Writes snapshot.state + invalidates cache/dep flags.  Returns the
+        adopted pin, or None when nothing changed.
+
+        Uses the CHEAP local pin (snapshot.state) rather than the networked
+        `_snapshot_current`, so a fresh peer (empty state) adopts the mirror's
+        pin outright instead of comparing against the tracked build.conf
+        baseline."""
+        if not getattr(self.config, 'snapshot_enabled', False):
+            return None
+        import mirror as _mirror
+        _remote = ''
+        _hs = head.get('snapshot') if isinstance(head, dict) else None
+        if isinstance(_hs, dict):
+            _remote = str(_hs.get('current') or '')
+        _local = str((utils.read_snapshot_state(self.config) or {}).get(
+            'current') or '')
+        _adopt = _mirror.snapshot_adopt_forward(_local, _remote)
+        if not _adopt:
+            return None
+        utils.write_snapshot_state(self.config, current=_adopt)
+        self.flags.cache_ready = False
+        self.flags.dep_check_ready = False
+        console.print(
+            f"  snapshot: adopted {_adopt} from {source_label} "
+            f"(was {_local or 'unset'}) — re-run `cache build` + `cache parse`",
+            tui.COLOR_WARNING)
+        return _adopt
 
     def _apply_canonical_config(self, fetched_dir, head):
         """Verify + apply the mirror's canonical pkg.list/pool.list (from the
