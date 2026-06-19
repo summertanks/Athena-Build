@@ -879,6 +879,20 @@ class CacheCommandsMixin(SessionState):
                 _spiner.done()
                 return
             if _action == selection_lock.ACTION_BOOTSTRAP:
+                # A federation peer must NOT self-baseline a selection from its
+                # own git lists — it adopts the federation's, seeded from the
+                # mirror at register/pull.  Refuse rather than bake a divergent
+                # distribution.  The origin ('first'/'') still bootstraps.
+                if getattr(self.config, 'system_role', '') == 'federation':
+                    _spiner.done()
+                    console.print(
+                        "cache parse: REFUSED — federation peer has no "
+                        "selection.state.  The federation selection is seeded "
+                        "by the mirror; run `mirror pull` (or re-`configure`) "
+                        "to adopt it, then re-run `cache parse`.",
+                        tui.COLOR_ERROR)
+                    self.flags.dep_check_ready = False
+                    return
                 selection_lock.write_selection_state(self.config, _state)
                 console.print(
                     f"selection.state: created — {len(_fresh['bins'])} "

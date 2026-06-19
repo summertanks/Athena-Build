@@ -1283,10 +1283,23 @@ def remote_publish(
         _config_sha = (_head_dict or {}).get('config_sha256')
         _wrote_config = False
         if getattr(config, 'build_mode', 'distribution') != 'build':
+            # Carry the FULL selection authority (4 lists + the owner's verified
+            # selection.state pins/closure) so a peer builds the identical
+            # distribution.  A bad/missing lock → None → lists-only manifest
+            # (never abort publish over it).
+            import selection_lock as _sl
+            try:
+                _lock, _lstatus = _sl.read_selection_state(config)
+                _sel = _lock if _lstatus == _sl.STATUS_OK else None
+            except Exception:                         # noqa: BLE001
+                _sel = None     # robust — never abort publish over the lock
             _sha = _cfgman.write_canonical_config(
                 config.dir_coord,
                 getattr(config, 'pkglist_path', ''),
-                getattr(config, 'poollist_path', ''))
+                getattr(config, 'poollist_path', ''),
+                getattr(config, 'livelist_path', ''),
+                getattr(config, 'installerlist_path', ''),
+                selection_state=_sel)
             if _sha:
                 _config_sha = _sha
                 _wrote_config = True
