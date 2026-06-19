@@ -476,7 +476,22 @@ def status_lines(session) -> 'list[tuple[str, int]]':
     # Snapshot-tagged ISO names — mirror exactly what the builders emit
     # (iso.py / cmd_build.py): `athena-<ver>[-<snap>]-amd64.iso`.  Without
     # the tag the predicted "(built)" path pointed at a non-existent file.
-    _snap = utils.snapshot_iso_tag(cfg)
+    #
+    # CHEAP pin only — never utils.snapshot_iso_tag here: it calls the
+    # networked resolve_snapshot_timestamp, and the status tab renders at
+    # startup (even on an un-configured, gated box), which would validate the
+    # pin against snapshot.debian.org just to preview a filename.  Use the
+    # already-pinned stamp from snapshot.state / config; an unresolved 'latest'
+    # → no tag (untagged preview), resolved for real only at build time.
+    _snap = ''
+    if getattr(cfg, 'snapshot_enabled', False):
+        try:
+            _snap = (utils.read_snapshot_state(cfg) or {}).get('current') or ''
+        except Exception:
+            _snap = ''
+        if not _snap:
+            _cfgts = str(getattr(cfg, 'snapshot_timestamp_config', '') or '')
+            _snap = _cfgts if _cfgts.lower() != 'latest' else ''
 
     def _iso_name(_prefix: str) -> str:
         return (f"{_prefix}-{_ver}-{_snap}-amd64.iso" if _snap
