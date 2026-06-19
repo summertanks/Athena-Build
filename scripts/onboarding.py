@@ -79,6 +79,27 @@ def _ask(ptype, message, options=None):
     return _resp
 
 
+def _ask_required(message):
+    """Like `_ask(PROMPT_INPUT, …)` but re-prompts on an empty value (a blank
+    required field must not slip through).  Returns None only on cancel."""
+    while True:
+        _r = _ask(PROMPT_INPUT, message)
+        if _r is None:
+            return None
+        if _r:
+            return _r
+        console.print("  (required — enter a value or `cancel`)",
+                      tui.COLOR_WARNING)
+
+
+def _dist_id_of(config):
+    """The distribution id used for the served repo path (DISTRIBUTION
+    lowercased, alnum/_/- only) — matches scripts/mirror.py + prep-mirror.sh."""
+    import re
+    return re.sub(r'[^a-z0-9_-]', '',
+                  str(getattr(config, 'build_distribution', '') or '').lower())
+
+
 def run_onboarding(session) -> None:
     """Drive the `configure` wizard.  Runs as an ordinary command in the
     backend's command loop, so prompts work natively.  Persists SetupComplete
@@ -160,7 +181,7 @@ def _onboard_federation(session) -> bool:
     # is served at http(s)://<host>/<dist-id> (e.g. .../asgard) — that path is
     # required.  Reconstruct a clean URL (drop any user@ the operator pasted
     # from the ssh form) before probing.
-    _url = _ask(PROMPT_INPUT, "Mirror URL (http(s)://host/<dist-id>):")
+    _url = _ask_required("Mirror URL (http(s)://host/<dist-id>):")
     if _url is None:
         return False
     _proto, _host, _path = _parse_public_url(_url)
@@ -179,17 +200,22 @@ def _onboard_federation(session) -> bool:
     console.print(f"✓ working mirror ({_host})", tui.COLOR_INFO)
 
     # 2. SSH bits → copy key, validate auth + write.
-    _login = _ask(PROMPT_INPUT, f"SSH login user@host [{_host}]:")
+    _login = _ask_required(f"SSH login user@host (user, host={_host}):")
     if _login is None:
         return False
     _user, _sshhost = _split_login(_login, _host)
     if not _user:
-        console.print("✗ enter user@host", tui.COLOR_ERROR)
+        console.print("✗ enter a user (or user@host)", tui.COLOR_ERROR)
         return False
-    _rpath = _ask(PROMPT_INPUT, "Remote repo path (e.g. /home/ubuntu/asgard):")
+    # Remote repo path = the repo's FILESYSTEM path on the mirror
+    # (prep-mirror.sh's ~<user>/<dist-id>); offer that as the default.
+    _dist_id = _dist_id_of(config)
+    _default_path = f"/home/{_user}/{_dist_id}" if _dist_id else f"/home/{_user}"
+    _rpath = _ask(PROMPT_INPUT, f"Remote repo path [{_default_path}]:")
     if _rpath is None:
         return False
-    _keysrc = _ask(PROMPT_INPUT, "SSH key path:")
+    _rpath = _rpath or _default_path
+    _keysrc = _ask_required("SSH key path:")
     if _keysrc is None:
         return False
     _name = _derive_name(_sshhost)
@@ -209,7 +235,7 @@ def _onboard_federation(session) -> bool:
     console.print("✓ ssh access + write", tui.COLOR_INFO)
 
     # 3. GPG key → import + verify against the mirror's signed head.
-    _gpgsrc = _ask(PROMPT_INPUT, "Tier-1 GPG private key path:")
+    _gpgsrc = _ask_required("Tier-1 GPG private key path:")
     if _gpgsrc is None:
         return False
     _ssh_url = f"ssh://{_user}@{_sshhost}/{_rpath.lstrip('/')}"
