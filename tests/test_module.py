@@ -393,17 +393,22 @@ class _FakeOnbSession:
             pass
         self.config = _Cfg()
         self.config.config_path = os.path.join(tmp, 'build.conf')
+        self.config.dir_config = tmp        # ssh key copy + local.conf land here
         self.config.build_mode = 'distribution'
         self.config.setup_complete = False
         self._self_keys = self_keys
         self._cmd_mirror_ret = cmd_mirror_ret
         self._cmd_key_ret = cmd_key_ret
+        self._prepared = True               # _mirror_is_prepared result
         self.mirror_calls: 'list' = []
         self.key_calls: 'list' = []
         self.snap_called = False
 
     def _coord_self_keys(self):
         return self._self_keys
+
+    def _mirror_is_prepared(self, url):
+        return (self._prepared, 'ok' if self._prepared else 'no marker')
 
     def cmd_mirror(self, *args):
         self.mirror_calls.append(args)
@@ -503,8 +508,8 @@ def test_onboarding_first_system_declines_mirror():
     import utils
     with tempfile.TemporaryDirectory() as _tmp:
         _sess = _FakeOnbSession(_tmp)
-        # role=first, enable-mirror=n
-        with _onboarding_patched(['first', 'n'], verify_ok=True):
+        # role=first, enable-mirror=no
+        with _onboarding_patched(['first', 'no'], verify_ok=True):
             onboarding.run_onboarding(_sess)
         _p = utils.read_local_conf(_sess.config)
         assert _p.get('Local', 'Role') == 'first'
@@ -514,44 +519,137 @@ def test_onboarding_first_system_declines_mirror():
         assert _sess.snap_called is True
 
 
+@_contextlib.contextmanager
+def _federation_validators_patched(*, prepared=True, probes_ok=True,
+                                   gpg_ok=True):
+    """Patch the federation-flow validators (mirror probes, GPG install) so the
+    happy-path orchestration can be exercised without a live mirror."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    import mirror as _m
+    _saved = (_m.probe_dns_and_tcp, _m.probe_ssh_auth,
+              _m.probe_remote_writable, onboarding._validate_and_install_gpg)
+    _r = (probes_ok, 'ok')
+    _m.probe_dns_and_tcp = lambda *a, **k: _r
+    _m.probe_ssh_auth = lambda *a, **k: _r
+    _m.probe_remote_writable = lambda *a, **k: _r
+    onboarding._validate_and_install_gpg = lambda *a, **k: gpg_ok
+    try:
+        yield
+    finally:
+        (_m.probe_dns_and_tcp, _m.probe_ssh_auth,
+         _m.probe_remote_writable, onboarding._validate_and_install_gpg) = _saved
+
+
 def test_onboarding_federation_happy_path_registers_and_records():
-    """Federation peer: verified tier-1 key → mirror add + register, mode
-    choice, and the registration marker recorded in local.conf."""
+    """Guided federation join: URL→ssh→gpg validated, key copied, mirror added
+    + registered with --no-probe, mode chosen, registration recorded."""
     import onboarding
     import utils
     with tempfile.TemporaryDirectory() as _tmp:
         _sess = _FakeOnbSession(_tmp, self_keys=('wsl-peer-1', 'k', 'k.pub'))
-        _answers = ['federation', 'origin', 'ip',
-                    'ssh://u@h/asgard', 'config/k.key', 'https', 'build']
-        with _onboarding_patched(_answers, verify_ok=True):
+        _key = os.path.join(_tmp, 'mykey')         # real file for _copy_key
+        with open(_key, 'w') as _fh:
+            _fh.write('KEY')
+        # role, url, ssh-login, remote-path, ssh-key, gpg-key, mode
+        _answers = ['federation', 'https://h.example/asgard', 'ubuntu@h.example',
+                    '/home/ubuntu/asgard', _key, '/tmp/gpg.key', 'build']
+        with _onboarding_patched(_answers, verify_ok=True), \
+                _federation_validators_patched():
             onboarding.run_onboarding(_sess)
-        # mirror add carried name/ssh-key/proto; register ran for 'origin'.
-        assert ('add', 'ip', 'ssh://u@h/asgard', '--name', 'origin',
-                '--ssh-key', 'config/k.key', '--proto', 'https') \
-            in _sess.mirror_calls
-        assert ('builders', 'register', 'origin') in _sess.mirror_calls
+        # add ran with --no-probe + derived name 'h-example'; register followed.
+        _add = [c for c in _sess.mirror_calls if c and c[0] == 'add']
+        assert _add and '--no-probe' in _add[0], _sess.mirror_calls
+        assert '--name' in _add[0] and 'h-example' in _add[0]
+        assert ('builders', 'register', 'h-example') in _sess.mirror_calls
+        # ssh key was copied into config dir as <name>.key.
+        assert os.path.isfile(os.path.join(_tmp, 'h-example.key'))
         _p = utils.read_local_conf(_sess.config)
         assert _p.get('Local', 'Role') == 'federation'
         assert _p.get('Local', 'Mode') == 'build'
         assert _p.getboolean('Local', 'SetupComplete') is True
-        assert _p.get('Registration', 'origin') == 'wsl-peer-1'
-        assert _sess.config.build_mode == 'build'
+        assert _p.get('Registration', 'h-example') == 'wsl-peer-1'
 
 
-def test_onboarding_federation_aborts_without_tier1_key():
-    """Federation peer: tier-1 key not usable → abort BEFORE any mirror call;
-    setup is NOT marked complete (re-prompts next launch)."""
+def test_onboarding_federation_cancel_at_url_leaves_unconfigured():
+    """Typing `cancel` at any prompt aborts: nothing registered, SetupComplete
+    never written (re-running `configure` restarts)."""
     import onboarding
     import utils
     with tempfile.TemporaryDirectory() as _tmp:
         _sess = _FakeOnbSession(_tmp)
-        with _onboarding_patched(['federation'], verify_ok=False):
+        with _onboarding_patched(['federation', 'cancel'], verify_ok=True):
             onboarding.run_onboarding(_sess)
         assert _sess.mirror_calls == []
         assert _sess.snap_called is False
         _p = utils.read_local_conf(_sess.config)
-        # SetupComplete never written → reads False.
         assert _p.getboolean('Local', 'SetupComplete', fallback=False) is False
+
+
+def test_onboarding_federation_gpg_mismatch_aborts():
+    """GPG key fails to verify against the mirror's head → abort before add;
+    box stays un-configured."""
+    import onboarding
+    import utils
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess = _FakeOnbSession(_tmp, self_keys=('p', 'k', 'k.pub'))
+        _key = os.path.join(_tmp, 'mykey')
+        with open(_key, 'w') as _fh:
+            _fh.write('KEY')
+        _answers = ['federation', 'https://h/asgard', 'ubuntu@h',
+                    '/home/ubuntu/asgard', _key, '/tmp/gpg.key']
+        with _onboarding_patched(_answers, verify_ok=True), \
+                _federation_validators_patched(gpg_ok=False):
+            onboarding.run_onboarding(_sess)
+        assert not any(c and c[0] == 'add' for c in _sess.mirror_calls)
+        _p = utils.read_local_conf(_sess.config)
+        assert _p.getboolean('Local', 'SetupComplete', fallback=False) is False
+
+
+def test_ask_cancel_returns_none():
+    """onboarding._ask returns None on cancel/q, else the stripped response."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    _saved = onboarding.Prompt
+    try:
+        for _word in ('cancel', 'CANCEL', ' q ', 'Q'):
+            onboarding.Prompt = lambda *a, _w=_word, **k: type(
+                '_P', (), {'get_response': lambda s: _w})()
+            assert onboarding._ask(onboarding.PROMPT_INPUT, 'x') is None, _word
+        onboarding.Prompt = lambda *a, **k: type(
+            '_P', (), {'get_response': lambda s: '  hello  '})()
+        assert onboarding._ask(onboarding.PROMPT_INPUT, 'x') == 'hello'
+    finally:
+        onboarding.Prompt = _saved
+
+
+def test_signing_import_key_round_trip_real_gpg():
+    """INTEGRATION: generate a key, export the pubkey, import it into a fresh
+    homedir via signing.import_key; missing file → clean error."""
+    import shutil
+    import subprocess
+    import tempfile
+    if shutil.which('gpg') is None:
+        return
+    import signing
+    from signing import generate_key, signing_pubkey_path
+    with tempfile.TemporaryDirectory() as tmp:
+        class _Cfg:
+            dir_gnupg = os.path.join(tmp, 'gnupg')
+            signing_key_uid = 'Athena Test <test@athena.local>'
+        assert generate_key(_Cfg(), _key_length=2048) is True
+        _pub = signing_pubkey_path(_Cfg())
+        _dest = os.path.join(tmp, 'home2')
+        _ok, _det = signing.import_key(_dest, _pub)
+        assert _ok, _det
+        _r = subprocess.run(['gpg', '--homedir', _dest, '--list-keys'],
+                            capture_output=True, text=True)
+        assert 'Athena Test' in _r.stdout, _r.stdout
+        # Missing file → clean failure.
+        _ok2, _det2 = signing.import_key(_dest, os.path.join(tmp, 'nope'))
+        assert _ok2 is False and 'not found' in _det2
 
 
 def test_adopt_snapshot_forward_from_head():
@@ -35970,7 +36068,10 @@ def main() -> int:
         test_configured_summary_reports_state_and_warns_unregistered,
         test_onboarding_first_system_declines_mirror,
         test_onboarding_federation_happy_path_registers_and_records,
-        test_onboarding_federation_aborts_without_tier1_key,
+        test_onboarding_federation_cancel_at_url_leaves_unconfigured,
+        test_onboarding_federation_gpg_mismatch_aborts,
+        test_ask_cancel_returns_none,
+        test_signing_import_key_round_trip_real_gpg,
         test_adopt_snapshot_forward_from_head,
         test_parse_build_pkg_list_strips_comments_dedups_preserves_order,
         test_print_state_shows_mode_header,

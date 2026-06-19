@@ -7,10 +7,12 @@ the first interactive launch and establishes:
 
   - system Role: ``first`` (origin/owner — bootstraps the federation, always
     distribution mode) vs ``federation`` (a peer joining an existing mirror).
-  - the federation registration handshake for a peer (MANDATORY): the tier-1
-    signing key must already be imported (verified up front), a builder
-    identity, ``mirror add`` and ``mirror builders register`` — all validated
-    before the box is considered set up.
+  - the federation registration handshake for a peer (MANDATORY): a guided,
+    validate-as-you-go flow — public URL (probed for the asgard-mirror marker),
+    SSH login/path/key (auth + write probed, key copied into config/), tier-1
+    GPG private key (imported + verified against the mirror's signed coord-head),
+    builder identity, ``mirror add`` + ``mirror builders register``.  Typing
+    ``cancel`` at any prompt aborts cleanly; re-running ``configure`` restarts.
   - build Mode (a federation peer may pick build or distribution; a first
     system is forced to distribution — build mode needs a published baseline).
   - the build snapshot pin.
@@ -21,11 +23,12 @@ registration marker), so the wizard never re-prompts and a peer never has to
 re-register.  Hooked from build.py:main() before the banner; skipped entirely
 for headless / --cmd / --api / --yes runs and for an already-set-up box.
 """
+import os
+
 import signing
 import tui
 import utils
-from tui import (console, Prompt, PROMPT_YESNO, PROMPT_INPUT,
-                 PROMPT_OPTIONS)
+from tui import console, Prompt, PROMPT_INPUT, PROMPT_OPTIONS
 
 
 # Commands allowed before the box is configured.  `configure` itself, the
@@ -62,206 +65,330 @@ def configured_summary(config) -> str:
     return f"Configured: role={_role}, mode={_mode}{_reg}"
 
 
-def _is_yes(resp: str) -> bool:
-    return resp.strip().lower() in ('y', 'yes')
+def _ask(ptype, message, options=None):
+    """Prompt with a uniform `cancel` escape.  Returns None when the operator
+    types cancel/q (caller aborts the flow); otherwise the stripped response.
+    For OPTIONS, `cancel` is added as a selectable choice."""
+    if ptype == PROMPT_OPTIONS and options:
+        _resp = Prompt(ptype, message, list(options) + ['cancel']).get_response()
+    else:
+        _resp = Prompt(ptype, message).get_response()
+    _resp = (_resp or '').strip()
+    if _resp.lower() in ('cancel', 'q'):
+        return None
+    return _resp
 
 
 def run_onboarding(session) -> None:
-    """Drive the configuration questionnaire (the `configure` command).  Runs
-    as an ordinary command in the backend's command loop, so its prompts work
-    natively.  Persists SetupComplete (file + in-memory) only when a branch
-    fully succeeds; on an aborted/failed branch it leaves the box un-configured
-    so the command gate keeps refusing until `configure` succeeds."""
+    """Drive the `configure` wizard.  Runs as an ordinary command in the
+    backend's command loop, so prompts work natively.  Persists SetupComplete
+    (file + in-memory) only on full success; a cancelled/failed branch leaves
+    the box un-configured so the gate keeps refusing until `configure` wins."""
     config = session.config
     console.print("")
-    console.print("── Athena first-run setup ──────────────────────",
-                  tui.COLOR_HIGHLIGHT)
-    console.print(
-        "This box isn't set up yet.  A few questions to establish its role.",
-        tui.COLOR_INFO)
+    console.print("── Athena setup ──", tui.COLOR_HIGHLIGHT)
 
-    _role = Prompt(
-        PROMPT_OPTIONS,
-        "Is this the FIRST/origin build system, or a FEDERATION peer joining "
-        "an existing mirror?",
-        options=['first', 'federation']).get_response()
-
+    _role = _ask(PROMPT_OPTIONS, "System role", options=['first', 'federation'])
     if _role == 'federation':
         _ok = _onboard_federation(session)
     elif _role == 'first':
         _ok = _onboard_first(session)
     else:
-        # Empty response (no backend) — treat as abort, don't mark complete.
-        _ok = False
+        _ok = False                       # cancel / no backend
 
     if not _ok:
-        console.print(
-            "Setup not completed — you'll be asked again next launch.",
-            tui.COLOR_WARNING)
+        console.print("Not configured. Run `configure` to retry.",
+                      tui.COLOR_WARNING)
         return
 
-    # Snapshot pin, now that identity exists.  Tolerant: the cache-build
-    # prompt is the fallback if this can't run here.
+    # Snapshot pin (a federation peer already adopted the mirror's pin during
+    # register; this only prompts an origin / unadopted box).  Tolerant — the
+    # cache-build prompt is the fallback.
     try:
         session._ensure_snapshot_pins()
     except Exception as _e:                       # noqa: BLE001 — best-effort
-        console.print(
-            f"(snapshot pin deferred to first `cache build`: {_e})",
-            tui.COLOR_INFO)
+        console.print(f"(snapshot pin deferred to `cache build`: {_e})",
+                      tui.COLOR_INFO)
 
     utils.write_local_conf(config, setup_complete=True)
-    config.setup_complete = True          # in-memory: opens the command gate now
-    console.print(
-        "Setup complete — recorded in config/local.conf.  All commands are now "
-        "enabled; re-run `configure` any time to add a mirror or change mode.",
-        tui.COLOR_HIGHLIGHT)
+    config.setup_complete = True          # in-memory: opens the command gate
+    console.print("✓ setup complete — all commands enabled.",
+                  tui.COLOR_HIGHLIGHT)
 
 
 def _onboard_first(session) -> bool:
     """Origin/owner branch.  Role=first, mode forced to distribution; an
-    optional publish mirror (tier-1 key + identity + `mirror add`)."""
+    optional publish mirror."""
     config = session.config
-    console.print(
-        "First/origin system: build mode is forced to DISTRIBUTION (build "
-        "mode needs a published baseline from an origin — it can't be the "
-        "origin itself).", tui.COLOR_INFO)
+    console.print("First/origin system — mode forced to distribution.",
+                  tui.COLOR_INFO)
     config.build_mode = 'distribution'
     config.system_role = 'first'
     utils.write_local_conf(config, role='first', mode='distribution')
 
-    _enable = Prompt(
-        PROMPT_YESNO,
-        "Enable a publish mirror now? (generates the tier-1 signing key and "
-        "registers a mirror endpoint)").get_response()
-    if not _is_yes(_enable):
-        console.print(
-            "No mirror configured — add one later with `mirror add`.",
-            tui.COLOR_INFO)
+    _enable = _ask(PROMPT_OPTIONS, "Enable a publish mirror now?",
+                   options=['yes', 'no'])
+    if _enable is None:
+        return False
+    if _enable != 'yes':
+        console.print("No mirror — add one later with `mirror add`.",
+                      tui.COLOR_INFO)
         return True
 
-    # Tier-1 signing key — generate if not already usable.
     _ok, _msg = signing.verify_key(config)
     if not _ok:
-        console.print(f"Generating tier-1 signing key ({_msg})…",
-                      tui.COLOR_INFO)
+        console.print("Generating tier-1 signing key…", tui.COLOR_INFO)
         if session.cmd_key('generate') is False:
-            console.print("Key generation failed — aborting mirror setup.",
-                          tui.COLOR_ERROR)
+            console.print("✗ key generation failed", tui.COLOR_ERROR)
             return False
     if not _ensure_builder_identity(session):
         return False
+    # Origin uses the legacy explicit add (no mirror to validate against yet).
     return bool(_add_mirror_interactive(session, register=False))
 
 
 def _onboard_federation(session) -> bool:
-    """Federation-peer branch.  Registration is MANDATORY and its
-    prerequisites are validated BEFORE anything is written."""
+    """Federation-peer branch: a guided, validate-as-you-go join.  Each input
+    is checked against the live mirror before the next; keys are installed
+    automatically; `cancel` at any prompt aborts (nothing durable past the
+    idempotent key copy/import is written, so re-running restarts cleanly)."""
     config = session.config
-    console.print(
-        "Federation peer: you must register to the mirror.  Prerequisites — "
-        "the tier-1 signing key copied from the first system, an SSH key with "
-        "write access, and the mirror URL.", tui.COLOR_INFO)
+    console.print("Federation peer — type `cancel` at any prompt to abort.",
+                  tui.COLOR_INFO)
 
-    # Validate the tier-1 key UP FRONT — register/verify need the PRIVATE key.
-    _ok, _msg = signing.verify_key(config)
+    # 1. Public URL → validate keylessly (mirror-info.json marker).
+    _url = _ask(PROMPT_INPUT, "Mirror URL (https://host/path):")
+    if _url is None:
+        return False
+    _proto, _host = _parse_public_url(_url)
+    if not _host:
+        console.print("✗ enter an http(s):// URL", tui.COLOR_ERROR)
+        return False
+    _ok, _det = session._mirror_is_prepared(_url)
     if not _ok:
-        console.print(
-            f"Tier-1 signing key not usable ({_msg}).  Copy the first "
-            "system's signing key into this box's keyring and re-run setup "
-            "(see docs/mirror-setup.md).", tui.COLOR_ERROR)
+        console.print(f"✗ not a working Asgard mirror ({_det})", tui.COLOR_ERROR)
         return False
-    console.print("Tier-1 signing key verified.", tui.COLOR_INFO)
+    console.print(f"✓ working mirror ({_host})", tui.COLOR_INFO)
 
-    if not _ensure_builder_identity(session):
+    # 2. SSH bits → copy key, validate auth + write.
+    _login = _ask(PROMPT_INPUT, f"SSH login user@host [{_host}]:")
+    if _login is None:
         return False
-    _name = _add_mirror_interactive(session, register=True)
-    if not _name:
+    _user, _sshhost = _split_login(_login, _host)
+    if not _user:
+        console.print("✗ enter user@host", tui.COLOR_ERROR)
         return False
+    _rpath = _ask(PROMPT_INPUT, "Remote repo path (e.g. /home/ubuntu/asgard):")
+    if _rpath is None:
+        return False
+    _keysrc = _ask(PROMPT_INPUT, "SSH key path:")
+    if _keysrc is None:
+        return False
+    _name = _derive_name(_sshhost)
+    _keydst = os.path.join(config.dir_config, f"{_name}.key")
+    if not _copy_key(_keysrc, _keydst):
+        console.print(f"✗ cannot read SSH key {_keysrc}", tui.COLOR_ERROR)
+        return False
+    import mirror as _m
+    _ok, _det = _m.probe_dns_and_tcp(_sshhost, 22)
+    if _ok:
+        _ok, _det = _m.probe_ssh_auth(_sshhost, _user, _keydst)
+    if _ok:
+        _ok, _det = _m.probe_remote_writable(_sshhost, _user, _keydst, _rpath)
+    if not _ok:
+        console.print(f"✗ ssh check failed ({_det})", tui.COLOR_ERROR)
+        return False
+    console.print("✓ ssh access + write", tui.COLOR_INFO)
 
-    # Record the registration marker so we never re-register this mirror.
+    # 3. GPG key → import + verify against the mirror's signed head.
+    _gpgsrc = _ask(PROMPT_INPUT, "Tier-1 GPG private key path:")
+    if _gpgsrc is None:
+        return False
+    _ssh_url = f"ssh://{_user}@{_sshhost}/{_rpath.lstrip('/')}"
+    if not _validate_and_install_gpg(session, _gpgsrc, _ssh_url, _keydst):
+        return False
+    console.print("✓ gpg key matches the mirror (can publish)", tui.COLOR_INFO)
+    console.print(f"keys installed: {_keydst} + signing keyring",
+                  tui.COLOR_INFO)
+
+    # 4. Builder identity.
+    if session._coord_self_keys() is None:
+        import socket
+        _default = _sanitise_bid(socket.gethostname())
+        _bid = _ask(PROMPT_INPUT, f"Builder id [{_default}]:")
+        if _bid is None:
+            return False
+        _bid = _bid or _default
+        if session.cmd_mirror('init', _bid) is False:
+            console.print("✗ builder init failed", tui.COLOR_ERROR)
+            return False
+
+    # 5. Persist + register (we already probed → --no-probe).
+    _host_type = 'ip' if _is_ip(_sshhost) else 'fqdn'
+    if session.cmd_mirror('add', _host_type, _ssh_url, '--ssh-key', _keydst,
+                          '--proto', _proto, '--name', _name,
+                          '--no-probe') is False:
+        console.print("✗ mirror add failed", tui.COLOR_ERROR)
+        return False
+    if session.cmd_mirror('builders', 'register', _name) is False:
+        console.print("✗ registration failed", tui.COLOR_ERROR)
+        return False
+    console.print(f"✓ registered on {_name}", tui.COLOR_HIGHLIGHT)
     _keys = session._coord_self_keys()
-    _bid = _keys[0] if _keys else ''
     config.system_role = 'federation'
     utils.write_local_conf(config, role='federation',
-                           registration={_name: _bid})
+                           registration={_name: _keys[0] if _keys else ''})
 
-    # A registered peer may now choose its mode.
-    _mode = Prompt(
-        PROMPT_OPTIONS,
-        "Build mode for this peer — `distribution` (full corpus) or `build` "
-        "(just config/build_pkg.list)?",
-        options=['distribution', 'build']).get_response()
-    if _mode not in ('distribution', 'build'):
-        _mode = 'distribution'
+    # 6. Mode.
+    _mode = _ask(PROMPT_OPTIONS, "Build mode",
+                 options=['distribution', 'build'])
+    if _mode is None:
+        return False
     config.build_mode = _mode
     utils.write_local_conf(config, mode=_mode)
-    console.print(f"Mode set to {_mode}.", tui.COLOR_INFO)
+    console.print(f"✓ mode = {_mode}", tui.COLOR_INFO)
+    return True
+
+
+def _validate_and_install_gpg(session, gpg_src, ssh_url, ssh_key) -> bool:
+    """Import the provided tier-1 key into a TEMP homedir, prove it verifies
+    the mirror's signed coord-head, then commit it to signing_home + confirm
+    the PRIVATE half is usable (publish-capable).  Single-line results."""
+    import tempfile
+    import mirror as _m
+    import coord.transport as _t
+    import coord.head as _h
+    config = session.config
+    if not os.path.isfile(gpg_src):
+        console.print(f"✗ gpg key not found: {gpg_src}", tui.COLOR_ERROR)
+        return False
+    _coord_spec, _ = _m.rsync_spec_for_url(_m.coord_root_for(ssh_url))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _ok, _det = signing.import_key(_tmp, gpg_src)
+        if not _ok:
+            console.print(f"✗ gpg import failed ({_det})", tui.COLOR_ERROR)
+            return False
+        _fetch = os.path.join(_tmp, 'fetched')
+        _ok, _det = _t.pull_remote_coord(
+            local_dest=_fetch, remote_spec=_coord_spec, ssh_key=ssh_key)
+        if not _ok:
+            console.print(f"✗ cannot fetch coord tree ({_det})",
+                          tui.COLOR_ERROR)
+            return False
+        if not os.path.isfile(_h.coord_head_path(_fetch)):
+            console.print("✗ mirror has no signed head yet (origin must "
+                          "publish first)", tui.COLOR_ERROR)
+            return False
+        if _h.read_coord_head(_fetch, _tmp) is None:
+            console.print("✗ gpg key does not match the mirror's signing key",
+                          tui.COLOR_ERROR)
+            return False
+        # Validated → commit into the real signing keyring.
+        _ok, _det = signing.import_key(signing.signing_home(config), gpg_src)
+        if not _ok:
+            console.print(f"✗ gpg install failed ({_det})", tui.COLOR_ERROR)
+            return False
+    _ok, _msg = signing.verify_key(config)
+    if not _ok:
+        console.print(f"✗ signing key not usable ({_msg})", tui.COLOR_ERROR)
+        return False
     return True
 
 
 def _ensure_builder_identity(session) -> bool:
-    """Make sure this box has an Ed25519 builder identity (mirror init)."""
+    """Make sure this box has an Ed25519 builder identity (mirror init).
+    Used by the origin branch; the federation branch inlines this."""
     if session._coord_self_keys() is not None:
         return True
-    _bid = Prompt(
-        PROMPT_INPUT,
-        "Builder id for this box (ASCII, no spaces/slashes, e.g. "
-        "'wsl-peer-1'):").get_response().strip()
-    if not _bid:
-        console.print("No builder id given — aborting.", tui.COLOR_ERROR)
+    import socket
+    _default = _sanitise_bid(socket.gethostname())
+    _bid = _ask(PROMPT_INPUT, f"Builder id [{_default}]:")
+    if _bid is None:
         return False
+    _bid = _bid or _default
     if session.cmd_mirror('init', _bid) is False:
-        console.print("Builder init failed — aborting.", tui.COLOR_ERROR)
+        console.print("✗ builder init failed", tui.COLOR_ERROR)
         return False
     return True
 
 
 def _add_mirror_interactive(session, *, register: bool) -> str:
-    """Collect mirror endpoint details, run `mirror add`, and (for a peer)
-    `mirror builders register`.  Returns the mirror name on success, '' on
-    failure/abort."""
-    _name = Prompt(
-        PROMPT_INPUT,
-        "Short name for this mirror (e.g. 'origin'):").get_response().strip()
+    """Legacy explicit mirror add (origin branch only — no live mirror to
+    validate against yet).  Returns the mirror name, or '' on abort."""
+    _name = _ask(PROMPT_INPUT, "Mirror name (e.g. 'origin'):")
     if not _name:
-        console.print("No mirror name — aborting.", tui.COLOR_ERROR)
         return ''
-    _host_type = Prompt(
-        PROMPT_OPTIONS,
-        "Mirror host type",
-        options=['ip', 'fqdn', 'local']).get_response()
-    _url = Prompt(
-        PROMPT_INPUT,
-        "Publish URL (ssh://user@host/path, or file:///abs/path for local):"
-    ).get_response().strip()
+    _host_type = _ask(PROMPT_OPTIONS, "Host type",
+                      options=['ip', 'fqdn', 'local'])
+    if _host_type is None:
+        return ''
+    _url = _ask(PROMPT_INPUT, "Publish URL (ssh://user@host/path or file://):")
     if not _url:
-        console.print("No URL — aborting.", tui.COLOR_ERROR)
         return ''
-
     _args = [_host_type, _url, '--name', _name]
     if _host_type != 'local' and not _url.startswith('file://'):
-        _key = Prompt(
-            PROMPT_INPUT,
-            "Path to the SSH key for this mirror (e.g. "
-            "config/repo_asgard.key):").get_response().strip()
+        _key = _ask(PROMPT_INPUT, "SSH key path:")
         if _key:
             _args += ['--ssh-key', _key]
-        _proto = Prompt(
-            PROMPT_OPTIONS,
-            "Apt URL scheme the mirror is served over (for the installed "
-            "system's sources.list)",
-            options=['http', 'https']).get_response()
-        _args += ['--proto', _proto]
-
-    if session.cmd_mirror('add', *_args) is False:
-        console.print("mirror add failed — aborting setup.", tui.COLOR_ERROR)
-        return ''
-
-    if register:
-        if session.cmd_mirror('builders', 'register', _name) is False:
-            console.print(
-                "mirror registration failed — check SSH write access and the "
-                "tier-1 key, then re-run setup.", tui.COLOR_ERROR)
+        _proto = _ask(PROMPT_OPTIONS, "Apt URL scheme", options=['http', 'https'])
+        if _proto is None:
             return ''
-        console.print(f"Registered on mirror '{_name}'.", tui.COLOR_HIGHLIGHT)
+        _args += ['--proto', _proto]
+    if session.cmd_mirror('add', *_args) is False:
+        console.print("✗ mirror add failed", tui.COLOR_ERROR)
+        return ''
+    if register and session.cmd_mirror('builders', 'register', _name) is False:
+        console.print("✗ registration failed", tui.COLOR_ERROR)
+        return ''
+    console.print(f"✓ mirror '{_name}' added", tui.COLOR_HIGHLIGHT)
     return _name
+
+
+def _parse_public_url(url):
+    """(proto, host) from an http(s)://host[/...] URL; ('', '') if not."""
+    import urllib.parse as _up
+    _p = _up.urlparse(url)
+    if _p.scheme not in ('http', 'https') or not _p.hostname:
+        return '', ''
+    return _p.scheme, _p.hostname
+
+
+def _split_login(login, default_host):
+    """'user@host' or bare 'user' → (user, host-or-default)."""
+    if '@' in login:
+        _u, _h = login.split('@', 1)
+        return _u, (_h or default_host)
+    return login, default_host
+
+
+def _derive_name(host):
+    """Mirror name from host: dots/colons → '-' (matches mirror add)."""
+    return host.replace('.', '-').replace(':', '-')
+
+
+def _copy_key(src, dst):
+    """Copy an SSH key file to dst with 0600.  False if src unreadable."""
+    import shutil
+    if not os.path.isfile(src):
+        return False
+    try:
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o600)
+        return True
+    except OSError:
+        return False
+
+
+def _is_ip(host):
+    import ipaddress
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _sanitise_bid(name):
+    import re
+    _b = re.sub(r'[^A-Za-z0-9._-]', '-', name or 'peer').strip('-')
+    return _b or 'peer'
