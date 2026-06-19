@@ -123,21 +123,43 @@ class Tui:
         """Launch dispatcher + input pump + shell + status monitor threads."""
         from .input_pump import start_input_pump
 
-        # Status monitor (psutil sampling).
-        threading.Thread(target=self._status_pump, daemon=True,
-                          name='tui-status').start()
-        # Shell loop — blocking request_prompt + dispatch.
-        threading.Thread(target=self._shell, daemon=True,
-                          name='tui-shell').start()
-        # Input pump — blocking getkey -> KeyEvent.
-        start_input_pump(self._stdscr, self.dispatcher)
+        # The `tui-shell` thread runs heavy commands (cache build parses ~100k
+        # package records via deb822, whose pure-Python dunder methods recurse
+        # in C, unbounded by sys.recursionlimit).  A pthread's default 8MB C
+        # stack overflows there → SIGABRT — but ONLY in a worker thread; the
+        # main thread's larger/growable stack is why `--headless` (REPL on the
+        # main thread) never crashes.  Give the TUI threads a generous C stack
+        # so the curses backend matches headless.  Best-effort (some platforms
+        # don't support setting it); restored so unrelated threads keep the
+        # default.
+        _prev_ss = None
+        try:
+            _prev_ss = threading.stack_size()
+            threading.stack_size(64 * 1024 * 1024)
+        except (ValueError, RuntimeError):
+            _prev_ss = None
+        try:
+            # Status monitor (psutil sampling).
+            threading.Thread(target=self._status_pump, daemon=True,
+                              name='tui-status').start()
+            # Shell loop — blocking request_prompt + dispatch.
+            threading.Thread(target=self._shell, daemon=True,
+                              name='tui-shell').start()
+            # Input pump — blocking getkey -> KeyEvent.
+            start_input_pump(self._stdscr, self.dispatcher)
 
-        # Dispatcher loop (and thus all curses redraws) runs on a dedicated
-        # non-daemon `tui-dispatch` thread; run() returns to the caller and
-        # wait() joins it.
-        self._dispatcher_thread = threading.Thread(
-            target=self._run_dispatcher, daemon=False, name='tui-dispatch')
-        self._dispatcher_thread.start()
+            # Dispatcher loop (and thus all curses redraws) runs on a dedicated
+            # non-daemon `tui-dispatch` thread; run() returns to the caller and
+            # wait() joins it.
+            self._dispatcher_thread = threading.Thread(
+                target=self._run_dispatcher, daemon=False, name='tui-dispatch')
+            self._dispatcher_thread.start()
+        finally:
+            if _prev_ss is not None:
+                try:
+                    threading.stack_size(_prev_ss)
+                except (ValueError, RuntimeError):
+                    pass
 
     def wait(self) -> None:
         if hasattr(self, '_dispatcher_thread'):
