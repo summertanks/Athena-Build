@@ -214,11 +214,15 @@ echo "Using awk: ${PACKAGE:-unknown} — ${AWK_VERSION:-version unknown}"
 BUILD_MODE="distribution"
 LOCAL_CONF="$(dirname "$CONFIG_FILE")/local.conf"
 MODE_LINE=""
+# `|| true`: with `errexit`+`pipefail`, a no-match grep (exit 1) inside a
+# command substitution kills the script silently — fatal on a fresh clone
+# (no local.conf, no Mode line in build.conf).  Mirror the `command -v … ||
+# true` guard used elsewhere here.
 if [ -f "$LOCAL_CONF" ]; then
-    MODE_LINE=$(grep -iE '^[[:space:]]*Mode[[:space:]]*=' "$LOCAL_CONF" | head -1)
+    MODE_LINE=$(grep -iE '^[[:space:]]*Mode[[:space:]]*=' "$LOCAL_CONF" | head -1 || true)
 fi
 if [ -z "$MODE_LINE" ] && [ -f "$CONFIG_FILE" ]; then
-    MODE_LINE=$(grep -iE '^[[:space:]]*Mode[[:space:]]*=' "$CONFIG_FILE" | head -1)
+    MODE_LINE=$(grep -iE '^[[:space:]]*Mode[[:space:]]*=' "$CONFIG_FILE" | head -1 || true)
 fi
 if printf '%s' "$MODE_LINE" | grep -qiE '=[[:space:]]*build([[:space:]]|$)'; then
     BUILD_MODE="build"
