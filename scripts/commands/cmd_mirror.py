@@ -1507,9 +1507,16 @@ class MirrorCommandsMixin(SessionState):
             # build.json record per source.  Indexed by package name;
             # each entry holds the list of (claim, owner_builder).
             _per_pkg_downloads: 'dict[str, list[tuple[dict, str]]]' = {}
+            # Progress over the per-file claim walk — a first pull downloads
+            # thousands of .debs and would otherwise sit on a bare "running"
+            # prompt.  Step at the TOP of the inner loop so every claim counts
+            # (the skip `continue`s below would otherwise miss it).
+            _bar = ProgressBar(label=f'pull {_n}', maxvalue=max(_total, 1),
+                               show_rate=True)
             for _builder, _claims in _by_builder.items():
                 _dead = _schema.superseded_seqs(_claims)
                 for _c in _claims:
+                    _bar.step(1)
                     # fold supersession back-refs, not just marker
                     # states.  After a reclaim the OLD published claim
                     # (state 'published', old sha) is superseded by the new
@@ -1608,6 +1615,7 @@ class MirrorCommandsMixin(SessionState):
             # Non-tunneled claims land as phase=done + pulled_from
             # annotation so we can distinguish "we built it" from
             # "we pulled it" later.
+            _bar.close()
             self._mirror_pull_write_build_records(
                 _n, _per_pkg_downloads)
             console.print(
