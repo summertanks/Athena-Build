@@ -407,6 +407,9 @@ class _FakeOnbSession:
     def _coord_self_keys(self):
         return self._self_keys
 
+    def _coord_builder_id(self):
+        return self._self_keys[0] if self._self_keys else None
+
     def _mirror_is_prepared(self, url):
         return (self._prepared, 'ok' if self._prepared else 'no marker')
 
