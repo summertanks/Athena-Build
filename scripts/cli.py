@@ -146,10 +146,10 @@ class Cli:
         # `-c <cmd>` argv tokens; wait() dispatches each in order and
         # exits without entering the REPL when the queue is non-empty.
         self.one_shot_cmds: list = []
-        # First-run onboarding hook — run once at the top of wait() before the
-        # REPL (blocking input() works directly here; no dispatcher thread to
-        # collide with, unlike the curses backend).
-        self._startup_hook: 'Optional[Callable[[], None]]' = None
+        # Optional command gate: name -> bool.  When set (build.py wires it to
+        # onboarding.command_allowed), _dispatch_one refuses non-allowlisted
+        # commands until the box is configured.
+        self.command_gate: 'Optional[Callable[[str], bool]]' = None
 
         # Register self as the module singleton — same pattern Tui uses on
         # construction.  Console, Spinner, ProgressBar, Prompt all resolve
@@ -309,11 +309,6 @@ class Cli:
         except OSError:
             pass
 
-    def run_startup(self, hook: 'Optional[Callable[[], None]]') -> None:
-        """Store an optional onboarding hook; wait() runs it before the REPL.
-        Mirrors Tui.run_startup so build.py wires both backends the same way."""
-        self._startup_hook = hook
-
     def wait(self) -> None:
         """REPL loop OR one-shot dispatcher.
 
@@ -329,15 +324,6 @@ class Cli:
         the REPL keeps running so the operator can inspect state, fix
         things, and retry.  Same forgiving model as Tui's shell().
         """
-        # Onboarding first (interactive only — needs_onboarding already
-        # excludes one-shot/headless, so this is None on those paths).  Clear
-        # before running so a re-entrant wait() (shutdown) can't replay it.
-        # getattr fallback: some tests build Cli via __new__, skipping __init__.
-        _hook = getattr(self, '_startup_hook', None)
-        self._startup_hook = None
-        if _hook is not None:
-            _hook()
-
         if self.one_shot_cmds:
             self._run_one_shot()
             return
@@ -417,6 +403,12 @@ class Cli:
             # Diagnostic → stderr, so a `--cmd` run's stdout stays clean for
             # a script capturing command output.
             self.ERROR(f'Unknown command: "{cmd}"  — type "help" for a list')
+            return False
+
+        gate = getattr(self, 'command_gate', None)
+        if gate is not None and not gate(cmd):
+            self.ERROR(f'"{cmd}" is unavailable until this build system is '
+                       'configured — run `configure` first.')
             return False
 
         fn = entry[0]

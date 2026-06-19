@@ -28,15 +28,32 @@ from tui import (console, Prompt, PROMPT_YESNO, PROMPT_INPUT,
                  PROMPT_OPTIONS)
 
 
-def needs_onboarding(config, *, headless: bool, api: bool,
-                     one_shot: bool, auto_yes: bool) -> bool:
-    """True only for an interactive, not-yet-set-up box.  Non-interactive
-    backends (headless / --cmd / --api) and unattended runs (--yes) must
-    never block on the wizard — they run with whatever config/local.conf
-    already holds (or the un-onboarded defaults)."""
-    if headless or api or one_shot or auto_yes:
-        return False
-    return not getattr(config, 'setup_complete', False)
+# Commands allowed before the box is configured.  Everything else is gated
+# (the build pipeline, mirror ops, etc.) and refused with a `configure` hint.
+ALLOW_BEFORE_CONFIGURE = frozenset({'configure', 'get', 'print'})
+
+
+def command_allowed(config, name: str) -> bool:
+    """Gate predicate (wired into the backends): any command is allowed once
+    the box is configured; before that only the ALLOW_BEFORE_CONFIGURE set."""
+    return (bool(getattr(config, 'setup_complete', False))
+            or name in ALLOW_BEFORE_CONFIGURE)
+
+
+def configured_summary(config) -> str:
+    """One-line startup confirmation of the configured state, or a warning if
+    something looks half-configured (e.g. a federation peer with no mirror
+    registered)."""
+    _role = getattr(config, 'system_role', '') or 'unknown'
+    _mode = getattr(config, 'build_mode', 'distribution')
+    _local = utils.read_local_conf(config)
+    _regs = (_local.options('Registration')
+             if _local.has_section('Registration') else [])
+    if _role == 'federation' and not _regs:
+        return ("Configured as a federation peer but NO mirror is registered "
+                "— run `configure` to register.")
+    _reg = f", registered: {', '.join(_regs)}" if _regs else ""
+    return f"Configured: role={_role}, mode={_mode}{_reg}"
 
 
 def _is_yes(resp: str) -> bool:
@@ -44,9 +61,11 @@ def _is_yes(resp: str) -> bool:
 
 
 def run_onboarding(session) -> None:
-    """Drive the first-run questionnaire.  Persists SetupComplete only when a
-    branch fully succeeds; on an aborted/failed branch it leaves the box
-    un-onboarded so the next launch re-prompts."""
+    """Drive the configuration questionnaire (the `configure` command).  Runs
+    as an ordinary command in the backend's command loop, so its prompts work
+    natively.  Persists SetupComplete (file + in-memory) only when a branch
+    fully succeeds; on an aborted/failed branch it leaves the box un-configured
+    so the command gate keeps refusing until `configure` succeeds."""
     config = session.config
     console.print("")
     console.print("── Athena first-run setup ──────────────────────",
@@ -85,9 +104,10 @@ def run_onboarding(session) -> None:
             tui.COLOR_INFO)
 
     utils.write_local_conf(config, setup_complete=True)
+    config.setup_complete = True          # in-memory: opens the command gate now
     console.print(
-        "Setup complete — recorded in config/local.conf.  Re-run any time "
-        "with `mirror add` (more mirrors) or `set mode` (switch mode).",
+        "Setup complete — recorded in config/local.conf.  All commands are now "
+        "enabled; re-run `configure` any time to add a mirror or change mode.",
         tui.COLOR_HIGHLIGHT)
 
 
@@ -100,6 +120,7 @@ def _onboard_first(session) -> bool:
         "mode needs a published baseline from an origin — it can't be the "
         "origin itself).", tui.COLOR_INFO)
     config.build_mode = 'distribution'
+    config.system_role = 'first'
     utils.write_local_conf(config, role='first', mode='distribution')
 
     _enable = Prompt(
@@ -154,6 +175,7 @@ def _onboard_federation(session) -> bool:
     # Record the registration marker so we never re-register this mirror.
     _keys = session._coord_self_keys()
     _bid = _keys[0] if _keys else ''
+    config.system_role = 'federation'
     utils.write_local_conf(config, role='federation',
                            registration={_name: _bid})
 

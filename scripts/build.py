@@ -1529,6 +1529,15 @@ def main(banner: str) -> None:
     tui.register_command('set',       session.cmd_set,       'Set:        \tset <param> <value> — session-local config change')
     tui.register_command('get',       session.cmd_get,       'Get:        \tget [param] — show current config value(s)')
     tui.register_command('print',     session.cmd_print,     'Print:      \tprint build state — try `print help`')
+    tui.register_command('configure', session.cmd_configure, 'Configure:  \tconfigure — first-run setup wizard (role, mirror, mode)')
+
+    # Command gate: until this box is configured (config/local.conf
+    # SetupComplete), the backends refuse everything except `configure` and a
+    # couple of read-only commands.  `configure` flips setup_complete in-memory
+    # so the gate opens immediately on success.
+    import onboarding
+    tui_inst.command_gate = lambda _name: onboarding.command_allowed(
+        config, _name)
 
     # Status tab (curses TUI only): a live build-environment snapshot
     # refreshed after every command.  Cli / API backends have no tabs, so
@@ -1553,6 +1562,16 @@ def main(banner: str) -> None:
             _mode_color)
     else:
         console.print("\tMode\t\t\tdistribution", _mode_color)
+
+    # Configuration status: nudge an unconfigured box toward `configure`
+    # (commands are gated until then), or confirm the configured state.
+    if not getattr(config, 'setup_complete', False):
+        console.print(
+            "\n⚠  This build system is not configured — run `configure` to "
+            "set it up (role, mirror, mode, snapshot).  Other commands are "
+            "disabled until then.", tui.COLOR_WARNING)
+    else:
+        console.print(onboarding.configured_summary(config), tui.COLOR_INFO)
 
     # Keep build.conf honest: if the durable snapshot.state pin (set via
     # `snapshot select`) differs from [Snapshot] Timestamp, rewrite the
@@ -1605,30 +1624,6 @@ def main(banner: str) -> None:
                          name='webapi-uvicorn').start()
         print(f"API listening on http://127.0.0.1:{_api_port} "
               f"(docs: /docs; key: config/api.key)")
-
-    # First-run onboarding runs INSIDE the backend's command/REPL thread (via
-    # run_startup) — never the main thread, whose request_prompt collides with
-    # the TUI shell's idle prompt and gets cancelled.  Interactive + not-set-up
-    # only; headless/--cmd/--api/--yes are excluded by needs_onboarding.  The
-    # call is unconditional (hook=None when not onboarding) because the Tui
-    # shell stays gated until run_startup releases it.
-    import onboarding
-    _onboard_hook: 'Optional[Callable[[], None]]' = None
-    if onboarding.needs_onboarding(
-            config, headless=_headless, api=_api,
-            one_shot=bool(_one_shot_cmds), auto_yes=_auto_yes):
-        def _run_onboard() -> None:
-            onboarding.run_onboarding(session)
-            # Wizard may have switched to build mode; refresh the footer tag.
-            if (getattr(config, 'build_mode', 'distribution') == 'build'
-                    and hasattr(tui_inst, 'dispatcher')):
-                try:
-                    tui_inst.dispatcher.state.banner = (f"{banner} [build]")[:50]
-                except AttributeError:
-                    pass
-        _onboard_hook = _run_onboard
-    if hasattr(tui_inst, 'run_startup'):
-        tui_inst.run_startup(_onboard_hook)
 
     tui_inst.wait()
     # Propagate the backend's resolved exit code to the process — 1 on a
