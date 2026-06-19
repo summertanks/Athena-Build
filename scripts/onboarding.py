@@ -245,10 +245,13 @@ def _onboard_federation(session) -> bool:
     console.print(f"keys installed: {_keydst} + signing keyring",
                   tui.COLOR_INFO)
 
-    # 4. Builder identity.
-    if session._coord_self_keys() is None:
+    # 4. Builder identity (this peer's own Ed25519 key — per-machine, created
+    # here if absent).  Check via _coord_builder_id (silent) NOT _coord_self_keys
+    # (which prints a misleading "run `mirror init`" when none exists yet).
+    if not session._coord_builder_id():
         import socket
         _default = _sanitise_bid(socket.gethostname())
+        console.print("Creating this peer's builder identity…", tui.COLOR_INFO)
         _bid = _ask(PROMPT_INPUT, f"Builder id [{_default}]:")
         if _bid is None:
             return False
@@ -332,7 +335,7 @@ def _validate_and_install_gpg(session, gpg_src, ssh_url, ssh_key) -> bool:
 def _ensure_builder_identity(session) -> bool:
     """Make sure this box has an Ed25519 builder identity (mirror init).
     Used by the origin branch; the federation branch inlines this."""
-    if session._coord_self_keys() is not None:
+    if session._coord_builder_id():       # silent check (no misleading print)
         return True
     import socket
     _default = _sanitise_bid(socket.gethostname())
