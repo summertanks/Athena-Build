@@ -530,6 +530,50 @@ def test_onboarding_federation_aborts_without_tier1_key():
         assert _p.getboolean('Local', 'SetupComplete', fallback=False) is False
 
 
+def test_cli_run_startup_runs_hook_once_before_repl():
+    """Cli.run_startup defers a hook to wait(), which runs it once before the
+    REPL and clears it (a re-entrant wait() must not replay onboarding)."""
+    import sys
+    import io
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tuimod
+    import cli
+    _saved_singleton = getattr(_tuimod, 'tui_instance', None)
+    _saved_stdin = sys.stdin
+    try:
+        c = cli.Cli()
+        ran: 'list[str]' = []
+        c.run_startup(lambda: ran.append('x'))
+        sys.stdin = io.StringIO('')          # immediate EOF → REPL exits
+        c.wait()
+        assert ran == ['x'], ran             # hook ran exactly once
+        # Second wait(): hook was cleared, so it must NOT replay.
+        sys.stdin = io.StringIO('')
+        c._exit_code = None
+        c.wait()
+        assert ran == ['x'], "hook replayed on re-entrant wait()"
+    finally:
+        sys.stdin = _saved_stdin
+        _tuimod.tui_instance = _saved_singleton
+
+
+def test_tui_run_startup_sets_hook_and_opens_gate():
+    """Tui.run_startup stores the hook and releases the shell-thread gate so
+    onboarding runs in-thread (where prompts are serviceable)."""
+    import sys
+    import threading
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui import Tui
+    t = Tui.__new__(Tui)                 # skip curses init
+    t._startup_hook = None
+    t._startup_gate = threading.Event()
+    assert not t._startup_gate.is_set()
+    _h = lambda: None                    # noqa: E731
+    t.run_startup(_h)
+    assert t._startup_hook is _h
+    assert t._startup_gate.is_set()      # shell can now proceed past the gate
+
+
 def test_print_state_shows_mode_header():
     """MIRROR-02 chunk 6b: `print state` surfaces the active build
     mode at the top of the output.  In build mode the line also shows
@@ -35870,6 +35914,8 @@ def main() -> int:
         test_onboarding_first_system_declines_mirror,
         test_onboarding_federation_happy_path_registers_and_records,
         test_onboarding_federation_aborts_without_tier1_key,
+        test_cli_run_startup_runs_hook_once_before_repl,
+        test_tui_run_startup_sets_hook_and_opens_gate,
         test_parse_build_pkg_list_strips_comments_dedups_preserves_order,
         test_print_state_shows_mode_header,
         test_cmd_auto_run_dispatch_routes_build_mode,
