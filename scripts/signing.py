@@ -191,6 +191,33 @@ def get_key_info(config) -> Optional[Dict[str, str]]:
     return keys[0] if keys else None
 
 
+def import_key(homedir: str, key_path: str) -> 'Tuple[bool, str]':
+    """Import a GPG key file (public or secret) into the gnupg ``homedir``
+    via ``gpg --import``.  Returns ``(ok, detail)``.
+
+    Used by the `configure` federation flow: a peer copies the federation's
+    tier-1 key off the origin and points the wizard at the file; this imports
+    it (first into a throwaway homedir to validate against the mirror's signed
+    coord-head, then into ``signing_home`` once it checks out).  Implements the
+    long-deferred BYOK import noted in this module's header."""
+    if shutil.which('gpg') is None:
+        return False, "gpg not on PATH"
+    if not os.path.isfile(key_path):
+        return False, f"key file not found: {key_path}"
+    try:
+        os.makedirs(homedir, mode=0o700, exist_ok=True)
+        os.chmod(homedir, 0o700)
+    except OSError as e:
+        return False, f"cannot create gnupg homedir {homedir}: {e}"
+    proc = subprocess.run(
+        ['gpg', '--homedir', homedir, '--batch', '--import', key_path],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return False, f"gpg --import failed: {proc.stderr.strip()[:200]}"
+    return True, 'imported'
+
+
 def generate_key(config, _key_length: int = 4096) -> bool:
     """Generate a fresh signing keypair under ``signing_home(config)``.
 

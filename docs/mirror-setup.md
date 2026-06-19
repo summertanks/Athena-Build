@@ -44,13 +44,22 @@ establishes the box's identity so you don't have to wire it up by hand:
    mode) or *federation peer* (joins an existing mirror).
 2. **First system**: mode is forced to `distribution`; optionally enables a
    publish mirror (generates the tier-1 key, `mirror init`, `mirror add`).
-3. **Federation peer**: registration is **mandatory** and its prerequisites are
-   validated up front — the tier-1 signing key must already be imported
-   (copied from the first system; it's the *private* key, since publish
-   re-signs the coord-head), then `mirror init` (if needed), `mirror add`, and
-   `mirror builders register`.  Only after that can the peer pick build vs
-   distribution mode.
-4. **Snapshot pin** for the build.
+3. **Federation peer** — a guided, **validate-as-you-go** join. Each input is
+   checked against the live mirror before the next, and the keys are installed
+   for you. Type **`cancel`** at any prompt to abort (nothing is committed; just
+   re-run `configure` to restart):
+   - **Mirror URL** (`https://host/path`) → probed for the `asgard-mirror`
+     marker (`✓ working mirror`).
+   - **SSH login / remote path / key path** → SSH auth + write are probed and
+     the key is copied to `config/<name>.key` (0600) (`✓ ssh access + write`).
+   - **Tier-1 GPG private key path** → imported and validated by verifying the
+     mirror's *signed coord-head* (`✓ gpg key matches the mirror`). You supply
+     the **private** key (copied off the origin) so this peer can publish; the
+     wizard installs it into the signing keyring itself.
+   - **Builder identity** (defaults to the hostname), then `mirror add` +
+     `mirror builders register`, then **build vs distribution** mode.
+4. **Snapshot pin** — a peer adopts the mirror's pin automatically during
+   registration; an origin is prompted.
 
 The result is recorded in **`config/local.conf`** — an **untracked,
 machine-local** sidecar holding `[Local] Mode/Role/SetupComplete` and a
