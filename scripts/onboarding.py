@@ -156,17 +156,25 @@ def _onboard_federation(session) -> bool:
     console.print("Federation peer — type `cancel` at any prompt to abort.",
                   tui.COLOR_INFO)
 
-    # 1. Public URL → validate keylessly (mirror-info.json marker).
-    _url = _ask(PROMPT_INPUT, "Mirror URL (https://host/path):")
+    # 1. Public URL → validate keylessly (mirror-info.json marker).  The repo
+    # is served at http(s)://<host>/<dist-id> (e.g. .../asgard) — that path is
+    # required.  Reconstruct a clean URL (drop any user@ the operator pasted
+    # from the ssh form) before probing.
+    _url = _ask(PROMPT_INPUT, "Mirror URL (http(s)://host/<dist-id>):")
     if _url is None:
         return False
-    _proto, _host = _parse_public_url(_url)
+    _proto, _host, _path = _parse_public_url(_url)
     if not _host:
-        console.print("✗ enter an http(s):// URL", tui.COLOR_ERROR)
+        console.print("✗ enter an http(s)://host/<dist-id> URL (no user@)",
+                      tui.COLOR_ERROR)
         return False
-    _ok, _det = session._mirror_is_prepared(_url)
+    _pub = f"{_proto}://{_host}{_path}"
+    _ok, _det = session._mirror_is_prepared(_pub)
     if not _ok:
         console.print(f"✗ not a working Asgard mirror ({_det})", tui.COLOR_ERROR)
+        if not _path:
+            console.print("  (did you include the repo path, e.g. /asgard?)",
+                          tui.COLOR_INFO)
         return False
     console.print(f"✓ working mirror ({_host})", tui.COLOR_INFO)
 
@@ -345,12 +353,13 @@ def _add_mirror_interactive(session, *, register: bool) -> str:
 
 
 def _parse_public_url(url):
-    """(proto, host) from an http(s)://host[/...] URL; ('', '') if not."""
+    """(proto, host, path) from an http(s)://[user@]host[/path] URL; userinfo
+    is dropped (host comes from urlparse.hostname).  ('', '', '') if not http(s)."""
     import urllib.parse as _up
     _p = _up.urlparse(url)
     if _p.scheme not in ('http', 'https') or not _p.hostname:
-        return '', ''
-    return _p.scheme, _p.hostname
+        return '', '', ''
+    return _p.scheme, _p.hostname, _p.path.rstrip('/')
 
 
 def _split_login(login, default_host):
