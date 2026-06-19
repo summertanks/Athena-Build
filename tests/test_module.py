@@ -29630,22 +29630,36 @@ def test_closure_gate_runs_in_both_modes():
 
 
 def test_canonical_config_round_trip_and_verify():
-    """Owner writes pkg.list + pool.list into canonical.json (sha pinned in
-    the head); a peer applies it only when the sha matches the signed head;
-    mismatch / missing head pin → refused, local lists untouched."""
+    """v2: owner writes the 4 lists (raw, byte-faithful) + selection payload
+    into canonical.json (sha pinned in the head); a peer applies only on sha
+    match, gets the 4 lists verbatim + the pins/closure payload; mismatch /
+    missing head pin → refused, local lists untouched."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from coord import config_manifest as _cm
     from coord import schema as _schema
     with tempfile.TemporaryDirectory() as _td:
-        _owner_pkg = os.path.join(_td, 'pkg.list')
-        _owner_pool = os.path.join(_td, 'pool.list')
-        with open(_owner_pkg, 'w') as _f:
-            _f.write('firefox\nvlc\n')
-        with open(_owner_pool, 'w') as _f:
+        # Owner lists — pkg.list with COMMENTS + group header to prove the raw
+        # text survives byte-for-byte (the fidelity guarantee).
+        _o = {n: os.path.join(_td, f'o_{n}.list')
+              for n in ('pkg', 'pool', 'live', 'installer')}
+        _pkg_text = '[base]\n# a comment\nfirefox\nvlc\n'
+        with open(_o['pkg'], 'w') as _f:
+            _f.write(_pkg_text)
+        with open(_o['pool'], 'w') as _f:
             _f.write('grub-pc\n')
+        with open(_o['live'], 'w') as _f:
+            _f.write('gnome-shell\n')
+        with open(_o['installer'], 'w') as _f:
+            _f.write('partman\n')
+        _sel = {'pins': {'x-terminal-emulator': 'xterm'},
+                'closure': {'bins': {'firefox': ['base']}},
+                'flags': {'IncludeRecommends': True},
+                'arch': 'amd64', 'snapshot': '20260602T173733Z'}
         _coord = os.path.join(_td, 'coord')
-        _sha = _cm.write_canonical_config(_coord, _owner_pkg, _owner_pool)
+        _sha = _cm.write_canonical_config(
+            _coord, _o['pkg'], _o['pool'], _o['live'], _o['installer'],
+            selection_state=_sel)
         assert len(_sha) == 64 and os.path.isfile(_cm.manifest_path(_coord))
 
         # head carries the pin (back-compat: absent when not set)
@@ -29658,31 +29672,55 @@ def test_canonical_config_round_trip_and_verify():
             head_time='T')
         assert 'config_sha256' not in _h2
 
-        # peer applies with matching sha → lists overwritten
-        _peer_pkg = os.path.join(_td, 'peer_pkg.list')
-        _peer_pool = os.path.join(_td, 'peer_pool.list')
-        with open(_peer_pkg, 'w') as _f:
+        # peer applies with matching sha → all 4 lists overwritten verbatim,
+        # payload returned.
+        _p = {n: os.path.join(_td, f'p_{n}.list')
+              for n in ('pkg', 'pool', 'live', 'installer')}
+        with open(_p['pkg'], 'w') as _f:
             _f.write('OLD\n')
-        _ok, _ = _cm.apply_canonical_config(_coord, _sha, _peer_pkg, _peer_pool)
-        assert _ok
-        with open(_peer_pkg) as _f:
-            assert _f.read() == 'firefox\nvlc\n'
-        with open(_peer_pool) as _f:
+        _ok, _det, _payload = _cm.apply_canonical_config(
+            _coord, _sha, _p['pkg'], _p['pool'], _p['live'], _p['installer'])
+        assert _ok, _det
+        with open(_p['pkg']) as _f:
+            assert _f.read() == _pkg_text          # byte-faithful, comments kept
+        with open(_p['pool']) as _f:
             assert _f.read() == 'grub-pc\n'
+        with open(_p['live']) as _f:
+            assert _f.read() == 'gnome-shell\n'
+        with open(_p['installer']) as _f:
+            assert _f.read() == 'partman\n'
+        assert _payload['pins'] == {'x-terminal-emulator': 'xterm'}
+        assert _payload['closure'] == {'bins': {'firefox': ['base']}}
+        assert _payload['snapshot'] == '20260602T173733Z'
 
         # sha mismatch → refused, peer list unchanged
-        with open(_peer_pkg, 'w') as _f:
+        with open(_p['pkg'], 'w') as _f:
             _f.write('KEEP\n')
-        _ok2, _d2 = _cm.apply_canonical_config(
-            _coord, 'b' * 64, _peer_pkg, _peer_pool)
-        assert not _ok2 and 'mismatch' in _d2
-        with open(_peer_pkg) as _f:
+        _ok2, _d2, _pl2 = _cm.apply_canonical_config(
+            _coord, 'b' * 64, _p['pkg'], _p['pool'])
+        assert not _ok2 and 'mismatch' in _d2 and _pl2 is None
+        with open(_p['pkg']) as _f:
             assert _f.read() == 'KEEP\n'
 
         # no head pin → refused (never apply unverified config)
-        _ok3, _d3 = _cm.apply_canonical_config(
-            _coord, '', _peer_pkg, _peer_pool)
-        assert not _ok3 and 'no config_sha256' in _d3
+        _ok3, _d3, _pl3 = _cm.apply_canonical_config(
+            _coord, '', _p['pkg'], _p['pool'])
+        assert not _ok3 and 'no config_sha256' in _d3 and _pl3 is None
+
+        # v1 back-compat: an old-shape manifest still applies pkg+pool.
+        import json as _json
+        import hashlib as _hl
+        _v1 = _json.dumps({'v': 1, 'pkg.list': 'V1PKG\n',
+                           'pool.list': 'V1POOL\n'},
+                          sort_keys=True, indent=2).encode()
+        with open(_cm.manifest_path(_coord), 'wb') as _f:
+            _f.write(_v1)
+        _v1sha = _hl.sha256(_v1).hexdigest()
+        _ok4, _d4, _pl4 = _cm.apply_canonical_config(
+            _coord, _v1sha, _p['pkg'], _p['pool'])
+        assert _ok4 and _pl4 is None and 'v1' in _d4
+        with open(_p['pkg']) as _f:
+            assert _f.read() == 'V1PKG\n'
 
 
 def test_mirror_builders_register_gates_and_uploads():
@@ -34424,6 +34462,43 @@ def test_selection_lock_roundtrip_signs_and_verifies():
         assert 'sig' not in _state and 'schema_version' not in _state
 
 
+def test_federation_state_adopts_owner_payload_and_local_seeds():
+    """FEDERATION PROPAGATION: federation_state takes the owner's
+    pins/closure/flags/snapshot from the canonical-config payload and the
+    seeds from the peer's just-written local lists; re-signed with the peer's
+    OWN key it reads back STATUS_OK (federation trust was the GPG head sha)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    with tempfile.TemporaryDirectory() as _root:
+        _cfg = _selection_lock_cfg(_root)
+        _cfg.pkglist_path = os.path.join(_root, 'pkg.list')
+        _cfg.livelist_path = os.path.join(_root, 'live.list')
+        _cfg.installerlist_path = os.path.join(_root, 'installer.list')
+        _cfg.poollist_path = os.path.join(_root, 'pool.list')
+        _cfg.arch = 'amd64'
+        _cfg.snapshot_timestamp_config = ''
+        _cfg.include_recommends = False
+        with open(_cfg.pkglist_path, 'w') as _f:
+            _f.write('[base]\nfirefox\n')        # peer's verbatim local list
+        for _p in (_cfg.livelist_path, _cfg.installerlist_path,
+                   _cfg.poollist_path):
+            with open(_p, 'w') as _f:
+                _f.write('')
+        _payload = {'pins': {'x-terminal-emulator': 'xterm'},
+                    'closure': {'bins': {'firefox': ['base']}, 'srcs': {}},
+                    'flags': {'IncludeRecommends': True, 'IncludeBuildDep': False},
+                    'arch': 'amd64', 'snapshot': '20260602T173733Z'}
+        _state = _sl.federation_state(_cfg, _payload)
+        _sl.write_selection_state(_cfg, _state)         # peer-signed
+        _back, _status = _sl.read_selection_state(_cfg)
+        assert _status == _sl.STATUS_OK, _status
+        assert _back['pins'] == {'x-terminal-emulator': 'xterm'}    # owner's
+        assert _back['closure'] == {'bins': {'firefox': ['base']}, 'srcs': {}}
+        assert _back['snapshot'] == '20260602T173733Z'             # owner's
+        assert _back['flags']['IncludeRecommends'] is True         # owner's
+        assert _back['seeds']['pkg'] == {'base': ['firefox']}      # peer's local
+
+
 def test_selection_lock_missing_is_distinct_from_tamper():
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import selection_lock as _sl
@@ -36748,6 +36823,7 @@ def main() -> int:
         test_reconstruct_historical_ledger_seeds_prior_generation_from_recorded_n,
         # SELECT-LOCK Chunk 1 — signed selection lockfile
         test_selection_lock_roundtrip_signs_and_verifies,
+        test_federation_state_adopts_owner_payload_and_local_seeds,
         test_selection_lock_missing_is_distinct_from_tamper,
         test_selection_lock_tamper_detected_as_badsig,
         test_selection_lock_malformed_json_is_malformed,

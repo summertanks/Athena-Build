@@ -151,7 +151,7 @@ class FederationLab:
                     os.path.join(self.mirror_keyring, f'{b.id}.pub'))
         _h = _head.read_coord_head(self.mirror_coord, self.signing_home)
         if _h and _h.get('config_sha256'):
-            _ok, _ = _cfgman.apply_canonical_config(
+            _ok, _, _ = _cfgman.apply_canonical_config(
                 self.mirror_coord, str(_h['config_sha256']),
                 b.pkglist_path, b.poollist_path)
             return _ok

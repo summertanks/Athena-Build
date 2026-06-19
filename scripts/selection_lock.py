@@ -223,6 +223,23 @@ def _read_flat_seeds(path: str) -> list:
     return _out
 
 
+def seeds_from_config(config: 'Any') -> dict:
+    """The `seeds` block (the 4 lists as parsed) for the selection state, read
+    from the config's list paths.  Shared by assemble_state and the federation
+    seeder so both produce the identical shape."""
+    _pkg = getattr(config, 'pkglist_path', '')
+    return {
+        'pkg': utils.parse_pkg_list_groups(_pkg) if _pkg else {},
+        # pkg-group descriptions — preserved so `cache restore` can faithfully
+        # regenerate the `## Description:` lines tasksel needs.
+        'pkg_meta': utils.parse_pkg_list_group_meta(_pkg) if _pkg else {},
+        'live': _read_flat_seeds(getattr(config, 'livelist_path', '')),
+        'installer': _read_flat_seeds(
+            getattr(config, 'installerlist_path', '')),
+        'pool': _read_flat_seeds(getattr(config, 'poollist_path', '')),
+    }
+
+
 def assemble_state(
     dep_tree: 'Any', udeb_dep_tree: 'Any', config: 'Any',
     closure: 'Optional[dict]' = None,
@@ -248,22 +265,35 @@ def assemble_state(
             'IncludeRecommends': bool(getattr(config, 'include_recommends', False)),
             'IncludeBuildDep': False,   # reserved — see module docstring
         },
-        'seeds': {
-            'pkg': utils.parse_pkg_list_groups(
-                getattr(config, 'pkglist_path', '')) if getattr(
-                config, 'pkglist_path', '') else {},
-            # pkg-group descriptions — preserved so `cache restore` can
-            # faithfully regenerate the `## Description:` lines tasksel needs.
-            'pkg_meta': utils.parse_pkg_list_group_meta(
-                getattr(config, 'pkglist_path', '')) if getattr(
-                config, 'pkglist_path', '') else {},
-            'live': _read_flat_seeds(getattr(config, 'livelist_path', '')),
-            'installer': _read_flat_seeds(
-                getattr(config, 'installerlist_path', '')),
-            'pool': _read_flat_seeds(getattr(config, 'poollist_path', '')),
-        },
+        'seeds': seeds_from_config(config),
         'closure': closure,
         'pins': _pins,
+    }
+
+
+def federation_state(config: 'Any', payload: dict) -> dict:
+    """Build a selection.state from a federation-applied canonical config:
+    `seeds` parsed from the just-written local lists (byte-faithful, since the
+    peer wrote them verbatim); `pins`/`closure`/`flags`/`arch`/`snapshot`
+    adopted from the OWNER's payload so the peer's next `cache parse` resolves
+    with the same provider pins and validates against the owner's closure.
+
+    The caller signs it with the PEER's own HMAC key (write_selection_state);
+    the federation trust came from the GPG-signed coord-head sha that gated the
+    apply — the HMAC is only local tamper-detection."""
+    return {
+        'schema_version': SELECTION_STATE_SCHEMA_VERSION,
+        'arch': payload.get('arch') or getattr(config, 'arch', ''),
+        'snapshot': (payload.get('snapshot')
+                     or getattr(config, 'snapshot_timestamp_config', '')),
+        'flags': payload.get('flags') or {
+            'IncludeRecommends': bool(
+                getattr(config, 'include_recommends', False)),
+            'IncludeBuildDep': False,
+        },
+        'seeds': seeds_from_config(config),
+        'closure': payload.get('closure') or {},
+        'pins': payload.get('pins') or {},
     }
 
 

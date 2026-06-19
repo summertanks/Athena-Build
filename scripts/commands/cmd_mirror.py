@@ -2761,12 +2761,38 @@ class MirrorCommandsMixin(SessionState):
         _sha = head.get('config_sha256') if isinstance(head, dict) else None
         if not _sha:
             return
-        _ok, _detail = _cfgman.apply_canonical_config(
+        _ok, _detail, _payload = _cfgman.apply_canonical_config(
             fetched_dir, str(_sha),
-            self.config.pkglist_path, self.config.poollist_path)
+            self.config.pkglist_path, self.config.poollist_path,
+            self.config.livelist_path, self.config.installerlist_path)
         console.print(
             f"  config: {_detail if _ok else 'NOT applied (' + _detail + ')'}",
             tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_WARNING)
+        if _ok and _payload is not None:
+            self._seed_selection_from_payload(_payload)
+        if _ok:
+            # Lists changed under us — force a re-resolve against them.
+            self.flags.cache_ready = False
+            self.flags.dep_check_ready = False
+
+    def _seed_selection_from_payload(self, payload):
+        """Seed config/selection.state from a federation-applied canonical
+        config (the owner's pins+closure + this peer's just-written lists),
+        signed with THIS peer's HMAC key.  The peer's next `cache parse` then
+        adopts the federation selection instead of self-baselining.  Skipped in
+        build mode (no selection lock there)."""
+        if getattr(self.config, 'build_mode', 'distribution') == 'build':
+            return
+        import selection_lock as _sl
+        try:
+            _state = _sl.federation_state(self.config, payload)
+            _sl.write_selection_state(self.config, _state)
+            console.print("  selection: adopted federation selection.state",
+                          tui.COLOR_INFO)
+        except Exception as _e:                       # noqa: BLE001
+            console.print(
+                f"  selection: could not seed selection.state ({_e})",
+                tui.COLOR_WARNING)
 
     def cmd_mirror_builders_decommission(self, *args):
         """mirror builders decommission <builder-id> [<mirror>] — retire a
