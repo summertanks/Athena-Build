@@ -28,9 +28,15 @@ from tui import (console, Prompt, PROMPT_YESNO, PROMPT_INPUT,
                  PROMPT_OPTIONS)
 
 
-# Commands allowed before the box is configured.  Everything else is gated
-# (the build pipeline, mirror ops, etc.) and refused with a `configure` hint.
-ALLOW_BEFORE_CONFIGURE = frozenset({'configure', 'get', 'print'})
+# Commands allowed before the box is configured.  `configure` itself, the
+# read-only inspectors (get/print), and the backend control/navigation
+# built-ins (help/clear/history/quit/exit — you must always be able to read
+# state and leave).  Everything else (the build pipeline, mirror ops, etc.) is
+# gated and refused with a `configure` hint.
+ALLOW_BEFORE_CONFIGURE = frozenset({
+    'configure', 'get', 'print',
+    'help', 'clear', 'history', 'quit', 'exit',
+})
 
 
 def command_allowed(config, name: str) -> bool:

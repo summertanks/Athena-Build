@@ -460,8 +460,10 @@ def test_command_allowed_gates_until_configured():
     class _C:
         setup_complete = False
     _c = _C()
-    # Unconfigured: allowlist passes, everything else is gated.
-    for _ok in ('configure', 'get', 'print'):
+    # Unconfigured: allowlist (configure + inspectors + control built-ins)
+    # passes — you must always be able to read state and quit.
+    for _ok in ('configure', 'get', 'print',
+                'help', 'clear', 'history', 'quit', 'exit'):
         assert onboarding.command_allowed(_c, _ok) is True, _ok
     for _gated in ('cache', 'source', 'mirror', 'chroot', 'iso'):
         assert onboarding.command_allowed(_c, _gated) is False, _gated
