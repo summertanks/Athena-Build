@@ -160,3 +160,70 @@ def apply_canonical_config(fetched_coord_dir: str, expected_sha256: str,
         return False, f'write failed: {_e}', None
     return True, (f'applied canonical pkg.list ({len(_pkg.splitlines())} '
                   'lines) + pool.list (v1)'), None
+
+
+# ───────────────────────── ClosureLedger ─────────────────────────
+#
+# Same trust model as the canonical config: the owner writes
+# `<coord>/config/closure_ledger.json` and pins its sha256 in the SIGNED
+# coord-head (`closure_ledger_sha256`).  A peer fetches it on `mirror pull`,
+# verifies the file's sha against the head pin, and drives its download set
+# off it — assembling the full closure across a mixed-snapshot mirror without
+# keying on per-claim snapshots.  Nothing unverified is ever consumed.
+
+
+def closure_ledger_path(coord_dir: str) -> str:
+    return os.path.join(coord_dir, 'config', 'closure_ledger.json')
+
+
+def write_closure_ledger(coord_dir: str, ledger_doc: dict) -> str:
+    """Write `<coord_dir>/config/closure_ledger.json` from a
+    `schema.new_closure_ledger` doc.  Returns its sha256 (hex) for the
+    coord-head pin, or '' on any write failure (publish never aborts over
+    the ledger — a missing pin just makes peers fall back to live claims)."""
+    try:
+        _payload = json.dumps(
+            ledger_doc, sort_keys=True, ensure_ascii=True,
+            indent=2).encode('utf-8')
+    except (TypeError, ValueError):
+        return ''
+    _path = closure_ledger_path(coord_dir)
+    try:
+        os.makedirs(os.path.dirname(_path), mode=0o755, exist_ok=True)
+        with open(_path, 'wb') as _fh:
+            _fh.write(_payload)
+    except OSError:
+        return ''
+    return hashlib.sha256(_payload).hexdigest()
+
+
+def read_verified_closure_ledger(
+    fetched_coord_dir: str, expected_sha256: str,
+) -> 'Tuple[bool, str, Optional[dict]]':
+    """Verify the fetched closure_ledger.json against `expected_sha256`
+    (carried by the signed coord-head) and return its parsed doc.  Refuses on
+    absence / missing head pin / sha mismatch / unparseable — never returns a
+    doc the head doesn't vouch for.
+
+    Returns (ok, detail, ledger_doc).  ledger_doc is None on any failure."""
+    _path = closure_ledger_path(fetched_coord_dir)
+    try:
+        with open(_path, 'rb') as _fh:
+            _bytes = _fh.read()
+    except OSError:
+        return False, 'no closure ledger on the mirror', None
+    if not expected_sha256:
+        return False, ('coord-head carries no closure_ledger_sha256 — '
+                       'refusing unverified ledger'), None
+    _got = hashlib.sha256(_bytes).hexdigest()
+    if _got != expected_sha256:
+        return False, (f'closure ledger sha mismatch (head '
+                       f'{expected_sha256[:12]} != file {_got[:12]})'), None
+    try:
+        _doc = json.loads(_bytes.decode('utf-8'))
+    except (ValueError, UnicodeDecodeError) as _e:
+        return False, f'closure ledger unparseable: {_e}', None
+    if not isinstance(_doc, dict) or not isinstance(_doc.get('entries'), dict):
+        return False, 'closure ledger malformed (no entries map)', None
+    return True, (f'verified closure ledger '
+                  f'({len(_doc["entries"])} entries)'), _doc

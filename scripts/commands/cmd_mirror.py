@@ -1505,115 +1505,152 @@ class MirrorCommandsMixin(SessionState):
             console.print(
                 f"  verified: {_total} claim(s) across "
                 f"{len(_by_builder)} builder(s)")
-            # 3. Walk claims; download per-file for our current snapshot
+            # 3. Decide the download set.  Preferred: the signed CLOSURE
+            # LEDGER (head-pinned) — the latest-version-per-binary closure
+            # across base..current, so a mixed-snapshot mirror pulls
+            # completely.  Fallback (old owner, no ledger): the live-claim
+            # set (supersession fold, NO snapshot filter — the obsolescence
+            # fold already leaves one live version per filename).
             _dl = _skip_own = _skip_present = _mismatch = _failed = 0
-            _refreshed = 0
+            _refreshed = _no_claim = 0
             # collect successfully-downloaded
             # claims per package so we can write a single local
             # build.json record per source.  Indexed by package name;
             # each entry holds the list of (claim, owner_builder).
             _per_pkg_downloads: 'dict[str, list[tuple[dict, str]]]' = {}
-            # Progress over the per-file claim walk — a first pull downloads
-            # thousands of .debs and would otherwise sit on a bare "running"
-            # prompt.  Step at the TOP of the inner loop so every claim counts
-            # (the skip `continue`s below would otherwise miss it).
-            _bar = ProgressBar(label=f'pull {_n}', maxvalue=max(_total, 1),
-                               show_rate=True)
+            # Filename → (live claim, owner_builder), folding supersession so
+            # the LIVE claim wins.  The join between content (ledger / live
+            # claim) and provenance (who owns it → skip_own + pulled_from).
+            _claim_by_fn: 'dict[str, tuple[dict, str]]' = {}
             for _builder, _claims in _by_builder.items():
                 _dead = _schema.superseded_seqs(_claims)
                 for _c in _claims:
-                    _bar.step(1)
-                    # fold supersession back-refs, not just marker
-                    # states.  After a reclaim the OLD published claim
-                    # (state 'published', old sha) is superseded by the new
-                    # reclaim claim under the same filename — without this
-                    # fold the pull walks the old claim first, downloads the
-                    # REWRITTEN remote bytes, sha-mismatches the old claim,
-                    # unlinks the file + fails.  Same for a deprecated /
-                    # obsoleted file's original published line (re-importing
-                    # withdrawn/superseded content).
                     if _schema.is_superseded_claim(_c, _dead):
                         continue
+                    _cfn = _c.get('filename')
+                    if isinstance(_cfn, str) and _cfn:
+                        _claim_by_fn[_cfn] = (_c, _builder)
+
+            def _pull_file(_fn, _expected_sha, _comp, _claim, _builder,
+                           _is_reclaim,
+                           _pool_spec=_pool_spec, _ssh_key=_ssh_key,
+                           _per_pkg_downloads=_per_pkg_downloads):
+                """Present-fast-path → download → sha-verify → record one file.
+                Mutates the outer counters + _per_pkg_downloads.  The per-mirror
+                _pool_spec/_ssh_key/_per_pkg_downloads are bound as defaults so
+                the closure doesn't capture the enclosing loop var late (B023)."""
+                nonlocal _dl, _skip_present, _mismatch, _failed, _refreshed
+                # Component pinned on the claim/ledger (defaults to 'main' for
+                # pre-component publishers).  Without it a non-free-firmware
+                # pull lands at main/binary-arch/ and the remote URL 404s.
+                _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
+                _local_path = os.path.join(_dst_dir, _fn)
+                if os.path.isfile(_local_path):
+                    # a reclaim REWROTE the bytes under this filename — the
+                    # present local copy may be stale.  Sha-check ONLY those
+                    # (rare); the general present path stays hash-free.
+                    _stale_reclaim = False
+                    if _is_reclaim:
+                        _have = utils.get_sha256(_local_path, use_cache=False)
+                        _stale_reclaim = _have != _expected_sha
+                    if not _stale_reclaim:
+                        _skip_present += 1
+                        _pkg_name = str(
+                            _claim.get('package') or '') if _claim else ''
+                        if _pkg_name:
+                            _per_pkg_downloads.setdefault(
+                                _pkg_name, []).append((_claim, _builder))
+                        return
+                    console.print(
+                        f"  {_fn}: reclaimed upstream — local bytes "
+                        "superseded, re-downloading")
+                    _refreshed += 1
+                # Source path on the mirror = same relative layout under
+                # <pool_root>/dists/<codename>/<comp>/...
+                _rel = os.path.relpath(_local_path, self.config.dir_repo)
+                _remote_file = _pool_spec.rstrip('/') + '/' + _rel
+                _ok, _detail = _transport.pull_single_file(
+                    remote_spec=_remote_file, local_path=_local_path,
+                    ssh_key=_ssh_key)
+                if not _ok:
+                    console.print(
+                        f"  {_fn}: download failed — {_detail}",
+                        tui.COLOR_ERROR)
+                    _failed += 1
+                    return
+                _h = utils.get_sha256(_local_path, use_cache=False)
+                if _h != _expected_sha:
+                    console.print(
+                        f"  {_fn}: SHA-256 mismatch (expected "
+                        f"{(_expected_sha or '')[:12]} vs disk {_h[:12]}) "
+                        "— removing.", tui.COLOR_ERROR)
+                    try:
+                        os.unlink(_local_path)
+                    except OSError:
+                        pass
+                    _mismatch += 1
+                    return
+                _dl += 1
+                _pkg_name = str(_claim.get('package') or '') if _claim else ''
+                if _pkg_name:
+                    _per_pkg_downloads.setdefault(_pkg_name, []).append(
+                        (_claim, _builder))
+
+            # Fetch + verify the signed closure ledger (head-pinned).
+            import coord.config_manifest as _cfgman
+            _ledger_sha = str(_head.get('closure_ledger_sha256') or '')
+            _ledger = None
+            if _ledger_sha:
+                _lg_ok, _lg_detail, _ledger = (
+                    _cfgman.read_verified_closure_ledger(_fetched, _ledger_sha))
+                if not _lg_ok:
+                    console.print(
+                        f"  ledger: NOT applied ({_lg_detail}) — falling "
+                        "back to live claims", tui.COLOR_WARNING)
+                    _ledger = None
+
+            if _ledger is not None:
+                _entries = _ledger.get('entries') or {}
+                _bar = ProgressBar(
+                    label=f'pull {_n}', maxvalue=max(len(_entries), 1),
+                    show_rate=True)
+                for _ent in _entries.values():
+                    _bar.step(1)
+                    _fn = _ent.get('filename')
+                    if not isinstance(_fn, str) or not _fn:
+                        continue
+                    _claim, _builder = _claim_by_fn.get(_fn, (None, None))
+                    # ownership: a file WE built is already local — skip.
+                    if _claim is not None and _claim.get('builder') == _bid:
+                        _skip_own += 1
+                        continue
+                    if _claim is None:
+                        # ledger names a file no live claim covers — anomaly
+                        # (audit catches it); can't record provenance, skip.
+                        _no_claim += 1
+                        continue
+                    _pull_file(
+                        _fn, str(_ent.get('sha256') or ''),
+                        str(_ent.get('component') or 'main'),
+                        _claim, _builder,
+                        isinstance(_claim.get('reclaims_seq'), int))
+            else:
+                # Fallback: walk the live-claim set.  NO snapshot-equality
+                # filter — the supersession fold above already leaves one
+                # live version per filename across base..current.
+                _bar = ProgressBar(
+                    label=f'pull {_n}', maxvalue=max(len(_claim_by_fn), 1),
+                    show_rate=True)
+                for _fn, (_c, _builder) in _claim_by_fn.items():
+                    _bar.step(1)
                     if _c.get('builder') == _bid:
                         _skip_own += 1
                         continue
-                    # Filter to current snapshot only (our build pin)
-                    if _snap and _c.get('snapshot') and _c['snapshot'] != _snap:
-                        continue
-                    _fn = _c.get('filename')
-                    if not isinstance(_fn, str) or not _fn:
-                        continue
-                    # Component pinned on the claim (publisher writes
-                    # it from src._mirror.component); defaults to 'main'
-                    # for pre-component claims (whose publishers only
-                    # ever shipped main anyway).  Without this, a
-                    # non-free-firmware pull lands at main/binary-arch/
-                    # and the remote URL (derived from local path
-                    # below) 404s.
-                    _comp = str(_c.get('component') or 'main')
-                    _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
-                    _local_path = os.path.join(_dst_dir, _fn)
-                    if os.path.isfile(_local_path):
-                        # a claim carrying reclaims_seq means
-                        # the publisher REWROTE the bytes under this
-                        # filename (sanctioned invariant exception) — a
-                        # present local file may hold the superseded
-                        # bytes.  Sha-check ONLY these claims (reclaims
-                        # are rare; the general present-file fast path
-                        # stays hash-free) and fall through to the
-                        # download below on mismatch.
-                        _stale_reclaim = False
-                        if isinstance(_c.get('reclaims_seq'), int):
-                            _have = utils.get_sha256(
-                                _local_path, use_cache=False)
-                            _stale_reclaim = _have != _c.get('sha256')
-                        if not _stale_reclaim:
-                            _skip_present += 1
-                            # Even when already present, record the claim
-                            # for the per-package build.json write below —
-                            # the on-disk file is the same SHA, so we want
-                            # the record to reflect our provenance even if
-                            # we didn't have to download it now.
-                            _pkg_name = str(_c.get('package') or '')
-                            if _pkg_name:
-                                _per_pkg_downloads.setdefault(
-                                    _pkg_name, []).append((_c, _builder))
-                            continue
-                        console.print(
-                            f"  {_fn}: reclaimed upstream — local bytes "
-                            "superseded, re-downloading")
-                        _refreshed += 1
-                    # Source path on the mirror = same relative layout
-                    # under <pool_root>/dists/<codename>/<comp>/...
-                    _rel = os.path.relpath(_local_path, self.config.dir_repo)
-                    _remote_file = _pool_spec.rstrip('/') + '/' + _rel
-                    _ok, _detail = _transport.pull_single_file(
-                        remote_spec=_remote_file, local_path=_local_path,
-                        ssh_key=_ssh_key,
-                    )
-                    if not _ok:
-                        console.print(
-                            f"  {_fn}: download failed — {_detail}",
-                            tui.COLOR_ERROR)
-                        _failed += 1
-                        continue
-                    _h = utils.get_sha256(_local_path, use_cache=False)
-                    if _h != _c.get('sha256'):
-                        console.print(
-                            f"  {_fn}: SHA-256 mismatch (claim "
-                            f"{(_c.get('sha256') or '')[:12]} vs disk "
-                            f"{_h[:12]}) — removing.", tui.COLOR_ERROR)
-                        try:
-                            os.unlink(_local_path)
-                        except OSError:
-                            pass
-                        _mismatch += 1
-                        continue
-                    _dl += 1
-                    _pkg_name = str(_c.get('package') or '')
-                    if _pkg_name:
-                        _per_pkg_downloads.setdefault(_pkg_name, []).append(
-                            (_c, _builder))
+                    _pull_file(
+                        _fn, str(_c.get('sha256') or ''),
+                        str(_c.get('component') or 'main'),
+                        _c, _builder,
+                        isinstance(_c.get('reclaims_seq'), int))
             # write local build.json record per
             # pulled package so source audit + repo audit see the .deb
             # as already-present (not needs_build).  Tunneled claims
@@ -1628,7 +1665,8 @@ class MirrorCommandsMixin(SessionState):
                 f"  downloaded={_dl} skipped_own={_skip_own} "
                 f"skipped_present={_skip_present} "
                 f"verify_mismatch={_mismatch} failed={_failed}"
-                + (f" refreshed={_refreshed}" if _refreshed else ''),
+                + (f" refreshed={_refreshed}" if _refreshed else '')
+                + (f" no_claim={_no_claim}" if _no_claim else ''),
                 tui.COLOR_HIGHLIGHT if (_mismatch + _failed) == 0
                 else tui.COLOR_ERROR)
             if _mismatch or _failed:
@@ -2282,6 +2320,7 @@ class MirrorCommandsMixin(SessionState):
             if _pkg_crit:
                 _all_ok = False
             _claim_idx_crit: 'list' = []
+            _ledger_crit: 'list' = []
             if _pkg_idx:
                 _claim_idx_findings = _mirror.audit_claims_vs_packages(
                     _by_builder, _pkg_idx)
@@ -2300,6 +2339,56 @@ class MirrorCommandsMixin(SessionState):
                         tui.COLOR_WARNING)
                 if _claim_idx_crit:
                     _all_ok = False
+                # Closure ledger validation (CLOSURE-LEDGER): re-resolve the
+                # published closure over the verified Packages + confirm the
+                # signed on-mirror ledger matches it.  CRITICAL gates the
+                # audit; absent ledger (old owner) → no findings.
+                import coord.config_manifest as _cfgman
+                _ledger_sha = str(_head.get('closure_ledger_sha256') or '')
+                _lg_ok, _lg_detail, _signed_ledger = (
+                    _cfgman.read_verified_closure_ledger(_fetched, _ledger_sha))
+                if _ledger_sha and not _lg_ok:
+                    _print_audit_finding(
+                        'CRITICAL', 'closure_ledger_unverified', _lg_detail,
+                        tui.COLOR_ERROR)
+                    _ledger_crit = [('CRITICAL', 'closure_ledger_unverified',
+                                     _lg_detail)]
+                    _all_ok = False
+                elif _signed_ledger is not None:
+                    import selection_lock as _sl_lg
+                    _llock, _lst = _sl_lg.read_selection_state(self.config)
+                    _cbins = (
+                        set((_llock.get('closure') or {}).get('bins', {}))
+                        if _lst == _sl_lg.STATUS_OK and _llock else set())
+                    # concatenate the InRelease-verified Packages bytes (carry
+                    # Depends) for the closure re-resolution.
+                    _apt_dir = os.path.join(_fetched, 'apt')
+                    _texts: 'list[str]' = []
+                    try:
+                        for _pf in sorted(os.listdir(_apt_dir)):
+                            if not _pf.startswith('Packages.'):
+                                continue
+                            with open(os.path.join(_apt_dir, _pf),
+                                      encoding='utf-8',
+                                      errors='replace') as _fh:
+                                _texts.append(_fh.read())
+                    except OSError:
+                        pass
+                    _lg_findings = _mirror.audit_closure_ledger(
+                        _signed_ledger, _pkg_idx, _cbins, '\n'.join(_texts))
+                    _ledger_crit = [_f for _f in _lg_findings
+                                    if _f[0] == 'CRITICAL']
+                    for _sev, _kind, _msg in _lg_findings[:10]:
+                        _print_audit_finding(
+                            _sev, _kind, _msg,
+                            tui.COLOR_ERROR if _sev == 'CRITICAL'
+                            else tui.COLOR_WARNING)
+                    if len(_lg_findings) > 10:
+                        console.print(
+                            f"  …and {len(_lg_findings) - 10} more closure "
+                            "ledger finding(s)", tui.COLOR_WARNING)
+                    if _ledger_crit:
+                        _all_ok = False
             # Sidecar JSONL structural integrity — seq monotonicity
             # within each builder.  Independent of cryptographic
             # signature verification (already done by read_all_claims);
@@ -2426,7 +2515,7 @@ class MirrorCommandsMixin(SessionState):
             if (not _fed_crit and not _conf_crit and not _disk_crit
                     and not _ir_crit and not _pkg_crit
                     and not _claim_idx_crit and not _seq_crit
-                    and not _own_disk_crit):
+                    and not _own_disk_crit and not _ledger_crit):
                 console.print("  audit ok", tui.COLOR_HIGHLIGHT)
                 for _label, _result in (
                     ('claims',       f"{_total} across "

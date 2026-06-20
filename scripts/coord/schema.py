@@ -77,6 +77,14 @@ COORD_HEAD_SCHEMA_VERSION = 3
 # in the schema today — federations assume a single operator-supplied
 # ssh key for all peers.
 SNAPSHOT_STATE_SCHEMA_VERSION = 1
+# The closure ledger: <coord>/config/closure_ledger.json, its sha256
+# pinned in the (additive, non-v-bumped) coord-head field
+# `closure_ledger_sha256`.  Maps every distribution-closure binary to its
+# LATEST published {filename, sha256, size, component, version}, keyed
+# "<package>|<arch>".  Lets a peer pull the complete closure across a
+# mixed-snapshot mirror (base..current) without keying on the per-claim
+# snapshot.  v1.
+CLOSURE_LEDGER_SCHEMA_VERSION = 1
 
 # Lifecycle states a claim can be in.  `pending` is the post-rsync,
 # pre-reindex state — the .deb is on the remote's pool but apt won't
@@ -465,6 +473,37 @@ def new_snapshot_state(
     }
 
 
+# ───────────────────────── ClosureLedger ─────────────────────────
+
+
+def new_closure_ledger(
+    *,
+    codename: str,
+    snapshot: str,
+    entries: 'Dict[str, Dict[str, Any]]',
+    generated_at: str,
+) -> dict:
+    """The signed closure ledger written to <coord>/config/closure_ledger.json
+    and sha256-pinned in coord-head (`closure_ledger_sha256`).
+
+    `entries` is keyed "<package>|<arch>" (per-arch + udeb rows of one
+    binary stay distinct) → {filename, sha256, size, component, version,
+    package, arch} for the LATEST published version of that binary.  A
+    peer's `mirror pull` downloads exactly these files to assemble the
+    full dependency closure regardless of which snapshot built each one.
+
+    `snapshot` is the owner's current pin at publish (informational only —
+    the ledger is deliberately snapshot-agnostic for selection).
+    """
+    return {
+        'v':            CLOSURE_LEDGER_SCHEMA_VERSION,
+        'codename':     str(codename),
+        'snapshot':     str(snapshot),
+        'generated_at': str(generated_at),
+        'entries':      dict(entries),
+    }
+
+
 # ───────────────────────── CoordHead ─────────────────────────
 
 
@@ -477,6 +516,7 @@ def new_coord_head(
     neighbours: 'Optional[list]' = None,
     revoked_builders: 'Optional[Dict[str, str]]' = None,
     config_sha256: 'Optional[str]' = None,
+    closure_ledger_sha256: 'Optional[str]' = None,
 ) -> dict:
     """The signed canonical state snapshot.  GPG-clearsigned by the
     tier-1 (InRelease) signing key, stored at <mirror-root>/coord-head.json.
@@ -517,6 +557,13 @@ def new_coord_head(
     # applying it.  Optional + back-compat: absent on pre-config heads.
     if config_sha256:
         _head['config_sha256'] = str(config_sha256)
+    # sha256 of <coord>/config/closure_ledger.json (the latest-version
+    # closure ledger the owner publishes) — peers verify the fetched
+    # ledger against this before driving a pull off it.  Optional +
+    # back-compat: absent on pre-ledger heads (peer falls back to the
+    # live-claim set).  Additive field, no COORD_HEAD_SCHEMA_VERSION bump.
+    if closure_ledger_sha256:
+        _head['closure_ledger_sha256'] = str(closure_ledger_sha256)
     return _head
 
 
