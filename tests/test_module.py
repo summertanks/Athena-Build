@@ -18042,6 +18042,201 @@ def test_audit_dep_closure_resolves_against_whole_repo():
         "of truth for which dep fields are hard")
 
 
+def test_highest_stanza_per_pkg_arch_keeps_filename_and_dedups():
+    """highest_stanza_per_pkg_arch retains filename/sha/size, picks the
+    HIGHEST version per package, and keys by the DIRECTORY arch (so an
+    Architecture: all udeb keys under its binary-<arch> dir, matching
+    audit_packages_chain's index)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    # one binary-amd64 Packages: two versions of liba + an Architecture:all row
+    _amd64 = (
+        "Package: liba\nVersion: 1.0\nArchitecture: amd64\n"
+        "Filename: pool/main/liba_1.0_amd64.deb\n"
+        f"SHA256: {'a' * 64}\nSize: 100\n\n"
+        "Package: liba\nVersion: 2.0\nArchitecture: amd64\n"
+        "Filename: pool/main/liba_2.0_amd64.deb\n"
+        f"SHA256: {'b' * 64}\nSize: 200\n\n"
+        "Package: libdata\nVersion: 1.5\nArchitecture: all\n"
+        "Filename: pool/main/libdata_1.5_all.deb\n"
+        f"SHA256: {'d' * 64}\nSize: 50\n\n"
+    )
+    _m = repo_audit.highest_stanza_per_pkg_arch(_amd64, 'main', 'amd64')
+    # newest liba wins
+    assert _m['liba|amd64']['version'] == '2.0'
+    assert _m['liba|amd64']['filename'] == 'liba_2.0_amd64.deb'
+    assert _m['liba|amd64']['sha256'] == 'b' * 64
+    assert _m['liba|amd64']['size'] == 200
+    assert _m['liba|amd64']['component'] == 'main'
+    # Architecture:all keyed under the DIR arch (amd64), not 'all'
+    assert _m['libdata|amd64']['filename'] == 'libdata_1.5_all.deb'
+    assert set(_m) == {'liba|amd64', 'libdata|amd64'}
+    # merge a second dir (arm64) into the accumulator → distinct key
+    _arm64 = ("Package: liba\nVersion: 1.0\nArchitecture: arm64\n"
+              "Filename: pool/main/liba_1.0_arm64.deb\n"
+              f"SHA256: {'c' * 64}\nSize: 150\n\n")
+    repo_audit.highest_stanza_per_pkg_arch(_arm64, 'main', 'arm64', into=_m)
+    assert _m['liba|arm64']['filename'] == 'liba_1.0_arm64.deb'
+    assert set(_m) == {'liba|amd64', 'libdata|amd64', 'liba|arm64'}
+
+
+def test_published_closure_ledger_entries_filters_to_closure_and_derives_component():
+    """published_closure_ledger_entries walks dists/<codename>/**/binary-*/
+    Packages, derives the component from the path, and keeps only closure
+    binaries (latest version per (pkg,arch))."""
+    import sys
+    import types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    with tempfile.TemporaryDirectory() as _td:
+        _root = os.path.join(_td, 'dists', 'thor')
+        _main = os.path.join(_root, 'main', 'binary-amd64')
+        _udeb = os.path.join(_root, 'main', 'debian-installer', 'binary-amd64')
+        os.makedirs(_main)
+        os.makedirs(_udeb)
+        with open(os.path.join(_main, 'Packages'), 'w') as _f:
+            _f.write(
+                "Package: liba\nVersion: 1.0\nArchitecture: amd64\n"
+                "Filename: pool/main/liba_1.0_amd64.deb\n"
+                f"SHA256: {'a' * 64}\nSize: 100\n\n"
+                # a non-closure binary that must be filtered out
+                "Package: libextra\nVersion: 1.0\nArchitecture: amd64\n"
+                "Filename: pool/main/libextra_1.0_amd64.deb\n"
+                f"SHA256: {'f' * 64}\nSize: 10\n\n")
+        with open(os.path.join(_udeb, 'Packages'), 'w') as _f:
+            _f.write(
+                "Package: cdrom-detect\nVersion: 1.5\nArchitecture: amd64\n"
+                "Filename: pool/main/cdrom-detect_1.5_amd64.udeb\n"
+                f"SHA256: {'b' * 64}\nSize: 50\n\n")
+        _cfg = types.SimpleNamespace(
+            dir_repo=_td, build_codename='thor')
+        _entries = repo_audit.published_closure_ledger_entries(
+            _cfg, {'liba', 'cdrom-detect'})
+        assert set(_entries) == {'liba|amd64', 'cdrom-detect|amd64'}
+        assert _entries['liba|amd64']['component'] == 'main'
+        assert _entries['cdrom-detect|amd64']['component'] == \
+            'main/debian-installer'
+        assert 'libextra|amd64' not in _entries   # non-closure filtered out
+
+
+def test_repo_state_from_packages_text_resolves_depends():
+    """repo_state_from_packages_text builds a RepoState carrying Depends so
+    audit_dep_closure can re-resolve the published closure: a satisfied dep
+    yields no unresolved; a missing dep is reported."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    _ok_text = (
+        "Package: liba\nVersion: 1.0\nArchitecture: amd64\n"
+        "Filename: pool/main/liba_1.0_amd64.deb\nDepends: libb\n\n"
+        "Package: libb\nVersion: 1.0\nArchitecture: amd64\n"
+        "Filename: pool/main/libb_1.0_amd64.deb\n\n"
+    )
+    _state = repo_audit.repo_state_from_packages_text(_ok_text)
+    assert set(_state.packages) == {'liba', 'libb'}
+    _unresolved, _weak = repo_audit.audit_dep_closure(
+        _state, consumer_set=frozenset({'liba'}))
+    assert _unresolved == [], _unresolved
+    # drop libb → liba's hard dep is now unsatisfiable
+    _bad_text = (
+        "Package: liba\nVersion: 1.0\nArchitecture: amd64\n"
+        "Filename: pool/main/liba_1.0_amd64.deb\nDepends: libb\n\n"
+    )
+    _state2 = repo_audit.repo_state_from_packages_text(_bad_text)
+    _unresolved2, _ = repo_audit.audit_dep_closure(
+        _state2, consumer_set=frozenset({'liba'}))
+    assert any(_t[0] == 'liba' for _t in _unresolved2), _unresolved2
+
+
+def _closure_ledger_entry(filename, sha, size, version, pkg, arch='amd64',
+                          component='main'):
+    return {'filename': filename, 'sha256': sha, 'size': size,
+            'version': version, 'component': component, 'package': pkg,
+            'arch': arch}
+
+
+def test_audit_closure_ledger_disagree_and_missing_critical():
+    """A signed ledger whose entry disagrees with the verified Packages →
+    closure_ledger_disagree; a published closure binary absent from the
+    ledger → closure_ledger_entry_missing.  Both CRITICAL."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror
+    _pkg_idx = {
+        'liba_2.0_amd64.deb': {'package': 'liba', 'version': '2.0',
+                               'sha256': 'n' * 64, 'size': '200',
+                               'component': 'main', 'arch': 'amd64'},
+        'libb_1.0_amd64.deb': {'package': 'libb', 'version': '1.0',
+                               'sha256': 'm' * 64, 'size': '50',
+                               'component': 'main', 'arch': 'amd64'},
+    }
+    # ledger only knows an OLD liba and omits libb entirely
+    _signed = {'entries': {'liba|amd64': _closure_ledger_entry(
+        'liba_1.0_amd64.deb', 'o' * 64, 100, '1.0', 'liba')}}
+    _text = (
+        "Package: liba\nVersion: 2.0\nArchitecture: amd64\n"
+        "Filename: pool/main/liba_2.0_amd64.deb\n\n"
+        "Package: libb\nVersion: 1.0\nArchitecture: amd64\n"
+        "Filename: pool/main/libb_1.0_amd64.deb\n\n")
+    _f = mirror.audit_closure_ledger(_signed, _pkg_idx, {'liba', 'libb'}, _text)
+    _kinds = {_x[1] for _x in _f}
+    assert 'closure_ledger_disagree' in _kinds, _f
+    assert 'closure_ledger_entry_missing' in _kinds, _f
+    assert all(_x[0] == 'CRITICAL' for _x in _f), _f
+
+
+def test_audit_closure_ledger_unresolved_dep_critical():
+    """A closure binary with a hard-dep unsatisfiable on the mirror →
+    closure_dep_unresolved CRITICAL (ledger itself agrees → no disagree)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror
+    _pkg_idx = {'liba_1.0_amd64.deb': {
+        'package': 'liba', 'version': '1.0', 'sha256': 'a' * 64,
+        'size': '100', 'component': 'main', 'arch': 'amd64'}}
+    _signed = {'entries': {'liba|amd64': _closure_ledger_entry(
+        'liba_1.0_amd64.deb', 'a' * 64, 100, '1.0', 'liba')}}
+    _text = (
+        "Package: liba\nVersion: 1.0\nArchitecture: amd64\n"
+        "Filename: pool/main/liba_1.0_amd64.deb\nDepends: libmissing\n\n")
+    _f = mirror.audit_closure_ledger(_signed, _pkg_idx, {'liba'}, _text)
+    _kinds = {_x[1] for _x in _f}
+    assert 'closure_dep_unresolved' in _kinds, _f
+    assert 'closure_ledger_disagree' not in _kinds, _f
+    assert 'closure_ledger_entry_missing' not in _kinds, _f
+
+
+def test_audit_closure_ledger_entry_not_published_critical():
+    """A ledger entry naming a file absent from the verified Packages (at an
+    audited arch) → closure_ledger_entry_not_published CRITICAL."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror
+    _pkg_idx = {'liba_1.0_amd64.deb': {
+        'package': 'liba', 'version': '1.0', 'sha256': 'a' * 64,
+        'size': '100', 'component': 'main', 'arch': 'amd64'}}
+    _signed = {'entries': {
+        'liba|amd64': _closure_ledger_entry(
+            'liba_1.0_amd64.deb', 'a' * 64, 100, '1.0', 'liba'),
+        'libz|amd64': _closure_ledger_entry(
+            'libz_9_amd64.deb', 'z' * 64, 9, '9', 'libz')}}
+    _text = ("Package: liba\nVersion: 1.0\nArchitecture: amd64\n"
+             "Filename: pool/main/liba_1.0_amd64.deb\n\n")
+    _f = mirror.audit_closure_ledger(_signed, _pkg_idx, {'liba', 'libz'}, _text)
+    _kinds = {_x[1] for _x in _f}
+    assert 'closure_ledger_entry_not_published' in _kinds, _f
+
+
+def test_audit_closure_ledger_none_no_findings():
+    """No ledger pinned (old owner) → audit_closure_ledger returns [] (the
+    absence is back-compat, not a violation — peer falls back to live claims)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror
+    assert mirror.audit_closure_ledger(None, {}, set(), '') == []
+
+
 def test_audit_conflict_cohort_only_flags_within_cohort():
     """audit_conflict_cohort flags a Conflicts/Breaks only when the
     target also resolves to a pkg in the same cohort.  Cross-cohort
@@ -29550,6 +29745,7 @@ def test_revoke_builder_adds_to_revoked_preserving_head():
     _head_dict = {
         'inrelease_sha256': 'a' * 64, 'snapshot': {'current': 'S'},
         'last_seqs': {'alice': 3}, 'neighbours': [],
+        'config_sha256': 'c' * 64, 'closure_ledger_sha256': 'd' * 64,
     }
     _written: dict = {}
 
@@ -29578,6 +29774,10 @@ def test_revoke_builder_adds_to_revoked_preserving_head():
     assert 'bob' in _written['head']['revoked_builders']
     assert _written['head']['last_seqs'] == {'alice': 3}      # preserved
     assert _written['head']['snapshot'] == {'current': 'S'}    # preserved
+    # content pins preserved — a revoke must not invalidate the canonical
+    # config / closure ledger and force peers to fall back.
+    assert _written['head']['config_sha256'] == 'c' * 64
+    assert _written['head']['closure_ledger_sha256'] == 'd' * 64
 
     # already revoked → no-op True, no re-sign
     _already = dict(_head_dict, revoked_builders={'bob': 'T'})
@@ -29765,6 +29965,63 @@ def test_canonical_config_round_trip_and_verify():
         assert _ok4 and _pl4 is None and 'v1' in _d4
         with open(_p['pkg']) as _f:
             assert _f.read() == 'V1PKG\n'
+
+
+def test_closure_ledger_write_read_verify_round_trip():
+    """Owner writes closure_ledger.json (sha pinned in head); a peer reads it
+    only on sha match; empty pin / mismatch / malformed → refused with None."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import config_manifest as _cm
+    from coord import schema as _schema
+    with tempfile.TemporaryDirectory() as _td:
+        _coord = os.path.join(_td, 'coord')
+        _doc = _schema.new_closure_ledger(
+            codename='thor', snapshot='20260602T173733Z',
+            generated_at='2026-06-20T00:00:00Z',
+            entries={'libfoo|amd64': {
+                'filename': 'libfoo_1.2_amd64.deb', 'sha256': 'a' * 64,
+                'size': 100, 'component': 'main', 'version': '1.2',
+                'package': 'libfoo', 'arch': 'amd64'}})
+        _sha = _cm.write_closure_ledger(_coord, _doc)
+        assert len(_sha) == 64
+        assert os.path.isfile(_cm.closure_ledger_path(_coord))
+
+        # head carries the pin
+        _h = _schema.new_coord_head(
+            inrelease_sha256='a' * 64, snapshot={}, last_seqs={},
+            head_time='T', closure_ledger_sha256=_sha)
+        assert _h['closure_ledger_sha256'] == _sha
+
+        # matching sha → verified, doc returned intact
+        _ok, _det, _got = _cm.read_verified_closure_ledger(_coord, _sha)
+        assert _ok, _det
+        assert _got == _doc
+
+        # empty pin (old head, no ledger) → refused
+        _ok2, _d2, _g2 = _cm.read_verified_closure_ledger(_coord, '')
+        assert not _ok2 and 'no closure_ledger_sha256' in _d2 and _g2 is None
+
+        # sha mismatch → refused
+        _ok3, _d3, _g3 = _cm.read_verified_closure_ledger(_coord, 'b' * 64)
+        assert not _ok3 and 'mismatch' in _d3 and _g3 is None
+
+        # malformed (no entries map) → refused
+        import json as _json
+        with open(_cm.closure_ledger_path(_coord), 'wb') as _f:
+            _f.write(_json.dumps({'v': 1}, sort_keys=True,
+                                 indent=2).encode())
+        import hashlib as _hl
+        _bad = _hl.sha256(
+            _json.dumps({'v': 1}, sort_keys=True, indent=2).encode()
+        ).hexdigest()
+        _ok4, _d4, _g4 = _cm.read_verified_closure_ledger(_coord, _bad)
+        assert not _ok4 and 'malformed' in _d4 and _g4 is None
+
+        # absent file → refused
+        _ok5, _d5, _g5 = _cm.read_verified_closure_ledger(
+            os.path.join(_td, 'nope'), _sha)
+        assert not _ok5 and 'no closure ledger' in _d5 and _g5 is None
 
 
 def test_mirror_builders_register_gates_and_uploads():
@@ -32529,6 +32786,50 @@ def test_new_coord_head_includes_neighbours_field():
     assert _h2['neighbours'] == []
 
 
+def test_new_closure_ledger_shape():
+    """new_closure_ledger produces a v1 doc carrying codename/snapshot/
+    generated_at + the entries dict verbatim."""
+    _s, _ = _coord_schema_v2_modules()
+    _entries = {
+        'libfoo|amd64': {
+            'filename': 'libfoo_1.2_amd64.deb', 'sha256': 'a' * 64,
+            'size': 100, 'component': 'main', 'version': '1.2',
+            'package': 'libfoo', 'arch': 'amd64',
+        },
+    }
+    _doc = _s.new_closure_ledger(
+        codename='thor', snapshot='20260101T000000Z',
+        entries=_entries, generated_at='2026-01-01T00:00:00Z')
+    assert _doc['v'] == _s.CLOSURE_LEDGER_SCHEMA_VERSION == 1
+    assert _doc['codename'] == 'thor'
+    assert _doc['snapshot'] == '20260101T000000Z'
+    assert _doc['generated_at'] == '2026-01-01T00:00:00Z'
+    assert _doc['entries'] == _entries
+    # top-level entries dict is copied (caller can't add/remove keys after)
+    _entries['libbar|amd64'] = {}
+    assert 'libbar|amd64' not in _doc['entries']
+
+
+def test_new_coord_head_closure_ledger_pin_optional():
+    """closure_ledger_sha256 is an additive optional field — present when
+    passed, absent otherwise, and the head v stays at 3 (no bump)."""
+    _s, _ = _coord_schema_v2_modules()
+    _h = _s.new_coord_head(
+        inrelease_sha256='a' * 64, snapshot={}, last_seqs={}, head_time='T',
+        closure_ledger_sha256='b' * 64)
+    assert _h['v'] == 3
+    assert _h['closure_ledger_sha256'] == 'b' * 64
+    # Omitted → absent (old peer reads None → fallback)
+    _h2 = _s.new_coord_head(
+        inrelease_sha256='a' * 64, snapshot={}, last_seqs={}, head_time='T')
+    assert 'closure_ledger_sha256' not in _h2
+    # Falsy → absent
+    _h3 = _s.new_coord_head(
+        inrelease_sha256='a' * 64, snapshot={}, last_seqs={}, head_time='T',
+        closure_ledger_sha256='')
+    assert 'closure_ledger_sha256' not in _h3
+
+
 def test_check_federation_consistency_match_returns_no_findings():
     """Local URL set == coord-head.neighbours (after canonicalisation)
     → empty findings."""
@@ -33878,6 +34179,171 @@ def test_cmd_mirror_reclaim_lists_resolves_and_confirms():
             setattr(_m, _a, _orig)
         _cm.Prompt = _orig_prompt
         build.console.print = _orig_print
+
+
+def _mirror_pull_harness(_td, _claims, _head, _contents):
+    """Shared scaffold for cmd_mirror_pull tests: a fresh-peer pool, mocked
+    coord transport returning `_head` + `_claims`, and a pull_single_file that
+    writes `_contents[basename]`.  Returns (_sess, _pulled, _lines, run, undo).
+    Caller patches read_verified_closure_ledger separately if needed."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    import mirror as _mirror_mod
+    import signing as _signing_mod
+    import coord.head as _head_mod
+    import coord.identity as _id_mod
+    import coord.store as _store_mod
+    import coord.transport as _transport_mod
+
+    _pool = os.path.join(_td, 'pool')
+    os.makedirs(_pool, exist_ok=True)
+    _pulled: 'list[str]' = []
+
+    def _fake_pull_single(*, remote_spec, local_path, ssh_key=None):
+        _bn = os.path.basename(local_path)
+        _pulled.append(_bn)
+        with open(local_path, 'wb') as _fh:
+            _fh.write(_contents.get(_bn, b'?'))
+        return True, ''
+
+    class _Cfg:
+        dir_cache = _td
+        dir_repo = _pool
+        build_codename = 'thor'
+
+        def deb_dest_for_filename(self, fn, comp):
+            return _pool
+
+    _patches = [
+        (_mirror_mod, 'read_mirror_state',
+         lambda cfg, n: {'url': 'ssh://u@h/pool', 'ssh_key': ''}),
+        (_mirror_mod, 'list_mirrors', lambda cfg: ['m1']),
+        (_mirror_mod, 'coord_root_for', lambda url: url + '-coord'),
+        (_mirror_mod, 'rsync_spec_for_url', lambda url: ('u@h:/x', None)),
+        (_signing_mod, 'signing_home', lambda cfg: '/s'),
+        (_head_mod, 'read_coord_head', lambda fetched, home: _head),
+        (_id_mod, 'load_keyring', lambda d: {}),
+        (_store_mod, 'read_all_claims', lambda d, k, r: _claims),
+        (_transport_mod, 'pull_remote_coord', lambda **k: (True, '')),
+        (_transport_mod, 'pull_single_file', _fake_pull_single),
+    ]
+    _saved = [(_m, _a, getattr(_m, _a)) for _m, _a, _ in _patches]
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.config = _Cfg()
+    _sess._coord_self_keys = lambda: ('us', 'priv', 'pub')
+    _sess._snapshot_current = lambda: 'TS12'
+    _sess._apply_canonical_config = lambda f, h: None
+    _recorded: 'list' = []
+    _sess._mirror_pull_write_build_records = (
+        lambda n, d: _recorded.append(d))
+    _lines: 'list[str]' = []
+    _orig_print = build.console.print
+
+    def _run():
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        for _m, _a, _f2 in _patches:
+            setattr(_m, _a, _f2)
+        return _sess.cmd_mirror_pull('m1')
+
+    def _undo():
+        for _m, _a, _orig in _saved:
+            setattr(_m, _a, _orig)
+        build.console.print = _orig_print
+
+    return _sess, _pulled, _lines, _recorded, _run, _undo
+
+
+def test_mirror_pull_ledger_drives_mixed_snapshot_download():
+    """CLOSURE-LEDGER: a fresh peer pulling a MIXED-SNAPSHOT mirror downloads
+    the latest live version of each closure binary off the signed ledger —
+    liba@TS4 (snapshot != current) IS pulled, obsolete liba@TS0 (absent from
+    the ledger) is NOT.  This is exactly what the old strict snapshot-equality
+    filter stranded."""
+    import sys as _sys
+    import hashlib as _hashlib
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.config_manifest as _cfgman
+    _a = _hashlib.sha256(b'liba-2.0').hexdigest()
+    _e = _hashlib.sha256(b'libe-1.0').hexdigest()
+    _contents = {'liba_2.0_amd64.deb': b'liba-2.0',
+                 'libe_1.0_amd64.deb': b'libe-1.0',
+                 'liba_1.0_amd64.deb': b'liba-1.0'}
+    # liba_2.0 obsoletes liba_1.0 (folded); libe live.  All at different snaps.
+    _claims = {'peer': [
+        {'builder': 'peer', 'seq': 1, 'package': 'liba',
+         'filename': 'liba_1.0_amd64.deb', 'sha256': 'x' * 64,
+         'claim_state': 'published', 'component': 'main', 'snapshot': 'TS0'},
+        {'builder': 'peer', 'seq': 5, 'package': 'liba',
+         'filename': 'liba_2.0_amd64.deb', 'sha256': _a,
+         'claim_state': 'published', 'component': 'main', 'snapshot': 'TS4',
+         'obsoletes_seq': 1},
+        {'builder': 'peer', 'seq': 9, 'package': 'libe',
+         'filename': 'libe_1.0_amd64.deb', 'sha256': _e,
+         'claim_state': 'published', 'component': 'main', 'snapshot': 'TS12'},
+    ]}
+    _head = {'revoked_builders': {}, 'closure_ledger_sha256': 'd' * 64}
+    _ledger = {'entries': {
+        'liba|amd64': {'filename': 'liba_2.0_amd64.deb', 'sha256': _a,
+                       'size': 8, 'component': 'main', 'version': '2.0',
+                       'package': 'liba', 'arch': 'amd64'},
+        'libe|amd64': {'filename': 'libe_1.0_amd64.deb', 'sha256': _e,
+                       'size': 8, 'component': 'main', 'version': '1.0',
+                       'package': 'libe', 'arch': 'amd64'},
+    }}
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _pulled, _lines, _rec, _run, _undo = _mirror_pull_harness(
+            _td, _claims, _head, _contents)
+        _saved_rv = _cfgman.read_verified_closure_ledger
+        _cfgman.read_verified_closure_ledger = (
+            lambda fetched, sha: (True, 'ok', _ledger))
+        try:
+            _r = _run()
+        finally:
+            _cfgman.read_verified_closure_ledger = _saved_rv
+            _undo()
+        assert _r is True, _lines[-4:]
+        # latest versions across snapshots pulled; obsolete TS0 file NOT.
+        assert set(_pulled) == {'liba_2.0_amd64.deb', 'libe_1.0_amd64.deb'}, \
+            _pulled
+        assert 'liba_1.0_amd64.deb' not in _pulled, _pulled
+        _summary = [_l for _l in _lines if 'downloaded=' in _l]
+        assert _summary and 'downloaded=2' in _summary[-1], _lines[-4:]
+
+
+def test_mirror_pull_falls_back_to_live_claims_when_no_ledger():
+    """Back-compat: a head WITHOUT a closure_ledger pin → pull walks the
+    live-claim set with NO snapshot-equality filter, so older-snapshot live
+    claims (which the old :1541 filter stranded on a mixed-snapshot mirror)
+    are downloaded."""
+    import sys as _sys
+    import hashlib as _hashlib
+    _a = _hashlib.sha256(b'liba').hexdigest()
+    _e = _hashlib.sha256(b'libe').hexdigest()
+    _contents = {'liba_1.0_amd64.deb': b'liba', 'libe_1.0_amd64.deb': b'libe'}
+    # both live; liba stamped at an OLDER snapshot than the local pin (TS12)
+    _claims = {'peer': [
+        {'builder': 'peer', 'seq': 1, 'package': 'liba',
+         'filename': 'liba_1.0_amd64.deb', 'sha256': _a,
+         'claim_state': 'published', 'component': 'main', 'snapshot': 'TS0'},
+        {'builder': 'peer', 'seq': 2, 'package': 'libe',
+         'filename': 'libe_1.0_amd64.deb', 'sha256': _e,
+         'claim_state': 'published', 'component': 'main', 'snapshot': 'TS12'},
+    ]}
+    _head = {'revoked_builders': {}}   # no closure_ledger_sha256 → fallback
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _pulled, _lines, _rec, _run, _undo = _mirror_pull_harness(
+            _td, _claims, _head, _contents)
+        try:
+            _r = _run()
+        finally:
+            _undo()
+        assert _r is True, _lines[-4:]
+        # liba@TS0 NOT stranded despite local pin TS12 — both pulled.
+        assert set(_pulled) == {'liba_1.0_amd64.deb', 'libe_1.0_amd64.deb'}, \
+            _pulled
 
 
 def test_cmd_mirror_pull_redownloads_stale_reclaimed_file():
@@ -37476,6 +37942,7 @@ def main() -> int:
         test_mirror_builders_register_gates_and_uploads,
         test_revoke_builder_adds_to_revoked_preserving_head,
         test_canonical_config_round_trip_and_verify,
+        test_closure_ledger_write_read_verify_round_trip,
         test_closure_gate_runs_in_both_modes,
         test_federation_lab_build_mode_peer_workflow,
         test_federation_lab_hash_conflict,
@@ -37545,6 +38012,8 @@ def main() -> int:
         test_neighbour_urls_projects_to_flat_str_list,
         test_canonicalize_neighbours_is_alias_for_url_projection,
         test_new_coord_head_includes_neighbours_field,
+        test_new_closure_ledger_shape,
+        test_new_coord_head_closure_ledger_pin_optional,
         test_check_federation_consistency_match_returns_no_findings,
         test_check_federation_consistency_missing_on_remote_is_critical,
         test_check_federation_consistency_extra_on_remote_is_critical,
@@ -37585,6 +38054,8 @@ def main() -> int:
         test_cmd_mirror_dispatch_routes_audit_and_query,
         test_cmd_mirror_dispatch_routes_reclaim,
         test_cmd_mirror_reclaim_lists_resolves_and_confirms,
+        test_mirror_pull_ledger_drives_mixed_snapshot_download,
+        test_mirror_pull_falls_back_to_live_claims_when_no_ledger,
         test_cmd_mirror_pull_redownloads_stale_reclaimed_file,
         test_cmd_mirror_pull_folds_superseded_old_claim,
         test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base,
@@ -37660,6 +38131,13 @@ def main() -> int:
         test_sta18_validate_selection_resolves_epoch_aliased_alt_dep,
         test_sta18_validate_selection_unversioned_provides_cannot_satisfy_versioned_dep,
         test_audit_dep_closure_invokes_progress_cb_per_pkg,
+        test_highest_stanza_per_pkg_arch_keeps_filename_and_dedups,
+        test_published_closure_ledger_entries_filters_to_closure_and_derives_component,
+        test_repo_state_from_packages_text_resolves_depends,
+        test_audit_closure_ledger_disagree_and_missing_critical,
+        test_audit_closure_ledger_unresolved_dep_critical,
+        test_audit_closure_ledger_entry_not_published_critical,
+        test_audit_closure_ledger_none_no_findings,
         test_audit_conflict_cohort_invokes_progress_cb_per_pkg,
         test_audit_nmu_residue_invokes_progress_cb_per_pkg,
         test_cache_build_wraps_cache_construction_in_spinner,

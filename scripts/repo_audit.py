@@ -611,6 +611,161 @@ def published_ledger(config: 'BuildConfig') -> 'dict[str, list[str]]':
         os.remove(_tp)
 
 
+def highest_stanza_per_pkg_arch(
+    packages_text: str, component: str, arch: str,
+    into: 'Optional[dict]' = None,
+) -> 'dict':
+    """Fold one ``binary-<arch>/Packages`` text into ``{"<pkg>|<arch>": stanza}``
+    keeping the HIGHEST version per package.  Each value is
+    ``{filename, sha256, size, version, component, package, arch}`` (filename
+    is the basename).
+
+    ``arch`` is the DIRECTORY arch (the ``binary-<arch>`` the index lives
+    under), NOT the stanza ``Architecture:`` field — so an ``Architecture: all``
+    package keys under the dir arch, matching ``audit_packages_chain``'s
+    filename index (which keys arch by the same dir).  This keeps the producer
+    (ledger) and validator (recompute) byte-consistent.
+
+    Unlike ``parse_packages_to_ledger`` (versions-only) this RETAINS the
+    Filename/SHA256/Size a closure-ledger download needs.  Pass ``into`` to
+    merge across multiple component/arch Packages files."""
+    import tempfile
+    _acc = into if into is not None else {}
+    apt_pkg.init_system()
+    with tempfile.NamedTemporaryFile('w', suffix='.Packages',
+                                     delete=False) as _fh:
+        _fh.write(packages_text)
+        _tp = _fh.name
+    try:
+        with open(_tp) as _fh:
+            _tf = apt_pkg.TagFile(_fh)
+            for _sec in _tf:
+                _name = (_sec.get('Package') or '').strip()
+                _ver = (_sec.get('Version') or '').strip()
+                _fn = (_sec.get('Filename') or '').strip()
+                if not (_name and _ver and _fn):
+                    continue
+                _key = f"{_name}|{arch}"
+                _prev = _acc.get(_key)
+                if _prev is not None:
+                    try:
+                        if apt_pkg.version_compare(_ver, _prev['version']) <= 0:
+                            continue
+                    except Exception:
+                        continue
+                try:
+                    _size = int((_sec.get('Size') or '0').strip() or 0)
+                except ValueError:
+                    _size = 0
+                _acc[_key] = {
+                    'filename':  os.path.basename(_fn),
+                    'sha256':    (_sec.get('SHA256') or '').strip(),
+                    'size':      _size,
+                    'version':   _ver,
+                    'component': component,
+                    'package':   _name,
+                    'arch':      arch,
+                }
+    finally:
+        os.remove(_tp)
+    return _acc
+
+
+def iter_published_packages_with_component(
+    config: 'BuildConfig',
+) -> 'Iterator[Tuple[str, str, str]]':
+    """Yield ``(component, arch, packages_text)`` for every binary Packages
+    index under the locally-published tree
+    (``dists/<codename>/**/binary-*/Packages``, including the udeb
+    ``debian-installer`` trees).  ``component`` is the path segment(s) between
+    ``<codename>/`` and ``/binary-<arch>/`` (e.g. ``main`` or
+    ``main/debian-installer``); ``arch`` is the ``binary-<arch>`` dir arch.
+
+    Same tree walk as ``local_published_packages_text`` but per-file + with the
+    component/arch tags, for the closure-ledger producer."""
+    _root = os.path.join(config.dir_repo, 'dists', config.build_codename)
+    for _dp, _dirs, _files in os.walk(_root):
+        if 'Packages' not in _files:
+            continue
+        _base = os.path.basename(_dp)
+        if not _base.startswith('binary-'):
+            continue
+        _arch = _base[len('binary-'):]
+        _component = os.path.relpath(os.path.dirname(_dp), _root)
+        try:
+            with open(os.path.join(_dp, 'Packages'),
+                      encoding='utf-8', errors='replace') as _fh:
+                _text = _fh.read()
+        except OSError:
+            continue
+        if _text.strip():
+            yield (_component, _arch, _text)
+
+
+def published_closure_ledger_entries(
+    config: 'BuildConfig', closure_bins: 'set[str]',
+) -> 'dict':
+    """The closure-ledger entries map: walk the locally-published Packages,
+    fold to the highest version per (package, dir-arch), and keep only binaries
+    whose package name is in ``closure_bins``.  Keyed ``"<package>|<arch>"``.
+
+    A closure binary with no local stanza is simply absent (the producer warns;
+    the audit's full-remote re-resolution is the safety net)."""
+    _acc: dict = {}
+    for _component, _arch, _text in iter_published_packages_with_component(
+            config):
+        highest_stanza_per_pkg_arch(_text, _component, _arch, into=_acc)
+    return {_k: _v for _k, _v in _acc.items()
+            if _v.get('package') in closure_bins}
+
+
+def repo_state_from_packages_text(packages_text: str) -> RepoState:
+    """Build a RepoState (packages + provides_index) from raw Packages text —
+    no dpkg-scanpackages / disk scan.  Highest version per name wins (same
+    dedup as ``scan_repo_state``).
+
+    Used by ``audit_closure_ledger`` to re-resolve the published closure over
+    the VERIFIED remote Packages bytes, which carry Depends/Provides (unlike
+    ``audit_packages_chain``'s filename-keyed index)."""
+    import tempfile
+    apt_pkg.init_system()
+    _packages: dict = {}
+    with tempfile.NamedTemporaryFile('w', suffix='.Packages',
+                                     delete=False) as _fh:
+        _fh.write(packages_text)
+        _tp = _fh.name
+    try:
+        with open(_tp) as _fh:
+            _tagfile = apt_pkg.TagFile(_fh)
+            for _section in _tagfile:
+                _pkg = (_section.get('Package') or '').strip()
+                _ver = (_section.get('Version') or '').strip()
+                if not _pkg or not _ver:
+                    continue
+                _prev = _packages.get(_pkg)
+                if _prev is not None:
+                    try:
+                        if apt_pkg.version_compare(
+                                _ver, _prev['Version']) <= 0:
+                            continue
+                    except Exception:
+                        continue
+                _entry = {}
+                for _field in _FIELDS_TO_KEEP:
+                    _val = _section.get(_field)
+                    if _val is not None:
+                        _entry[_field] = str(_val)
+                _packages[_pkg] = _entry
+    finally:
+        os.remove(_tp)
+    return RepoState(
+        packages=_packages,
+        provides_index=_build_provides_index(_packages),
+        packages_file='',
+        repo_mtime=0.0,
+    )
+
+
 def fetch_source_versions_at(config: 'BuildConfig',
                              target_ts: str) -> 'Optional[dict]':
     """Download each mirror's Sources index at `target_ts` and return

@@ -1300,6 +1300,12 @@ def remote_publish(
         import coord.config_manifest as _cfgman
         _config_sha = (_head_dict or {}).get('config_sha256')
         _wrote_config = False
+        # Closure ledger (latest-version-per-binary across base..current) —
+        # owner writes + pins it; a build-mode peer preserves the fetched
+        # head's pin.  Lets peers pull the full closure off a mixed-snapshot
+        # mirror without keying on per-claim snapshots.
+        _ledger_sha = (_head_dict or {}).get('closure_ledger_sha256')
+        _wrote_ledger = False
         if getattr(config, 'build_mode', 'distribution') != 'build':
             # Carry the FULL selection authority (4 lists + the owner's verified
             # selection.state pins/closure) so a peer builds the identical
@@ -1321,6 +1327,33 @@ def remote_publish(
             if _sha:
                 _config_sha = _sha
                 _wrote_config = True
+            # Assemble the closure ledger from the owner's verified selection
+            # closure × the latest published Packages (must run AFTER the
+            # repo auto-index of Step 5c, where we are).  A bad/missing lock
+            # → no closure → no ledger (peers fall back to live claims).
+            _closure_bins = set(
+                ((_sel or {}).get('closure') or {}).get('bins', {}) or {})
+            if _closure_bins:
+                import repo_audit as _repo_audit
+                _entries = _repo_audit.published_closure_ledger_entries(
+                    config, _closure_bins)
+                _have = {_e.get('package') for _e in _entries.values()}
+                _missing = _closure_bins - _have
+                if _missing:
+                    _status(
+                        f"closure ledger: {len(_missing)} closure binary(ies) "
+                        "absent from local Packages — omitted (mirror audit "
+                        "re-resolves the full closure)")
+                _ledger_doc = _schema.new_closure_ledger(
+                    codename=str(getattr(config, 'build_codename', '')),
+                    snapshot=str(_ss.get('current') or ''),
+                    entries=_entries,
+                    generated_at=_utc_now())
+                _lsha = _cfgman.write_closure_ledger(
+                    config.dir_coord, _ledger_doc)
+                if _lsha:
+                    _ledger_sha = _lsha
+                    _wrote_ledger = True
         _new_head = _schema.new_coord_head(
             inrelease_sha256=_ir_sha,
             snapshot=_ss,
@@ -1329,6 +1362,7 @@ def remote_publish(
             neighbours=_neighbours,
             revoked_builders=(_head_dict or {}).get('revoked_builders'),
             config_sha256=_config_sha,
+            closure_ledger_sha256=_ledger_sha,
         )
         _status(f"signing coord-head (last_seqs[{builder_id}]={_seq})")
         _ok = _head.write_coord_head(
@@ -1348,6 +1382,19 @@ def remote_publish(
                 ssh_key=ssh_key)
             if not _ok_cfg:
                 return False, f"push canonical config failed: {_detail_cfg}"
+
+        # Push the closure ledger BEFORE the head (owner only), same reason
+        # as the canonical config — the head's closure_ledger_sha256 must not
+        # point at a not-yet-pushed file.
+        if _wrote_ledger:
+            _status("pushing closure ledger")
+            _ok_lg, _detail_lg = _transport.push_jsonl(
+                local_path=_cfgman.closure_ledger_path(config.dir_coord),
+                remote_spec=(remote_coord_spec.rstrip('/')
+                             + '/config/closure_ledger.json'),
+                ssh_key=ssh_key)
+            if not _ok_lg:
+                return False, f"push closure ledger failed: {_detail_lg}"
 
         # Step 9 — push the new coord-head to the remote
         _status("pushing coord-head to remote")
@@ -1463,6 +1510,11 @@ def revoke_builder(
             head_time=_utc_now(),
             neighbours=_head_dict.get('neighbours') or [],
             revoked_builders=_revoked,
+            # Revocation only changes revoked_builders — preserve the prior
+            # head's content pins so peers don't lose the canonical config /
+            # closure ledger (and fall back unnecessarily) after a revoke.
+            config_sha256=_head_dict.get('config_sha256'),
+            closure_ledger_sha256=_head_dict.get('closure_ledger_sha256'),
         )
         _status(f"signing coord-head (revoking {builder_id_to_revoke})")
         if not _head.write_coord_head(

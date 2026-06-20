@@ -1468,6 +1468,134 @@ def audit_own_claims_on_disk(
     return _findings
 
 
+def audit_closure_ledger(
+    signed_ledger: 'Optional[dict]',
+    pkg_idx: 'dict[str, dict]',
+    closure_bins: 'set[str]',
+    packages_text: str,
+) -> 'list[tuple[str, str, str]]':
+    """Validate the signed closure ledger against the VERIFIED published
+    Packages.  Two CRITICAL checks:
+
+    (a) closure re-resolution — build a RepoState from the verified Packages
+        bytes (which carry Depends, unlike ``pkg_idx``) and re-resolve the
+        distribution closure; any unsatisfiable hard-dep among the closure
+        binaries → ``closure_dep_unresolved``.  The mirror can't satisfy its
+        own closure → broken.
+
+    (b) ledger agreement — recompute the latest-version-per-(pkg,arch) map from
+        the verified ``pkg_idx`` (restricted to closure binaries) and compare
+        it to the on-mirror signed ledger: a closure binary the ledger omits →
+        ``closure_ledger_entry_missing``; a filename/sha/size/version
+        disagreement → ``closure_ledger_disagree``; a ledger entry naming a
+        file absent from the verified index (and at an audited arch) →
+        ``closure_ledger_entry_not_published``.
+
+    ``signed_ledger`` None (an old owner that pinned no ledger) → no findings:
+    the absence is back-compat, not a violation (the puller falls back to the
+    live-claim set).  Pure / no I/O — the caller supplies the verified inputs.
+    """
+    import apt_pkg as _apt_pkg
+    _findings: 'list[tuple[str, str, str]]' = []
+    if signed_ledger is None:
+        return _findings
+    try:
+        _apt_pkg.init_system()
+    except Exception:
+        pass
+
+    # (a) closure re-resolution over the verified Packages bytes
+    import repo_audit as _repo_audit
+    try:
+        _state = _repo_audit.repo_state_from_packages_text(packages_text)
+        _unresolved, _ = _repo_audit.audit_dep_closure(
+            _state, consumer_set=frozenset(closure_bins))
+    except Exception as _e:                                # noqa: BLE001
+        _unresolved = []
+        _findings.append((
+            'WARNING', 'closure_ledger_resolve_skipped',
+            f"could not re-resolve closure over verified Packages: "
+            f"{type(_e).__name__}: {_e}"))
+    for _row in _unresolved:
+        _pkg = _row[0] if _row else '?'
+        _rel = _row[2] if len(_row) > 2 else ''
+        _findings.append((
+            'CRITICAL', 'closure_dep_unresolved',
+            f"{_pkg}: closure hard-dep {_rel!r} is not satisfiable on the "
+            "mirror — published closure is incomplete"))
+
+    # (b) recompute latest-per-(pkg,arch) from the verified index
+    _recomputed: 'dict[str, dict]' = {}
+    for _fn, _pe in pkg_idx.items():
+        _pkg = str(_pe.get('package') or '')
+        if _pkg not in closure_bins:
+            continue
+        _arch = str(_pe.get('arch') or '')
+        _ver = str(_pe.get('version') or '')
+        if not (_pkg and _arch and _ver):
+            continue
+        _key = f"{_pkg}|{_arch}"
+        _prev = _recomputed.get(_key)
+        if _prev is not None:
+            try:
+                if _apt_pkg.version_compare(_ver, _prev['version']) <= 0:
+                    continue
+            except Exception:
+                continue
+        try:
+            _size = int(str(_pe.get('size') or '0') or 0)
+        except ValueError:
+            _size = 0
+        _recomputed[_key] = {
+            'filename':  _fn,
+            'sha256':    str(_pe.get('sha256') or ''),
+            'size':      _size,
+            'version':   _ver,
+            'component': str(_pe.get('component') or 'main'),
+            'package':   _pkg,
+            'arch':      _arch,
+        }
+    _audited_arches = {str(_pv.get('arch') or '') for _pv in pkg_idx.values()}
+    _signed = signed_ledger.get('entries') or {}
+
+    def _norm(_d: dict) -> tuple:
+        try:
+            _s = int(str(_d.get('size') or '0') or 0)
+        except ValueError:
+            _s = 0
+        return (str(_d.get('filename') or ''), str(_d.get('sha256') or ''),
+                _s, str(_d.get('version') or ''))
+
+    for _key, _rec in sorted(_recomputed.items()):
+        _sig = _signed.get(_key)
+        if not isinstance(_sig, dict):
+            _findings.append((
+                'CRITICAL', 'closure_ledger_entry_missing',
+                f"{_key}: published closure binary "
+                f"({_rec['filename']}) is absent from the mirror's closure "
+                "ledger — a peer pull would miss it"))
+            continue
+        if _norm(_sig) != _norm(_rec):
+            _findings.append((
+                'CRITICAL', 'closure_ledger_disagree',
+                f"{_key}: ledger says {_sig.get('filename')} "
+                f"(sha {str(_sig.get('sha256') or '')[:12]}) but verified "
+                f"Packages has {_rec['filename']} "
+                f"(sha {_rec['sha256'][:12]})"))
+    for _key, _sig in sorted(_signed.items()):
+        if _key in _recomputed or not isinstance(_sig, dict):
+            continue
+        _arch = _key.rsplit('|', 1)[-1]
+        if _arch in _audited_arches and str(
+                _sig.get('package') or '') in closure_bins:
+            _findings.append((
+                'CRITICAL', 'closure_ledger_entry_not_published',
+                f"{_key}: ledger names {_sig.get('filename')} but no such "
+                "version is in the verified published Packages — stale or "
+                "tampered ledger"))
+    return _findings
+
+
 def audit_foreign_target_claims(
     by_builder: 'dict[str, list[dict]]',
     our_builder_id: 'Optional[str]',
