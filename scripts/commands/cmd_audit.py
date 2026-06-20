@@ -211,14 +211,35 @@ class AuditCommandsMixin(SessionState):
         # away from gone.
         _stale_orphan: list = []
         _stale_drift: list = []
+        _stale_foreign: list = []
         _stale_malformed: list = []
         if self.flags.dep_check_ready:
-            _stale_orphan, _stale_drift, _stale_malformed, _ = (
-                self._scan_stale_files())
+            (_stale_orphan, _stale_drift, _stale_foreign, _stale_malformed,
+             _) = self._scan_stale_files()
         else:
             console.print(
                 "Repo audit: stale-file gate SKIPPED — run `cache parse` "
                 "to enable (needs selected_srcs)")
+
+        # Foreign cross-toolchains are NON-gating here: they're inert
+        # build by-products (not install targets, don't poison the chroot
+        # the way version-drift does), and a binutils/gcc rebuild produces
+        # fresh ones every time — gating local builds on them would be a
+        # workflow trap.  The HARD gate lives at publish (`mirror audit`
+        # → foreign_target_claim_published).  Surfaced here as a prune
+        # nudge only.
+        def _foreign_note() -> None:
+            if not _stale_foreign:
+                return
+            _fshow = min(5, len(_stale_foreign))
+            console.print(
+                f"\n{len(_stale_foreign)} foreign cross-toolchain "
+                f"by-product(s) in repo/ (binary targets a non-"
+                f"{self.config.arch} arch — never ships; `repo repair "
+                f"cleanup` or `mirror withdraw-foreign` prunes them):",
+                tui.COLOR_WARNING)
+            for _sub, _fn, _src, _sz in _stale_foreign[:_fshow]:
+                console.print(f"  {_sub}/{_fn}  (source: {_src})")
 
         _n_stale = (len(_stale_orphan) + len(_stale_drift)
                     + len(_stale_malformed))
@@ -233,6 +254,7 @@ class AuditCommandsMixin(SessionState):
                 f"build.json↔disk hashes match ({_hash_audit['scanned']} "
                 f"outputs checked), no stale artifacts."
             )
+            _foreign_note()
             return True
         console.print(
             f"Repo audit found install-time risks:\n"
@@ -249,6 +271,7 @@ class AuditCommandsMixin(SessionState):
             f"  STALE artifacts (orphan-source/malformed):   "
             f"{len(_stale_orphan) + len(_stale_malformed)}"
         )
+        _foreign_note()
         if _stale_drift:
             _sshow = min(5, len(_stale_drift))
             console.print(
@@ -718,7 +741,8 @@ class AuditCommandsMixin(SessionState):
         version-drift residue under repo/.  Doesn't delete — the
         operator runs `repo repair cleanup` when they want to act.
         """
-        _orphan, _drift, _malformed, _total = self._scan_stale_files()
+        (_orphan, _drift, _foreign, _malformed,
+         _total) = self._scan_stale_files()
         # Orphaned `.verified` sidecars (binary gone, sha-cache left behind).
         # Non-gating — harmless cruft, NOT a stale-artifact gate risk — but
         # surfaced so the operator knows `repo repair cleanup` has work.
@@ -728,18 +752,21 @@ class AuditCommandsMixin(SessionState):
                 "orphan sidecars",
                 f"{len(_sidecars)} `.verified` with no .deb/.udeb — "
                 f"`repo repair cleanup` sweeps them", ok=True)
-        _n_stale = len(_orphan) + len(_drift)
+        _n_stale = len(_orphan) + len(_drift) + len(_foreign)
         if _n_stale == 0 and not _malformed:
             self._audit_row(f"stale files ({_total} files)",
                             "clean — no orphan-source or drift residue")
             return
         _bytes = (sum(s for *_, s in _orphan)
-                  + sum(s for *_, s in _drift))
+                  + sum(s for *_, s in _drift)
+                  + sum(s for *_, s in _foreign))
         _mal = f", {len(_malformed)} malformed" if _malformed else ""
+        _frn = f", {len(_foreign)} foreign-cross" if _foreign else ""
         self._audit_row(
             f"stale files ({_total} files)",
             f"{_n_stale} stale ({_bytes / 1024 / 1024:.1f} MB) — "
-            f"{len(_orphan)} orphan-source, {len(_drift)} version-drift{_mal}",
+            f"{len(_orphan)} orphan-source, {len(_drift)} version-drift"
+            f"{_frn}{_mal}",
             ok=(_n_stale == 0))
         if _n_stale:
             # Short preview — one line per source for orphans (collapses
@@ -769,6 +796,18 @@ class AuditCommandsMixin(SessionState):
                 if len(_drift) > _show and not verbose:
                     console.print(
                         f"    … (+{len(_drift) - _show} more; "
+                        f"pass `verbose` for full list)"
+                    )
+            if _foreign:
+                _frn_slice = _foreign if verbose else _foreign[:_show]
+                console.print(
+                    f"  First {len(_frn_slice)} foreign cross-toolchain "
+                    f"file(s):")
+                for _sub, _f, _src, _ in _frn_slice:
+                    console.print(f"    {_sub}/{_f} (source: {_src})")
+                if len(_foreign) > _show and not verbose:
+                    console.print(
+                        f"    … (+{len(_foreign) - _show} more; "
                         f"pass `verbose` for full list)"
                     )
             console.print(

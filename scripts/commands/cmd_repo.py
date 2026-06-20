@@ -13,6 +13,7 @@ import re
 import shutil
 
 import apt_pkg
+import arch_filter
 import repo_audit
 import tui
 import utils
@@ -477,7 +478,7 @@ class RepoCommandsMixin(SessionState):
                             _superseded.add(_nm)
         return _superseded - _selected_names
 
-    def _scan_stale_files(self) -> 'tuple[list, list, list, int]':
+    def _scan_stale_files(self) -> 'tuple[list, list, list, list, int]':
         """Walk the build-output components (main, main-udeb, doc, dbgsym,
         tests — `utils._STALE_SCAN_SUBDIRS`; STA-38 added `main-udeb`) for
         .deb/.udeb files that shouldn't be there given the current
@@ -485,13 +486,22 @@ class RepoCommandsMixin(SessionState):
         non-main components are intentionally out of scope (the classifier
         can't predict their filenames — see _STALE_SCAN_SUBDIRS).
 
-        Returns (orphan, drift, malformed, total):
+        Returns (orphan, drift, foreign, malformed, total):
           orphan    — list of (sub, filename, source_name, size) where
                       the file's Source field doesn't name any selected
                       source.  Most common cause: source dropped from
                       the dep tree (e.g. upstream `tasksel` replaced by
                       `athena-tasksel` fork → leaves 222 task-*
                       binaries orphaned).
+          foreign   — list of (sub, filename, source_name, size): a
+                      cross-toolchain by-product whose binary TARGETS a
+                      FOREIGN architecture (binutils-aarch64-linux-gnu,
+                      gcc-12-arm-linux-gnueabihf, the kfreebsd cross
+                      binutils — see arch_filter.is_foreign_target_binary).
+                      Removable even though its source (binutils, gcc-12)
+                      is legitimately selected: these are build leftovers,
+                      not part of the distribution, and were being KEPT by
+                      the production-sibling branch below.
           drift     — list of (sub, filename, source_name, size): a
                       SUPERSEDED artifact that should be pruned.  Two
                       cases, both = "a newer version of this exact
@@ -561,6 +571,7 @@ class RepoCommandsMixin(SessionState):
 
         _orphan: 'list[tuple[str, str, str, int]]' = []
         _drift:  'list[tuple[str, str, str, int]]' = []
+        _foreign: 'list[tuple[str, str, str, int]]' = []
         _malformed: 'list[str]' = []
         _total = 0
 
@@ -658,9 +669,20 @@ class RepoCommandsMixin(SessionState):
                     _drift.append((_sub, _fn, _src_name, _size))   # superseded
                     continue
                 # _fn is the current (highest) version of its group.
+                _file_pkg = _fn.split('_', 1)[0]
+                # A cross-toolchain by-product targeting a FOREIGN arch
+                # (binutils-aarch64-linux-gnu, the kfreebsd cross binutils)
+                # is never part of the distribution — drop it even when
+                # its source (binutils, gcc-12) is selected and even if it
+                # somehow appears in _expected_files.  Checked BEFORE the
+                # _is_expected KEEP and the production-sibling KEEP, which
+                # is the branch that was retaining it.
+                if arch_filter.is_foreign_target_binary(
+                        _file_pkg, self.config.arch):
+                    _foreign.append((_sub, _fn, _src_name, _size))
+                    continue
                 if _is_expected:
                     continue                        # current expected — KEEP
-                _file_pkg = _fn.split('_', 1)[0]
                 if _file_pkg in _superseded:
                     # Upstream binary a selected fork Conflicts/Replaces
                     # (e.g. apt-setup-udeb vs athena-setup-udeb).  Must go —
@@ -676,7 +698,7 @@ class RepoCommandsMixin(SessionState):
                 # that ships in /cdrom/pool but isn't an install target.
                 # KEEP (only its superseded lower versions were pruned above).
 
-        return _orphan, _drift, _malformed, _total
+        return _orphan, _drift, _foreign, _malformed, _total
 
     def _scan_orphaned_sidecars(self) -> 'list[tuple[str, str]]':
         """Find `.verified` sha-cache sidecars whose `.deb`/`.udeb` is gone.
@@ -802,7 +824,8 @@ class RepoCommandsMixin(SessionState):
         # several seconds on a big repo with no other output; spin it.
         _spin = Spinner("Scanning repo/ for obsolete artifacts")
         try:
-            _orphan, _drift, _malformed, _total_files = self._scan_stale_files()
+            (_orphan, _drift, _foreign, _malformed,
+             _total_files) = self._scan_stale_files()
             _sidecar_orphans = self._scan_orphaned_sidecars()
         finally:
             _spin.done()
@@ -821,12 +844,18 @@ class RepoCommandsMixin(SessionState):
                                  if _f in _live_fns})
         _claimed_orphan = sorted({_f for _sub, _f, *_ in _orphan
                                   if _f in _live_fns})
-        _claimed = _claimed_drift + _claimed_orphan
+        # A foreign cross-toolchain with a LIVE claim is owned ownership we
+        # must RETRACT (`mirror withdraw-foreign`), not obsolete/deprecate —
+        # deleting locally without retracting leaves a dangling claim.
+        _claimed_foreign = sorted({_f for _sub, _f, *_ in _foreign
+                                   if _f in _live_fns})
+        _claimed = _claimed_drift + _claimed_orphan + _claimed_foreign
 
         # ------ Report ------
-        _n_obsolete = len(_orphan) + len(_drift)
+        _n_obsolete = len(_orphan) + len(_drift) + len(_foreign)
         _bytes_obsolete = (sum(s for *_, s in _orphan)
-                           + sum(s for *_, s in _drift))
+                           + sum(s for *_, s in _drift)
+                           + sum(s for *_, s in _foreign))
         console.print(
             f"\nScanned {_total_files} .deb/.udeb file(s) under "
             f"{self.config.dir_repo}/{{main,doc,dbgsym,tests}}"
@@ -838,6 +867,10 @@ class RepoCommandsMixin(SessionState):
         console.print(
             f"  version-drift   : {len(_drift)} file(s) "
             f"(source selected but version mismatch)"
+        )
+        console.print(
+            f"  foreign-cross   : {len(_foreign)} file(s) "
+            f"(cross-toolchain targeting a non-{self.config.arch} arch)"
         )
         if _malformed:
             console.print(
@@ -903,6 +936,23 @@ class RepoCommandsMixin(SessionState):
                     f"pass `verbose` for full list)"
                 )
 
+        if _foreign:
+            console.print(
+                "\nForeign cross-toolchain residue (binary targets a "
+                f"non-{self.config.arch} arch; a build by-product, not part "
+                "of the distribution):"
+            )
+            _show = _foreign if _verbose else _foreign[:30]
+            for _sub, _f, _src, _sz in _show:
+                console.print(
+                    f"  {_sub}/{_f}  (source: {_src})"
+                )
+            if len(_foreign) > 30 and not _verbose:
+                console.print(
+                    f"  … (+{len(_foreign) - 30} more; "
+                    f"pass `verbose` for full list)"
+                )
+
         if _claimed:
             _what = []
             if _claimed_drift:
@@ -910,6 +960,10 @@ class RepoCommandsMixin(SessionState):
             if _claimed_orphan:
                 _what.append(
                     f"{len(_claimed_orphan)} dropped-source → deprecated")
+            if _claimed_foreign:
+                _what.append(
+                    f"{len(_claimed_foreign)} foreign-cross → run "
+                    "`mirror withdraw-foreign` to retract (publish won't)")
             console.print(
                 f"\n  ⚠ {len(_claimed)} of these still have a LIVE published "
                 "claim on a mirror — run `mirror publish` FIRST and they "
@@ -994,6 +1048,9 @@ class RepoCommandsMixin(SessionState):
             _bar.step(1)
             _remove_artifact(_sub, _f)
         for _sub, _f, *_ in _drift:
+            _bar.step(1)
+            _remove_artifact(_sub, _f)
+        for _sub, _f, *_ in _foreign:
             _bar.step(1)
             _remove_artifact(_sub, _f)
         # Orphaned `.verified` sidecars — remove directly (the binary they

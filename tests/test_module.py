@@ -9800,7 +9800,8 @@ def test_scan_stale_files_covers_main_udeb_and_recovers_malformed():
 
         with patch.object(repo_audit, 'iter_packages_all_versions',
                           side_effect=_fake_iter):
-            _orphan, _drift, _malformed, _total = _sess._scan_stale_files()
+            (_orphan, _drift, _foreign, _malformed,
+             _total) = _sess._scan_stale_files()
 
         # main-udeb WAS walked → the superseded +asg1u1 is drift.
         assert any('+asg1u1' in _fn for _sub, _fn, *_ in _drift), (
@@ -9872,7 +9873,8 @@ def test_scan_stale_files_prunes_superseded_unselected_sibling():
 
         with patch.object(repo_audit, 'iter_packages_all_versions',
                           side_effect=_fake_iter):
-            _orphan, _drift, _malformed, _total = _sess._scan_stale_files()
+            (_orphan, _drift, _foreign, _malformed,
+             _total) = _sess._scan_stale_files()
 
         _drift_fns = [_fn for _sub, _fn, *_ in _drift]
         assert _old in _drift_fns, (
@@ -19690,7 +19692,7 @@ def test_preflight_repo_audit_blocks_on_stale_artifacts():
             _sess._resolve_live_cohort = lambda: None
             _sess._resolve_installer_cohort = lambda: None
             _sess._scan_stale_files = (
-                lambda _d=_drift: ([], list(_d), [], 1))
+                lambda _d=_drift: ([], list(_d), [], [], 1))
             _prompted.clear()
             _r = _sess._preflight_audit_repo()
             assert _r is _expect, (_drift, _r)
@@ -24772,7 +24774,8 @@ def test_local_cleanup_keeps_highest_prunes_superseded_and_flags_orphan():
         _sess.udeb_dep_tree = None
         repo_audit.invalidate_cache(cfg.dir_repo)
 
-        _orphan, _drift, _malformed, _total = _sess._scan_stale_files()
+        (_orphan, _drift, _foreign, _malformed,
+         _total) = _sess._scan_stale_files()
         _drift_names = {fn for _s, fn, _src, _sz in _drift}
         _orphan_names = {fn for _s, fn, _src, _sz in _orphan}
         assert 'openssl_3.0.15-1_amd64.deb' in _drift_names, (
@@ -36123,6 +36126,226 @@ def test_every_defined_test_is_registered():
     assert not _ghosts, f"registered but not defined: {_ghosts}"
 
 
+# ── ARCH-FILTER: assured foreign-target cross-toolchain gate ──────────
+
+def test_arch_filter_native_and_dev_kept():
+    """The native cross-package (x86-64-linux-gnu → build arch) and plain
+    toolchain / -dev binaries are NOT foreign — must be kept."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import arch_filter as _af
+    for _n in ('binutils-x86-64-linux-gnu',
+               'binutils-x86-64-linux-gnu-dbg',
+               'gcc-12', 'cpp-12', 'libc6-dev'):
+        assert _af.is_foreign_target_binary(_n, 'amd64') is False, _n
+
+
+def test_arch_filter_foreign_dropped():
+    """Cross-toolchains targeting a non-build arch — incl. the kfreebsd /
+    hurd families and the armhf longest-match — are foreign."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import arch_filter as _af
+    for _n in ('binutils-aarch64-linux-gnu',
+               'binutils-x86-64-kfreebsd-gnu-dbg',   # the Issue-2 case
+               'gcc-12-arm-linux-gnueabihf',          # armhf via longest-match
+               'binutils-i686-gnu',                   # hurd-i386 (cpu alias)
+               'g++-multilib-i686-linux-gnu',
+               'libc6-arm64-cross'):                  # -cross bare-arch form
+        assert _af.is_foreign_target_binary(_n, 'amd64') is True, _n
+
+
+def test_arch_filter_no_false_positives():
+    """The historical substring traps (arm/arc) and multilib runtimes
+    (native amd64 binaries with a foreign-ABI name) must be KEPT — a false
+    positive here would break closure."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import arch_filter as _af
+    for _n in ('apparmor', 'build-essential', 'libaom-doc', 'libabsl-dev',
+               'acl-udeb', 'zbar-tools', 'libc6-i386', 'libc6-x32',
+               'lib32gcc-s1', 'libx32gcc-s1'):
+        assert _af.is_foreign_target_binary(_n, 'amd64') is False, _n
+
+
+def test_arch_filter_failsafe_keeps_on_uncertainty():
+    """Empty dpkg map (dpkg absent) or an unparseable name → KEEP; the
+    detector never raises and never drops on uncertainty."""
+    import sys
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import arch_filter as _af
+    with patch.object(_af, '_maps', return_value=({}, set())):
+        assert _af.is_foreign_target_binary(
+            'binutils-aarch64-linux-gnu', 'amd64') is False
+    assert _af.is_foreign_target_binary('', 'amd64') is False
+    assert _af.is_foreign_target_binary('totally-made-up-pkg', 'amd64') is False
+
+
+def test_generate_pending_claims_skips_foreign_target():
+    """Phase-2 claim gate: with build_arch set, a foreign cross-toolchain
+    output is never turned into a pending claim; without it (legacy
+    callers) the filter is disabled."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    from coord import publish as _pub
+    with tempfile.TemporaryDirectory() as _root:
+        _claims = os.path.join(_root, 'claims'); os.makedirs(_claims)
+        _rec = _u.new_build_record(package='binutils',
+                                   intended_version='2.40-2',
+                                   patch_set_hash='')
+        _native = 'binutils-x86-64-linux-gnu_2.40-2_amd64.deb'
+        _foreign = 'binutils-aarch64-linux-gnu_2.40-2_amd64.deb'
+        _rec.update({'phase': 'done', 'status': 'PASS',
+                     'built_version': '2.40-2',
+                     'outputs': [_native, _foreign],
+                     'output_hashes': {_native: 'aa', _foreign: 'bb'}})
+        _u.write_build_record(_root, _rec)
+        _pending = _pub.generate_pending_claims(
+            builder_id='b1', buildlog_dir=_root, claims_dir=_claims,
+            public_key_path='/fake', snapshot_pin='s',
+            read_build_record=_u.read_build_record, build_arch='amd64')
+        assert sorted(c['filename'] for c in _pending) == [_native], _pending
+        _pending2 = _pub.generate_pending_claims(
+            builder_id='b1', buildlog_dir=_root, claims_dir=_claims,
+            public_key_path='/fake', snapshot_pin='s',
+            read_build_record=_u.read_build_record)
+        assert len(_pending2) == 2, _pending2
+
+
+def test_scan_stale_files_buckets_foreign_keeps_native_sibling():
+    """Phase-3 repo gate: a foreign cross-toolchain of a SELECTED source
+    lands in the new `_foreign` bucket (the production-sibling branch was
+    keeping it); the native cross sibling is KEPT."""
+    import sys
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    from build import BuildSession
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, cfg.error_str
+        _md = cfg.dir_repo_main
+        os.makedirs(_md, exist_ok=True)
+        _foreign = 'binutils-aarch64-linux-gnu_2.40-2_amd64.deb'
+        _native = 'binutils-x86-64-linux-gnu_2.40-2_amd64.deb'
+        for _f in (_foreign, _native):
+            open(os.path.join(_md, _f), 'w').close()
+
+        class _Tree:
+            def __init__(self):
+                # binutils source IS selected; predicted target is the
+                # plain `binutils` binary.  Both crosses are siblings.
+                self.selected_srcs = {'binutils': object()}
+                self.src_pkg_files = {
+                    'binutils': ['binutils_2.40-2_amd64.deb']}
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = cfg
+        _sess.dep_tree = _Tree()
+        _sess.udeb_dep_tree = _Tree()
+        _sess._superseded_binary_names = lambda: set()
+
+        def _fake_iter(config, subdir, refresh=False):
+            if subdir == 'main':
+                for _fn in (_foreign, _native):
+                    yield (_fn, {
+                        'Package': _fn.split('_', 1)[0], 'Source': 'binutils',
+                        'Version': '2.40-2',
+                        'Filename': f'pool/{_fn}', 'Size': '100'})
+            return
+
+        with patch.object(repo_audit, 'iter_packages_all_versions',
+                          side_effect=_fake_iter):
+            (_orphan, _drift, _foreign_b, _malformed,
+             _total) = _sess._scan_stale_files()
+
+        _foreign_fns = [_fn for _sub, _fn, *_ in _foreign_b]
+        _orphan_fns = [_fn for _sub, _fn, *_ in _orphan]
+        _drift_fns = [_fn for _sub, _fn, *_ in _drift]
+        assert _foreign in _foreign_fns, f"foreign not bucketed: {_foreign_fns}"
+        assert _native not in _foreign_fns, f"native bucketed: {_foreign_fns}"
+        assert _native not in _orphan_fns and _native not in _drift_fns, (
+            f"native sibling must be KEPT: orphan={_orphan_fns} "
+            f"drift={_drift_fns}")
+
+
+def test_audit_foreign_target_claims_flags_owned_published():
+    """Phase-4 assurance gate: a file WE own + publish whose binary is
+    foreign-target → CRITICAL; a peer's claim or a missing build_arch is a
+    no-op."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    _foreign = 'binutils-aarch64-linux-gnu_2.40-2_amd64.deb'
+    _native = 'binutils-x86-64-linux-gnu_2.40-2_amd64.deb'
+
+    def _claim(fn, seq):
+        return {'v': 1, 'builder': 'alice', 'seq': seq, 'package': 'binutils',
+                'intended_version': '2.40-2', 'built_version': '2.40-2',
+                'filename': fn, 'sha256': 'a' * 64, 'size': 1,
+                'snapshot': 'S', 'built_at': 'T',
+                'claim_state': 'published', 'republished_from': None}
+    by_builder = {'alice': [_claim(_foreign, 1), _claim(_native, 2)]}
+    _f = _mirror.audit_foreign_target_claims(by_builder, 'alice', 'amd64')
+    assert [k for _, k, _ in _f] == ['foreign_target_claim_published'], _f
+    assert [m.split(':', 1)[0] for _, _, m in _f] == [_foreign], _f
+    # not ours → nothing
+    assert _mirror.audit_foreign_target_claims(by_builder, 'bob', 'amd64') == []
+    # no build_arch → no-op
+    assert _mirror.audit_foreign_target_claims(by_builder, 'alice', None) == []
+
+
+def test_retract_claim_by_filename_targets_single_file():
+    """Phase-5 primitive: retract ONE foreign filename while the source's
+    native sibling claim survives; idempotent on re-run."""
+    if not _openssl_available():
+        return
+    _s, _i, _st, _p, _h, _r, _t, _pub_mod = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _id_dir = os.path.join(_td, 'identity')
+        _claims_dir = os.path.join(_td, 'claims')
+        os.makedirs(_id_dir)
+        _priv, _pub = _i.generate_keypair(_id_dir, 'alice')
+
+        class _FakeConfig:
+            dir_coord = _td
+            dir_coord_identity = _id_dir
+            dir_coord_claims = _claims_dir
+        _cfg = _FakeConfig()
+        _foreign = 'binutils-aarch64-linux-gnu_2.40-2_amd64.deb'
+        _native = 'binutils-x86-64-linux-gnu_2.40-2_amd64.deb'
+        for _seq, _fn in ((1, _foreign), (2, _native)):
+            _claim = _s.new_claim(
+                builder='alice', seq=_seq, package='binutils',
+                intended_version='2.40-2', built_version='2.40-2',
+                filename=_fn, sha256='a' * 64, size=1,
+                snapshot='S', built_at='T',
+                claim_state=_s.CLAIM_STATE_PUBLISHED)
+            _st.append_claim(_claims_dir, 'alice', _claim, _priv)
+        _ok, _detail = _pub_mod.retract_claim_by_filename(
+            builder_id='alice', config=_cfg,
+            private_key_path=_priv, public_key_path=_pub, filename=_foreign)
+        assert _ok, _detail
+        _claims = _st.read_builder_claims(_claims_dir, 'alice', _pub)
+        _owners = _st.project_owners({'alice': _claims})
+        assert _foreign not in _owners, f"foreign not retracted: {_owners}"
+        assert _native in _owners, f"native sibling lost: {_owners}"
+        # idempotent — no live claim for the filename on a second pass
+        _ok2, _ = _pub_mod.retract_claim_by_filename(
+            builder_id='alice', config=_cfg,
+            private_key_path=_priv, public_key_path=_pub, filename=_foreign)
+        assert not _ok2
+
+
 def main() -> int:
     tests = [
         # v0.2 step 1
@@ -37421,6 +37644,15 @@ def main() -> int:
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
         test_repo_dispatcher_advertises_merged_package_actions,
         test_fork_mirror_arch_any_filename_uses_build_arch,
+        # ARCH-FILTER — assured foreign-target cross-toolchain gate
+        test_arch_filter_native_and_dev_kept,
+        test_arch_filter_foreign_dropped,
+        test_arch_filter_no_false_positives,
+        test_arch_filter_failsafe_keeps_on_uncertainty,
+        test_generate_pending_claims_skips_foreign_target,
+        test_scan_stale_files_buckets_foreign_keeps_native_sibling,
+        test_audit_foreign_target_claims_flags_owned_published,
+        test_retract_claim_by_filename_targets_single_file,
     ]
     failures = 0
     for t in tests:

@@ -65,6 +65,8 @@ class MirrorCommandsMixin(SessionState):
             return self.cmd_mirror_pull(*args)
         if action == 'reclaim':
             return self.cmd_mirror_reclaim(*args)
+        if action == 'withdraw-foreign':
+            return self.cmd_mirror_withdraw_foreign(*args)
         if action == 'audit':
             return self.cmd_mirror_audit(*args)
         if action == 'query':
@@ -99,6 +101,10 @@ class MirrorCommandsMixin(SessionState):
                                            'SAME filename with the local rebuild '
                                            '(sanctioned filename-immutability '
                                            'exception; no target = list candidates)',
+            'withdraw-foreign [<name>] [--execute]':
+                                           'retract + prune OUR published '
+                                           'foreign-target cross-toolchain '
+                                           'binaries (dry-run without --execute)',
             'audit [<name>]':              'federation consistency, claim sigs, '
                                            'hash conflicts, cross-mirror pool drift',
             'query <pkg> [<name>]':        'show claims matching <pkg> from '
@@ -1767,6 +1773,161 @@ class MirrorCommandsMixin(SessionState):
             _all_ok = bool(_r) and _all_ok
         return _all_ok
 
+    def cmd_mirror_withdraw_foreign(self, *args):
+        """mirror withdraw-foreign [<name>] [--execute]
+
+        Retract + prune every PUBLISHED claim WE own whose binary targets
+        a FOREIGN architecture — the cross-toolchain by-products
+        (binutils-aarch64-linux-gnu, the kfreebsd cross binutils,
+        gcc-12-arm-linux-gnueabihf) a selected source (binutils, gcc-12)
+        emits but that are NEVER part of the distribution.  This is the
+        backfill that clears the historical `own_claim_disk_sha_mismatch`
+        / `foreign_target_claim_published` findings; new builds no longer
+        produce these claims (the claim-generation + repo gates).
+
+        DRY-RUN by default: lists the foreign-target claims per mirror.
+        `--execute` (or `force`): per file, append a signed filename-keyed
+        retraction, delete the local .deb, then run `mirror publish
+        --no-iso` so the tombstones propagate and the auto-re-index drops
+        the binaries from the mirror's Packages.  Idempotent — an
+        already-retracted file is skipped.
+
+        The source's build record is left untouched: binutils / gcc-12
+        stay selected and keep publishing their NATIVE binaries; the
+        claim-generation filter simply never re-claims the foreign ones.
+        """
+        import mirror as _mirror
+        import signing
+        import arch_filter
+        import coord.publish as _publish
+        import coord.head as _head_mod
+        import coord.identity as _id
+        import coord.store as _store
+        import coord.transport as _transport
+        _keys = self._coord_self_keys()
+        if _keys is None:
+            return False
+        _bid, _priv, _pub = _keys
+        _execute = '--execute' in args or 'force' in args
+        _pos = [_a for _a in args
+                if _a not in ('--execute', 'force', '--no-iso', 'no-iso')]
+        _mirror_name = _pos[0] if _pos else None
+        if _mirror_name is not None:
+            if _mirror.read_mirror_state(self.config, _mirror_name) is None:
+                console.print(
+                    "mirror withdraw-foreign: unknown mirror "
+                    f"{_mirror_name!r}", tui.COLOR_ERROR)
+                return False
+            _names = [_mirror_name]
+        else:
+            _names = _mirror.list_mirrors(self.config)
+        if not _names:
+            console.print(
+                "mirror withdraw-foreign: no mirrors configured "
+                "(use `mirror add`)", tui.COLOR_WARNING)
+            return False
+        _build_arch = getattr(self.config, 'arch', None)
+        if not _build_arch:
+            console.print(
+                "mirror withdraw-foreign: no build ARCH configured — "
+                "cannot determine foreign targets.", tui.COLOR_ERROR)
+            return False
+        _signing_home = signing.signing_home(self.config)
+        _all_ok = True
+        for _n in _names:
+            _st = _mirror.read_mirror_state(self.config, _n)
+            assert _st is not None
+            _url = _st.get('url', '')
+            _ssh_key = _st.get('ssh_key') or None
+            _coord_url = _mirror.coord_root_for(_url)
+            _coord_spec, _ = _mirror.rsync_spec_for_url(_coord_url)
+            console.print(
+                f"mirror withdraw-foreign {_n}: ← {_url}",
+                tui.COLOR_HIGHLIGHT)
+            _fetched = os.path.join(
+                self.config.dir_cache, 'mirror', _n, 'fetched')
+            os.makedirs(_fetched, exist_ok=True)
+            _ok, _detail = _transport.pull_remote_coord(
+                local_dest=_fetched, remote_spec=_coord_spec,
+                ssh_key=_ssh_key)
+            if not _ok:
+                console.print(
+                    f"  pull coord tree failed: {_detail}", tui.COLOR_ERROR)
+                _all_ok = False
+                continue
+            _head = _head_mod.read_coord_head(_fetched, _signing_home)
+            if _head is None:
+                console.print(
+                    "  coord-head verify failed or absent — refusing to "
+                    "trust the fetched tree.", tui.COLOR_ERROR)
+                _all_ok = False
+                continue
+            _keyring = _id.load_keyring(
+                os.path.join(_fetched, 'keyring', 'builders'))
+            _by_builder = _store.read_all_claims(
+                os.path.join(_fetched, 'claims'), _keyring,
+                _head.get('revoked_builders') or {})
+            _owners = _store.project_owners(_by_builder)
+            _foreign = sorted(
+                _fn for _fn, _rec in _owners.items()
+                if _rec.get('builder') == _bid
+                and arch_filter.is_foreign_target_binary(
+                    _fn.split('_', 1)[0], _build_arch))
+            if not _foreign:
+                console.print(
+                    "  no owned foreign-target claims — nothing to withdraw.")
+                continue
+            console.print(
+                f"  {len(_foreign)} owned foreign-target claim(s) "
+                f"(cross-toolchains targeting non-{_build_arch}):",
+                tui.COLOR_WARNING)
+            for _fn in _foreign:
+                console.print(f"    {_fn}")
+            if not _execute:
+                console.print(
+                    "  DRY-RUN — no files were deleted, no claims retracted.  "
+                    "Re-run with `--execute` to retract + prune.",
+                    tui.COLOR_INFO)
+                continue
+            # EXECUTE — retract each filename, delete the local .deb.
+            _retracted = 0
+            for _fn in _foreign:
+                _ok_r, _detail_r = _publish.retract_claim_by_filename(
+                    builder_id=_bid, config=self.config,
+                    private_key_path=_priv, public_key_path=_pub,
+                    filename=_fn)
+                if _ok_r:
+                    _retracted += 1
+                else:
+                    console.print(
+                        f"    skip {_fn}: {_detail_r}", tui.COLOR_INFO)
+                # drop the local pool file (+ its .verified sidecar) so the
+                # auto-re-index in publish removes it from Packages.
+                for _d in self.config.all_deb_dirs():
+                    _p = os.path.join(_d, _fn)
+                    if os.path.isfile(_p):
+                        try:
+                            os.remove(_p)
+                        except OSError as _e:
+                            console.print(
+                                f"    WARNING: cannot remove {_p}: {_e}",
+                                tui.COLOR_WARNING)
+                        try:
+                            os.remove(_p + '.verified')
+                        except OSError:
+                            pass
+                        break
+            console.print(
+                f"  retracted {_retracted}/{len(_foreign)} claim(s); "
+                "publishing to propagate tombstones + re-index…",
+                tui.COLOR_HIGHLIGHT)
+            # Incremental publish (like reclaim/hotfix) — never rebuilds
+            # ISOs; pushes the jsonl (now carrying the retractions) and
+            # auto-re-indexes the just-changed pool.
+            _r = self.cmd_mirror_publish(_n, '--no-iso')
+            _all_ok = bool(_r) and _all_ok
+        return _all_ok
+
     def _mirror_remote_has_coord_head(
         self, mirror_name: str, state: dict,
     ) -> bool:
@@ -2194,6 +2355,17 @@ class MirrorCommandsMixin(SessionState):
                           else tui.COLOR_WARNING)
                 _print_audit_finding(_sev, _kind, _msg, _color)
             if _own_disk_crit:
+                _all_ok = False
+            # Foreign cross-toolchain assurance — any file we own+publish
+            # whose binary targets a non-build arch is a by-product that
+            # must never ship (the Issue-2 kfreebsd binutils case).  Phases
+            # at claim/repo level prevent new ones; this catches historical
+            # leaks.  Remedy: `mirror withdraw-foreign`.
+            _foreign_findings = _mirror.audit_foreign_target_claims(
+                _by_builder, _our_bid, self.config.arch)
+            for _sev, _kind, _msg in _foreign_findings:
+                _print_audit_finding(_sev, _kind, _msg, tui.COLOR_ERROR)
+            if _foreign_findings:
                 _all_ok = False
             # coherence: the signed selection.state ⟷ our published
             # claims.  CRITICAL when we still own+publish a file whose SOURCE
