@@ -702,21 +702,28 @@ def iter_published_packages_with_component(
             yield (_component, _arch, _text)
 
 
-def published_closure_ledger_entries(
-    config: 'BuildConfig', closure_bins: 'set[str]',
-) -> 'dict':
-    """The closure-ledger entries map: walk the locally-published Packages,
-    fold to the highest version per (package, dir-arch), and keep only binaries
-    whose package name is in ``closure_bins``.  Keyed ``"<package>|<arch>"``.
+def published_ledger_entries(config: 'BuildConfig') -> 'dict':
+    """The published-ledger entries map: walk the locally-published Packages,
+    fold to the highest version per (package, dir-arch), and return EVERY
+    published binary — the FULL distribution set, NOT just the install closure.
+    Keyed ``"<package>|<arch>"``.
 
-    A closure binary with no local stanza is simply absent (the producer warns;
-    the audit's full-remote re-resolution is the safety net)."""
+    A federation peer drives its ``mirror pull`` off this, so it must cover the
+    complete published set (including legitimately out-of-closure
+    ``-dev``/``-doc``/``-udeb`` binaries) — limiting it to the closure strands
+    those and makes a peer non-conformant (and ``virtual build`` false-conflict
+    on every un-adopted file).  The ONLY exclusion is the ARCH filter: foreign
+    cross-toolchain by-products (already kept out of the pool at claim time;
+    re-applied defensively here).  Latest version per (pkg, arch)."""
+    import arch_filter
     _acc: dict = {}
     for _component, _arch, _text in iter_published_packages_with_component(
             config):
         highest_stanza_per_pkg_arch(_text, _component, _arch, into=_acc)
+    _build_arch = getattr(config, 'arch', None)
     return {_k: _v for _k, _v in _acc.items()
-            if _v.get('package') in closure_bins}
+            if not (_build_arch and arch_filter.is_foreign_target_binary(
+                str(_v.get('package') or ''), _build_arch))}
 
 
 def repo_state_from_packages_text(packages_text: str) -> RepoState:

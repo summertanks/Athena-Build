@@ -1484,11 +1484,11 @@ def audit_closure_ledger(
         own closure → broken.
 
     (b) ledger agreement — recompute the latest-version-per-(pkg,arch) map from
-        the verified ``pkg_idx`` (restricted to closure binaries) and compare
-        it to the on-mirror signed ledger: a closure binary the ledger omits →
-        ``closure_ledger_entry_missing``; a filename/sha/size/version
-        disagreement → ``closure_ledger_disagree``; a ledger entry naming a
-        file absent from the verified index (and at an audited arch) →
+        the verified ``pkg_idx`` (the FULL published set, not closure-limited)
+        and compare it to the on-mirror signed ledger: a published binary the
+        ledger omits → ``closure_ledger_entry_missing``; a filename/sha/size/
+        version disagreement → ``closure_ledger_disagree``; a ledger entry
+        naming a file absent from the verified index (at an audited arch) →
         ``closure_ledger_entry_not_published``.
 
     ``signed_ledger`` None (an old owner that pinned no ledger) → no findings:
@@ -1524,12 +1524,11 @@ def audit_closure_ledger(
             f"{_pkg}: closure hard-dep {_rel!r} is not satisfiable on the "
             "mirror — published closure is incomplete"))
 
-    # (b) recompute latest-per-(pkg,arch) from the verified index
+    # (b) recompute latest-per-(pkg,arch) over the FULL verified index — the
+    # ledger is the full published set, not the install closure.
     _recomputed: 'dict[str, dict]' = {}
     for _fn, _pe in pkg_idx.items():
         _pkg = str(_pe.get('package') or '')
-        if _pkg not in closure_bins:
-            continue
         _arch = str(_pe.get('arch') or '')
         _ver = str(_pe.get('version') or '')
         if not (_pkg and _arch and _ver):
@@ -1571,8 +1570,8 @@ def audit_closure_ledger(
         if not isinstance(_sig, dict):
             _findings.append((
                 'CRITICAL', 'closure_ledger_entry_missing',
-                f"{_key}: published closure binary "
-                f"({_rec['filename']}) is absent from the mirror's closure "
+                f"{_key}: published binary "
+                f"({_rec['filename']}) is absent from the mirror's published "
                 "ledger — a peer pull would miss it"))
             continue
         if _norm(_sig) != _norm(_rec):
@@ -1586,8 +1585,7 @@ def audit_closure_ledger(
         if _key in _recomputed or not isinstance(_sig, dict):
             continue
         _arch = _key.rsplit('|', 1)[-1]
-        if _arch in _audited_arches and str(
-                _sig.get('package') or '') in closure_bins:
+        if _arch in _audited_arches:
             _findings.append((
                 'CRITICAL', 'closure_ledger_entry_not_published',
                 f"{_key}: ledger names {_sig.get('filename')} but no such "
