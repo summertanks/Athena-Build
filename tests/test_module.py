@@ -18188,10 +18188,12 @@ def test_highest_stanza_per_pkg_arch_keeps_filename_and_dedups():
     assert set(_m) == {'liba|amd64', 'libdata|amd64', 'liba|arm64'}
 
 
-def test_published_closure_ledger_entries_filters_to_closure_and_derives_component():
-    """published_closure_ledger_entries walks dists/<codename>/**/binary-*/
-    Packages, derives the component from the path, and keeps only closure
-    binaries (latest version per (pkg,arch))."""
+def test_published_ledger_entries_returns_full_set_arch_filtered():
+    """published_ledger_entries walks dists/<codename>/**/binary-*/Packages,
+    derives component from path, and returns the FULL published set (latest
+    per pkg|arch) — NOT closure-limited (so out-of-closure -dev/-udeb are
+    INCLUDED) — with foreign cross-toolchains the ONLY exclusion (arch filter).
+    """
     import sys
     import types
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -18207,24 +18209,34 @@ def test_published_closure_ledger_entries_filters_to_closure_and_derives_compone
                 "Package: liba\nVersion: 1.0\nArchitecture: amd64\n"
                 "Filename: pool/main/liba_1.0_amd64.deb\n"
                 f"SHA256: {'a' * 64}\nSize: 100\n\n"
-                # a non-closure binary that must be filtered out
-                "Package: libextra\nVersion: 1.0\nArchitecture: amd64\n"
-                "Filename: pool/main/libextra_1.0_amd64.deb\n"
-                f"SHA256: {'f' * 64}\nSize: 10\n\n")
+                # out-of-closure -dev: MUST be included now (full set)
+                "Package: libextra-dev\nVersion: 1.0\nArchitecture: amd64\n"
+                "Filename: pool/main/libextra-dev_1.0_amd64.deb\n"
+                f"SHA256: {'f' * 64}\nSize: 10\n\n"
+                # foreign cross-toolchain: MUST be excluded (arch filter)
+                "Package: binutils-aarch64-linux-gnu\nVersion: 2.40\n"
+                "Architecture: amd64\n"
+                "Filename: pool/main/binutils-aarch64-linux-gnu_2.40"
+                "_amd64.deb\n"
+                f"SHA256: {'c' * 64}\nSize: 200\n\n")
         with open(os.path.join(_udeb, 'Packages'), 'w') as _f:
             _f.write(
                 "Package: cdrom-detect\nVersion: 1.5\nArchitecture: amd64\n"
                 "Filename: pool/main/cdrom-detect_1.5_amd64.udeb\n"
                 f"SHA256: {'b' * 64}\nSize: 50\n\n")
         _cfg = types.SimpleNamespace(
-            dir_repo=_td, build_codename='thor')
-        _entries = repo_audit.published_closure_ledger_entries(
-            _cfg, {'liba', 'cdrom-detect'})
-        assert set(_entries) == {'liba|amd64', 'cdrom-detect|amd64'}
-        assert _entries['liba|amd64']['component'] == 'main'
+            dir_repo=_td, build_codename='thor', arch='amd64')
+        _entries = repo_audit.published_ledger_entries(_cfg)
+        # FULL set: closure AND out-of-closure -dev/-udeb all present
+        assert 'liba|amd64' in _entries
+        assert 'libextra-dev|amd64' in _entries, \
+            "out-of-closure -dev must be INCLUDED (full set, not closure)"
+        assert 'cdrom-detect|amd64' in _entries
         assert _entries['cdrom-detect|amd64']['component'] == \
             'main/debian-installer'
-        assert 'libextra|amd64' not in _entries   # non-closure filtered out
+        # arch filter: foreign cross-toolchain excluded
+        assert 'binutils-aarch64-linux-gnu|amd64' not in _entries, \
+            "foreign-arch cross-toolchain must be excluded"
 
 
 def test_repo_state_from_packages_text_resolves_depends():
@@ -38304,7 +38316,7 @@ def main() -> int:
         test_sta18_validate_selection_unversioned_provides_cannot_satisfy_versioned_dep,
         test_audit_dep_closure_invokes_progress_cb_per_pkg,
         test_highest_stanza_per_pkg_arch_keeps_filename_and_dedups,
-        test_published_closure_ledger_entries_filters_to_closure_and_derives_component,
+        test_published_ledger_entries_returns_full_set_arch_filtered,
         test_repo_state_from_packages_text_resolves_depends,
         test_audit_closure_ledger_disagree_and_missing_critical,
         test_audit_closure_ledger_unresolved_dep_critical,

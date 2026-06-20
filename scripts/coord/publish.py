@@ -1327,23 +1327,18 @@ def remote_publish(
             if _sha:
                 _config_sha = _sha
                 _wrote_config = True
-            # Assemble the closure ledger from the owner's verified selection
-            # closure × the latest published Packages (must run AFTER the
-            # repo auto-index of Step 5c, where we are).  A bad/missing lock
-            # → no closure → no ledger (peers fall back to live claims).
-            _closure_bins = set(
-                ((_sel or {}).get('closure') or {}).get('bins', {}) or {})
-            if _closure_bins:
-                import repo_audit as _repo_audit
-                _entries = _repo_audit.published_closure_ledger_entries(
-                    config, _closure_bins)
-                _have = {_e.get('package') for _e in _entries.values()}
-                _missing = _closure_bins - _have
-                if _missing:
-                    _status(
-                        f"closure ledger: {len(_missing)} closure binary(ies) "
-                        "absent from local Packages — omitted (mirror audit "
-                        "re-resolves the full closure)")
+            # Assemble the published ledger = the FULL published binary set
+            # (latest version per pkg|arch, foreign-arch excluded), NOT just the
+            # install closure — a peer adopts the complete set across
+            # base..current, stays conformant, and `virtual build` sees no
+            # phantom conflicts.  Must run AFTER the Step 5c repo auto-index.
+            import repo_audit as _repo_audit
+            try:
+                _entries = _repo_audit.published_ledger_entries(config)
+            except Exception:                              # noqa: BLE001
+                _entries = {}     # robust — never abort publish over the ledger
+            if _entries:
+                _status(f"published ledger: {len(_entries)} binary(ies)")
                 _ledger_doc = _schema.new_closure_ledger(
                     codename=str(getattr(config, 'build_codename', '')),
                     snapshot=str(_ss.get('current') or ''),
