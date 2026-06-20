@@ -1485,6 +1485,11 @@ class MirrorCommandsMixin(SessionState):
                       else None)
             if _adopt:
                 utils.write_snapshot_state(self.config, current=_adopt)
+                # Keep build.conf's [Snapshot] Timestamp mirror honest NOW,
+                # same as `snapshot select` — don't defer to the next startup's
+                # reconcile (which would surface as a surprise build.conf
+                # rewrite on a later unrelated run).
+                utils.reconcile_snapshot_pin(self.config)
                 self.flags.cache_ready = False
                 self.flags.dep_check_ready = False
                 console.print(

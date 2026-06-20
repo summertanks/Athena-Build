@@ -25568,6 +25568,10 @@ def test_snapshot_select_interactive_sets_chosen_current():
         class _Cfg:
             dir_config = _cfg_dir
             snapshot_enabled = True
+            # reconcile_snapshot_pin (now called by _set_snapshot_pin) reads
+            # these; an absent build.conf path makes it a graceful no-op here.
+            snapshot_timestamp_config = '20260514T083402Z'
+            config_path = os.path.join(_cfg_dir, 'build.conf')
 
         _sess.config = _Cfg()
         _sess._snapshot_current = lambda: '20260514T083402Z'
@@ -25596,6 +25600,61 @@ def test_snapshot_select_interactive_sets_chosen_current():
             cmd_snapshot.Prompt, build.console.print = _sp, _sc
         assert utils.read_snapshot_state(_sess.config)['current'] == \
             '20260518T000000Z', "picker must set the chosen ts as current"
+
+
+def test_snapshot_select_syncs_build_conf_at_command_time():
+    """`snapshot select` must reconcile build.conf [Snapshot] Timestamp to the
+    new pin AT COMMAND TIME — not defer it to the next startup's reconcile
+    (which surprises the operator with a build.conf rewrite on a later,
+    unrelated run)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from commands import cmd_snapshot
+    import utils
+    from build import BuildSession, BuildFlags
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _conf = os.path.join(_cfg_dir, 'build.conf')
+        with open(_conf, 'w') as _f:
+            _f.write("[Snapshot]\nTimestamp = 20260602T173733Z\n"
+                     "Enabled = true\n")
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.flags = BuildFlags()
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            snapshot_enabled = True
+            snapshot_timestamp_config = '20260602T173733Z'
+            config_path = _conf
+
+        _sess.config = _Cfg()
+        _sess._snapshot_current = lambda: '20260602T173733Z'
+        _sess._update_build_pending = lambda: False
+
+        class _Yes:
+            def __init__(self, *a, **k):
+                pass
+
+            def get_response(self):
+                return 'y'
+
+        _sp, _sc = cmd_snapshot.Prompt, build.console.print
+        cmd_snapshot.Prompt = _Yes
+        build.console.print = lambda *a, **k: None
+        try:
+            _ok = _sess._set_snapshot_pin('20260620T203514Z')
+        finally:
+            cmd_snapshot.Prompt, build.console.print = _sp, _sc
+        assert _ok is True
+        assert utils.read_snapshot_state(_sess.config)['current'] == \
+            '20260620T203514Z'
+        # build.conf SYNCED now, not on the next run.
+        with open(_conf) as _f:
+            _body = _f.read()
+        assert 'Timestamp = 20260620T203514Z' in _body, _body
+        assert '20260602T173733Z' not in _body, \
+            'stale TS must be gone from build.conf at command time'
 
 
 def test_snapshot_select_current_is_forward_only():
@@ -37905,6 +37964,7 @@ def main() -> int:
         test_snapshot_base_subcommand_fully_removed,
         test_list_snapshots_between_filters_range_and_unions_keys,
         test_snapshot_select_interactive_sets_chosen_current,
+        test_snapshot_select_syncs_build_conf_at_command_time,
         test_snapshot_select_current_is_forward_only,
         test_snapshot_select_force_accepts_backtrack,
         test_snapshot_select_force_cancels_on_empty_or_no,
