@@ -434,7 +434,34 @@ class VirtualCommandsMixin(SessionState):
         except (AttributeError, OSError):
             _our_bid = 'athena-virtual'
         _snapshot = self._snapshot_current() or 'T'
+        # Filenames this builder ADOPTED from a peer — the real publish
+        # never re-claims them (generate_pending_claims skips pulled_from
+        # / deprecated / retracted records), so the dry-run must skip them
+        # too or it false-conflicts a placeholder SHA against the owner's
+        # real SHA on every adopted file.  Source of truth = the same
+        # build.json records the real publish walks.
+        _adopted_fns: 'set[str]' = set()
+        _buildlog = os.path.join(self.config.dir_log, 'build')
+        try:
+            for _entry in os.listdir(_buildlog):
+                if not _entry.endswith('.build.json'):
+                    continue
+                _rec = utils.read_build_record(
+                    _buildlog, _entry[:-len('.build.json')])
+                if _rec is None:
+                    continue
+                if (_rec.get('pulled_from')
+                        or _rec.get('selection') in ('deprecated', 'retracted')):
+                    for _ofn in (_rec.get('outputs') or []):
+                        _adopted_fns.add(str(_ofn))
+        except OSError:
+            pass
         console.print("\nvirtual publish dry-run:", tui.COLOR_HIGHLIGHT)
+        if _adopted_fns:
+            console.print(
+                f"  {len(_adopted_fns)} adopted (pulled_from) file(s) "
+                "excluded — a real publish would not re-claim them",
+                tui.COLOR_INFO)
         if not _remote_by_builder:
             console.print(
                 "  WARNING  no cached remote state — run `mirror pull` "
@@ -444,6 +471,7 @@ class VirtualCommandsMixin(SessionState):
         _merged, _pub_findings = _vb.virtual_publish_dry_run(
             _records, our_builder_id=_our_bid, snapshot=_snapshot,
             remote_by_builder=(_remote_by_builder or None),
+            local_adopted_fns=_adopted_fns,
         )
         _pub_crit = [_t for _t in _pub_findings if _t[0] == 'CRITICAL']
         if not _pub_findings:
