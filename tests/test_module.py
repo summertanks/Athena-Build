@@ -15934,6 +15934,113 @@ def test_v2_wrap_helpers_round_trip():
     assert wrap.total_display_rows(buf, 80) == 1 + 2 + 1
 
 
+def test_dispatcher_tick_reads_key_and_drains_events():
+    """The UI loop's _tick reads a key via the Renderer (sole curses owner —
+    no input-pump thread) AND drains queued worker events in one iteration."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.dispatcher import Dispatcher
+    from tui.events import PrintEvent
+
+    _keys = ['Z']
+
+    class _R:
+        def __init__(self):
+            self.renders = 0
+        def render(self, state):
+            self.renders += 1
+        def width(self):
+            return 80
+        def content_rows(self):
+            return 20
+        def begin_input(self):
+            pass
+        def read_key(self, ms):
+            return _keys.pop(0) if _keys else None
+        def drain_keys(self):
+            return []
+
+    d = Dispatcher(_R())
+    _seen: list = []
+    d._on_key = lambda k: _seen.append(k)      # spy — gate-independent
+    d.post(PrintEvent('hello world'))
+    d._tick()
+    assert _seen == ['Z'], _seen                # key was read + dispatched
+    con = d.state.tabs['console']
+    assert any('hello world' in _t for _t, _ in con.buffer), con.buffer
+
+
+def test_dispatcher_cancel_pending_futures_unblocks_callers():
+    """On shutdown the loop must cancel the active AND any still-queued
+    prompt / console_mark Futures, so a main-thread caller racing in can't
+    deadlock waiting for a resolution that will never come."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.dispatcher import Dispatcher
+    from tui.events import PromptRequest, ConsoleMark
+    from concurrent.futures import Future
+
+    d = Dispatcher(_v2_fake_renderer())
+    _f1: Future = Future()
+    _f2: Future = Future()
+    d.post(PromptRequest('> ', 'line', _f1))
+    d.post(ConsoleMark(_f2))
+    d._cancel_pending_futures()
+    assert _f1.cancelled(), 'queued prompt future must be cancelled'
+    assert _f2.cancelled(), 'queued console_mark future must be cancelled'
+
+
+def test_dispatcher_request_prompt_is_quit_aware():
+    """request_prompt must not block forever if shutdown raced in: with
+    state.quit set and nobody resolving the Future, it raises promptly."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.dispatcher import Dispatcher
+
+    d = Dispatcher(_v2_fake_renderer())
+    d.state.quit = True                        # simulate post-shutdown
+    _raised = False
+    try:
+        d.request_prompt('> ')                 # no UI loop to resolve it
+    except RuntimeError:
+        _raised = True
+    assert _raised, 'request_prompt must raise when the dispatcher has stopped'
+
+
+def test_dispatcher_sample_status_sets_status_text_inline():
+    """Resource meters are sampled INLINE on the UI thread (no psutil daemon
+    → no finalization SIGSEGV).  _sample_status sets state.status_text."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.dispatcher import Dispatcher
+
+    d = Dispatcher(_v2_fake_renderer())
+    d._prime_status()
+    d._sample_status()
+    assert 'CPU' in d.state.status_text, d.state.status_text
+    assert 'MEM' in d.state.status_text, d.state.status_text
+
+
+def test_tui_single_ui_thread_topology():
+    """Lock the redesigned topology: NO input-pump / status / shell daemon
+    threads; the command REPL runs on the MAIN thread in wait(); exactly one
+    curses-owning UI thread is started in run()."""
+    import re
+    _p = os.path.join(_ROOT, 'scripts', 'tui', 'tui.py')
+    with open(_p) as _fh:
+        _body = _fh.read()
+    assert 'tui-status' not in _body, 'status daemon thread must be gone'
+    assert 'tui-shell' not in _body, 'shell daemon thread must be gone'
+    assert 'start_input_pump' not in _body, 'input pump must be gone'
+    assert not os.path.exists(
+        os.path.join(_ROOT, 'scripts', 'tui', 'input_pump.py')), \
+        'input_pump.py must be deleted'
+    _m = re.search(r'def wait\(self\).*?(?=\n    def )', _body, re.DOTALL)
+    assert _m and 'self._shell()' in _m.group(0), \
+        'wait() must run the command REPL on the main thread'
+    assert "name='tui-dispatch'" in _body, 'the single UI thread'
+
+
 def test_v2_state_append_and_scroll():
     """State.tabs[name].append handles scroll_offset in display-row units."""
     import sys
@@ -37375,6 +37482,11 @@ def main() -> int:
         test_v2_wrap_helpers_round_trip,
         test_v2_state_append_and_scroll,
         test_tui_page_rows_subtracts_widgets_on_console_only,
+        test_dispatcher_tick_reads_key_and_drains_events,
+        test_dispatcher_cancel_pending_futures_unblocks_callers,
+        test_dispatcher_request_prompt_is_quit_aware,
+        test_dispatcher_sample_status_sets_status_text_inline,
+        test_tui_single_ui_thread_topology,
         test_ux09g_too_small_q_key_posts_shutdown,
         test_v2_cmdline_edit_and_history,
         test_v2_dispatcher_key_events_gated_without_prompt,

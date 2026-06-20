@@ -19,7 +19,8 @@ import queue
 import time
 import traceback as _traceback
 from concurrent.futures import Future
-from typing import Callable, List, Optional, Protocol
+from concurrent.futures import TimeoutError as _FutureTimeout
+from typing import Any, Callable, List, Optional, Protocol
 
 from . import wrap
 from .events import (
@@ -123,10 +124,15 @@ def _reset_render_failure_state() -> None:
 
 
 # ── Renderer protocol — keeps dispatcher.py free of curses imports ─────
+# The Renderer is the SOLE curses owner: it both draws AND reads input, so
+# the UI loop (which calls these) is the only thread touching ncurses.
 class Renderer(Protocol):
     def render(self, state: State) -> None: ...
     def width(self) -> int: ...
     def content_rows(self) -> int: ...
+    def begin_input(self) -> None: ...
+    def read_key(self, timeout_ms: int) -> 'Optional[str]': ...
+    def drain_keys(self) -> 'List[str]': ...
 
 
 class Dispatcher:
@@ -148,12 +154,25 @@ class Dispatcher:
     # idle wait at this value so the bar still animates at a usable
     # rate.  10 Hz is the visible-perception sweet spot.
     WIDGET_IDLE_TIMEOUT: float = 0.1
+    # The UI loop now reads input itself (no input-pump thread).  Cap the
+    # per-tick getkey wait so keystrokes + worker output render within this
+    # bound even when no animation deadline is sooner — 50ms is below the
+    # perceptual threshold and costs ~20 idle wakeups/s (a getkey + empty
+    # queue drain), negligible.
+    INPUT_POLL_MS: int = 50
+    # Resource-meter (psutil) sampling cadence, done inline on the UI thread
+    # (no daemon status thread → no psutil-at-finalization SIGSEGV).
+    STATUS_INTERVAL: float = 2.0
 
     def __init__(self, renderer: Renderer, state: Optional[State] = None) -> None:
         self.state = state if state is not None else State()
         self._renderer = renderer
         self._events: 'queue.Queue[object]' = queue.Queue()
         self._pending_prompt: Optional[PromptRequest] = None
+        # Inline status-sampler state (was the tui-status daemon thread).
+        self._last_status: float = 0.0
+        self._net0: Any = None
+        self._net_t0: Optional[float] = None
         # ── Per-tab key interceptor (COMP-06 package selector) ───────────
         # When an interactive controller (e.g. SelectPackages) owns a
         # tab, it registers a key handler here.  The interceptor gets
@@ -176,10 +195,22 @@ class Dispatcher:
         'masked' (line input echoed as '*' — PROMPT_PASSWORD).
 
         Returns the user's input string.  Raises if the dispatcher
-        cancels the future during shutdown."""
+        cancels the future during shutdown.
+
+        The caller is the MAIN-thread command REPL (and in-command prompts).
+        We poll the Future with a short timeout and re-check `state.quit` so a
+        shutdown that races in after we post can't deadlock the main thread:
+        the UI loop may have already stopped draining the queue, so nobody
+        would ever resolve this Future."""
         fut: Future = Future()
         self.post(PromptRequest(message, mode, fut))
-        return fut.result()
+        while True:
+            try:
+                return fut.result(timeout=0.2)
+            except _FutureTimeout:
+                if self.state.quit:
+                    raise RuntimeError(
+                        'dispatcher stopped during prompt') from None
 
     def set_key_interceptor(self, tab_name: str,
                             fn: Callable[[str], bool]) -> None:
@@ -205,38 +236,122 @@ class Dispatcher:
         PrintEvents in flight."""
         fut: Future = Future()
         self.post(ConsoleMark(fut))
-        return fut.result()
+        while True:
+            try:
+                return fut.result(timeout=0.2)
+            except _FutureTimeout:
+                if self.state.quit:
+                    return 0    # shutdown raced in — don't hang the caller
 
     # ─── Loop ────────────────────────────────────────────────────────────
     def run(self) -> int:
-        """Block on the event queue, dispatching events until Shutdown.
-
-        Returns the exit code from the Shutdown event (default 0)."""
-        # Initial paint so the first frame appears before any event.
+        """The single UI thread: read input + drain worker events + sample
+        status + render, until Shutdown.  SOLE curses owner (input AND draw
+        on this one thread → no ncurses race), so the command REPL can run on
+        the main thread.  Returns the exit code from the Shutdown event."""
         self.state.dirty = True
         self._safe_render()
-
+        try:
+            self._renderer.begin_input()
+        except Exception:                                  # noqa: BLE001
+            pass
+        self._prime_status()
         while not self.state.quit:
-            timeout = self._compute_timeout()
+            self._tick()
+        # Shutdown: cancel the active prompt AND any still-queued prompt /
+        # console_mark Future so a main-thread caller racing in can't block
+        # forever (nobody would resolve it once the loop stops).
+        self._cancel_pending_futures()
+        return self.state.exit_code
+
+    def _tick(self) -> None:
+        """One loop iteration — input, events, status, render.  Factored out
+        of run() so it can be unit-tested without an infinite loop."""
+        # Bound the input wait by the next animation deadline, capped so
+        # keystrokes + output stay responsive.
+        _ms = max(1, min(int(self._compute_timeout() * 1000),
+                         self.INPUT_POLL_MS))
+        _key = self._read_key(_ms)
+        if _key is not None:
+            self._on_key(_key)
+            for _k in self._drain_keys():       # absorb fast typing / paste
+                self._on_key(_k)
+        # Drain ALL pending worker events (batches output → fewer renders).
+        while True:
             try:
-                event = self._events.get(timeout=timeout)
+                _e = self._events.get_nowait()
             except queue.Empty:
-                # No event arrived in time — most likely an animation
-                # deadline expired.  Mark dirty so the next render
-                # picks up the new widget frame.
-                if self.state.widgets:
-                    self.state.dirty = True
-                self._safe_render()
-                continue
+                break
+            self._handle(_e)
+        # Resource meters on cadence (inline — no daemon thread).
+        _now = time.monotonic()
+        if _now - self._last_status >= self.STATUS_INTERVAL:
+            self._last_status = _now
+            self._sample_status()
+        # Keep live widgets animating.
+        if self.state.widgets:
+            self.state.dirty = True
+        self._safe_render()
 
-            self._handle(event)
-            self._safe_render()
-
-        # Drain any pending prompt so the caller thread isn't stuck.
+    def _cancel_pending_futures(self) -> None:
         if self._pending_prompt is not None:
             self._pending_prompt.future.cancel()
             self._pending_prompt = None
-        return self.state.exit_code
+        while True:
+            try:
+                _e = self._events.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(_e, (PromptRequest,)):
+                _e.future.cancel()
+            elif isinstance(_e, ConsoleMark):
+                _e.future.cancel()
+
+    # ─── Input (delegated to the Renderer, the sole curses owner) ─────────
+    def _read_key(self, timeout_ms: int) -> 'Optional[str]':
+        _fn = getattr(self._renderer, 'read_key', None)
+        return _fn(timeout_ms) if _fn is not None else None
+
+    def _drain_keys(self) -> 'List[str]':
+        _fn = getattr(self._renderer, 'drain_keys', None)
+        return _fn() if _fn is not None else []
+
+    # ─── Resource meters (psutil) — sampled inline on the UI thread ───────
+    def _prime_status(self) -> None:
+        try:
+            import psutil
+            psutil.cpu_percent(interval=None)             # prime (first → 0.0)
+            self._net0 = psutil.net_io_counters()
+            self._net_t0 = time.monotonic()
+        except Exception:                                  # noqa: BLE001
+            self._net0 = None
+            self._net_t0 = None
+
+    def _sample_status(self) -> None:
+        try:
+            import psutil
+        except Exception:                                  # noqa: BLE001
+            return
+        try:
+            cpu = psutil.cpu_percent(interval=None)
+            mem = psutil.virtual_memory().percent
+            disk = psutil.disk_usage('/').percent
+            up = down = 0.0
+            try:
+                _net1 = psutil.net_io_counters()
+                if self._net0 is not None and self._net_t0 is not None:
+                    _dt = max(0.5, time.monotonic() - self._net_t0)
+                    up = max(0.0, (_net1.bytes_sent
+                                   - self._net0.bytes_sent) / _dt)
+                    down = max(0.0, (_net1.bytes_recv
+                                     - self._net0.bytes_recv) / _dt)
+                self._net0 = _net1
+                self._net_t0 = time.monotonic()
+            except Exception:                              # noqa: BLE001
+                pass
+            self._on_status(StatusEvent(cpu, mem, disk, up, down))
+        except Exception:                                  # noqa: BLE001
+            pass
 
     def _compute_timeout(self) -> float:
         """Pick the next dispatcher wake-up.
