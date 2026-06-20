@@ -23619,6 +23619,47 @@ def test_virtual_publish_dry_run_skips_own_already_published_filenames():
     assert len(_merged['athena-primary']) == 1
 
 
+def test_virtual_publish_dry_run_skips_adopted_pulled_from_filenames():
+    """A peer that ADOPTED a file (its build record carries `pulled_from`)
+    must not re-synthesize a claim for it.  Otherwise the placeholder SHA
+    collides with the OWNER's real published SHA on every adopted file —
+    the BS2-fully-synced federation case (6027 false conflicts).  This
+    mirrors the real publish, which skips `pulled_from` records
+    (generate_pending_claims, publish.py:95)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    from coord import schema as _sch
+    _fn = 'liba52-0.7.4_0.7.4-20_amd64.deb'
+    _owner_claim = _sch.new_claim(
+        builder='athena-primary', seq=1, package='a52dec',
+        intended_version='0.7.4-20', built_version='0.7.4-20',
+        filename=_fn, sha256='f' * 64, size=0, snapshot='T0',
+        built_at='1970-01-01T00:00:00Z',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _virt = [
+        {'Package': 'liba52-0.7.4', 'Version': '0.7.4-20',
+         'Architecture': 'amd64', 'Source': 'a52dec',
+         'Filename': f'pool/main/liba/a52dec/{_fn}',
+         'SHA256': _vb._virtual_sha256('liba52-0.7.4', '0.7.4-20', 'amd64'),
+         'Size': '0'},
+    ]
+    # Baseline: WinDev owns nothing published; without the adopted set the
+    # synthetic SHA false-conflicts with athena-primary's real SHA.
+    _m1, _f1 = _vb.virtual_publish_dry_run(
+        _virt, our_builder_id='WinDev', snapshot='T1',
+        remote_by_builder={'athena-primary': [_owner_claim]})
+    assert [_t for _t in _f1 if _t[1] == 'virtual_hash_conflict'], (
+        "baseline must conflict without adoption (synthetic vs real)")
+    # With the file marked adopted (pulled_from), it's skipped → clean,
+    # and WinDev mints no claim for it.
+    _m2, _f2 = _vb.virtual_publish_dry_run(
+        _virt, our_builder_id='WinDev', snapshot='T1',
+        remote_by_builder={'athena-primary': [_owner_claim]},
+        local_adopted_fns={_fn})
+    assert [_t for _t in _f2 if _t[1] == 'virtual_hash_conflict'] == [], _f2
+    assert not _m2.get('WinDev'), _m2.get('WinDev')
+
+
 def test_virtual_publish_dry_run_synthesizes_only_new_filenames():
     """We own filename X on remote AND we have a new virtual record
     for filename Y (never published).  Only Y should be synthesized.
@@ -37225,6 +37266,7 @@ def main() -> int:
         test_virtual_build_recommends_suppressed_by_default,
         test_virtual_build_canonical_filter_off_when_peer_not_in_scope,
         test_virtual_publish_dry_run_skips_own_already_published_filenames,
+        test_virtual_publish_dry_run_skips_adopted_pulled_from_filenames,
         test_virtual_publish_dry_run_synthesizes_only_new_filenames,
         # virtual-build chunk 3 — RepoState assembly + virtual repo_audit
         test_virtual_build_synthesize_repo_state_resolves_closed_graph,

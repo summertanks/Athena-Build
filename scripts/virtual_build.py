@@ -1614,9 +1614,23 @@ def virtual_publish_dry_run(
     virtual_records: 'List[Dict[str, str]]', our_builder_id: str,
     snapshot: str,
     remote_by_builder: 'Optional[Dict[str, List[Dict[str, Any]]]]' = None,
+    local_adopted_fns: 'Optional[set]' = None,
 ) -> 'Tuple[Dict[str, List[Dict[str, Any]]], List[Tuple[str, str, str]]]':
     """Project the publish that virtual-build would attempt and run
     the real publish-time gates against the projection.
+
+    `local_adopted_fns` is the set of binary filenames this builder has
+    ADOPTED from a peer (its build records carry ``pulled_from`` — or a
+    released ``selection`` of deprecated/retracted).  The REAL publish
+    never re-claims those (``generate_pending_claims`` skips
+    ``pulled_from`` at ``publish.py:95``), so neither must this dry-run:
+    a synthetic claim minted for an adopted file would carry a synthetic
+    SHA and collide with the peer's REAL published SHA — a false-positive
+    that fires on EVERY adopted file on a fully-synced peer.  Skipping
+    them makes the prediction match what a real publish would actually
+    emit (only this builder's OWN deltas), so a conformant peer predicts
+    a clean publish while a genuine rebuild (record flips to phase=done,
+    no ``pulled_from``) still surfaces here.
 
     Returns ``(merged_by_builder, findings)`` where ``merged_by_builder``
     is our synthetic claims unioned with `remote_by_builder` (the
@@ -1669,10 +1683,17 @@ def virtual_publish_dry_run(
         for _c in _existing
         if _c.get('claim_state') not in ('retracted', 'deprecated')
     }
+    # Adopted (pulled_from) filenames are skipped for the SAME reason a
+    # real publish skips them — they belong to the owner we pulled from;
+    # re-synthesizing a claim with a placeholder SHA would false-conflict
+    # with the owner's real SHA on every adopted file.
+    _skip_fns = set(_existing_fns)
+    if local_adopted_fns:
+        _skip_fns |= {str(_f) for _f in local_adopted_fns}
     _new_records = [
         _r for _r in virtual_records
         if os.path.basename(_r.get('Filename', '') or '')
-        not in _existing_fns
+        not in _skip_fns
     ]
     _seq_floor = (max((_c.get('seq', 0) for _c in _existing),
                       default=0) + 1)
