@@ -31,6 +31,8 @@ import logging
 import os
 from typing import Callable, Dict, List, Optional, Tuple
 
+import arch_filter as _arch_filter
+
 from . import head as _head
 from . import identity as _identity
 from . import reconcile as _reconcile
@@ -52,10 +54,17 @@ def generate_pending_claims(
     public_key_path: str,
     snapshot_pin: str,
     read_build_record: Callable[[str, str], 'Optional[dict]'],
+    build_arch: 'Optional[str]' = None,
 ) -> List[dict]:
     """Walk build.json records; for each phase=done / phase=tunneled
     output whose filename isn't already in this builder's live jsonl,
     create an UNSIGNED pending claim dict.
+
+    When ``build_arch`` is given, an output whose binary TARGETS a
+    foreign architecture (a cross-toolchain by-product like
+    ``binutils-aarch64-linux-gnu``; see ``arch_filter``) is skipped so
+    the federation never takes ownership of it.  ``None`` (legacy/test
+    callers) disables the filter.
 
     Returns the list in stable order (sorted by package + filename)
     so a re-run before any append produces the same ordering.
@@ -120,6 +129,13 @@ def generate_pending_claims(
         _comp = str(_rec.get('component') or 'main')
         for _fn in _outputs:
             if _fn in _known:
+                continue
+            # A cross-toolchain by-product that TARGETS a foreign arch
+            # (binutils-aarch64-linux-gnu, …) is not part of the
+            # distribution — never claim it.  Build receipts keep the
+            # output; the filter lives only at the claim layer.
+            if build_arch and _arch_filter.is_foreign_target_binary(
+                    _fn.split('_', 1)[0], build_arch):
                 continue
             _sha = _hashes.get(_fn)
             if not isinstance(_sha, str) or not _sha:
@@ -529,6 +545,7 @@ def local_publish(
         public_key_path=public_key_path,
         snapshot_pin=snapshot_pin,
         read_build_record=read_build_record,
+        build_arch=getattr(config, 'arch', None),
     )
     fill_sizes_from_pool(_pending, _pool)
     if not _pending:
@@ -884,6 +901,7 @@ def remote_publish(
             public_key_path=public_key_path,
             snapshot_pin=snapshot_pin,
             read_build_record=read_build_record,
+            build_arch=getattr(config, 'arch', None),
         )
         _pending_total = len(_pending)
         _pending = [_p for _p in _pending if _p['filename'] not in _remote_known]
@@ -1518,4 +1536,53 @@ def retract_claim(
         return False, f"append retraction failed: {_e}"
     return True, (
         f"retracted {package}@seq={_target.get('seq')} "
+        f"with retraction seq={_next_seq}")
+
+
+def retract_claim_by_filename(
+    *,
+    builder_id: str,
+    config,
+    private_key_path: str,
+    public_key_path: str,
+    filename: str,
+) -> Tuple[bool, str]:
+    """Write a signed retraction for the live claim on a single
+    ``filename`` (not a whole source).
+
+    ``retract_claim`` is source-keyed — it withdraws the highest live
+    claim for a *package*, which is wrong for withdrawing ONE foreign
+    cross-toolchain binary while the source (binutils, gcc-12) stays
+    selected and keeps publishing its native binaries.  This variant
+    keys on the exact filename so the rest of the source is untouched.
+
+    Idempotent: a filename with no live claim returns ``(False, …)`` and
+    is safely skipped on re-run.  Returns (ok, detail)."""
+    # Select the target from the FOLDED live view (project_owners drops
+    # already-retracted claims) — a raw-line scan would re-find the prior
+    # published line on a second pass and re-retract it forever.
+    _claims = _store.read_builder_claims(
+        config.dir_coord_claims, builder_id, public_key_path)
+    _owned = _store.project_owners({builder_id: _claims}).get(filename)
+    if _owned is None or _owned.get('builder') != builder_id:
+        return False, f"no live claim for {filename!r} by {builder_id!r}"
+    _target = _owned.get('claim') or {}
+    _next_seq = _store.max_seq(config.dir_coord_claims, builder_id) + 1
+    _retraction = _schema.new_retraction(
+        builder=builder_id,
+        seq=_next_seq,
+        package=str(_target.get('package', '')),
+        retracts_seq=int(_owned.get('seq', _target.get('seq', 0))),
+        filename=filename,
+        snapshot=str(_target.get('snapshot', '')),
+        built_at=_utc_now(),
+    )
+    try:
+        _store.append_claim(
+            config.dir_coord_claims, builder_id, _retraction,
+            private_key_path)
+    except (OSError, ValueError) as _e:
+        return False, f"append retraction failed: {_e}"
+    return True, (
+        f"retracted {filename}@seq={_target.get('seq')} "
         f"with retraction seq={_next_seq}")

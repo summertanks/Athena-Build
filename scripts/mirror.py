@@ -1468,6 +1468,47 @@ def audit_own_claims_on_disk(
     return _findings
 
 
+def audit_foreign_target_claims(
+    by_builder: 'dict[str, list[dict]]',
+    our_builder_id: 'Optional[str]',
+    build_arch: 'Optional[str]',
+) -> 'list[tuple[str, str, str]]':
+    """Assurance gate: flag any file WE own + publish whose binary
+    TARGETS a foreign architecture (a cross-toolchain by-product like
+    ``binutils-aarch64-linux-gnu`` or the kfreebsd cross binutils — see
+    :func:`arch_filter.is_foreign_target_binary`).
+
+    Phases 2-3 stop such binaries from ever being claimed or placed; this
+    is the belt-and-suspenders check that surfaces any that slipped past
+    (e.g. historical claims published before the filter existed).  The
+    remedy is ``mirror withdraw-foreign`` (signed retraction + prune).
+
+    Returns ``CRITICAL`` ``foreign_target_claim_published`` findings.  A
+    no-op when ``build_arch`` is None (no arch to compare against) or the
+    detector can't build its dpkg map (fail-safe — never raises)."""
+    _findings: 'list[tuple[str, str, str]]' = []
+    if not build_arch or not our_builder_id:
+        return _findings
+    import arch_filter as _arch_filter
+    from coord import schema as _schema
+    from coord import store as _store
+    _owners = _store.project_owners(by_builder)
+    for _fn, _rec in sorted(_owners.items()):
+        if _rec.get('builder') != our_builder_id:
+            continue
+        if _rec.get('claim_state') != _schema.CLAIM_STATE_PUBLISHED:
+            continue
+        # package name is the leading token of name_ver_arch.(u)deb
+        _pkg = _fn.split('_', 1)[0]
+        if _arch_filter.is_foreign_target_binary(_pkg, build_arch):
+            _findings.append((
+                'CRITICAL', 'foreign_target_claim_published',
+                f"{_fn}: cross-toolchain binary targets a non-{build_arch} "
+                "arch — never part of the distribution; run "
+                "`mirror withdraw-foreign` to retract + prune it"))
+    return _findings
+
+
 def local_ahead_candidates(
     by_builder: 'dict[str, list[dict]]',
     our_builder_id: 'Optional[str]', local_repo_dir: str,
