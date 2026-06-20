@@ -397,6 +397,41 @@ class Renderer:
         except curses.error:
             pass
 
+    # ─── Input (the UI thread is the SOLE curses owner: input + render) ──
+    def begin_input(self) -> None:
+        """Put the screen into keypad mode.  Called once by the UI loop,
+        which now reads input AND renders on the same (sole curses-owning)
+        thread — there is no separate input-pump thread to race the renderer."""
+        try:
+            self._stdscr.keypad(True)
+        except curses.error:
+            pass
+
+    def read_key(self, timeout_ms: int) -> 'Optional[str]':
+        """Wait up to `timeout_ms` for ONE key; return its getkey() string,
+        or None on timeout / transient curses error.  Runs on the UI thread."""
+        try:
+            self._stdscr.timeout(max(0, int(timeout_ms)))
+            return self._stdscr.getkey()
+        except curses.error:
+            return None
+
+    def drain_keys(self) -> 'list[str]':
+        """Non-blocking: collect any further buffered keys after read_key()
+        returned one, so fast typing / paste isn't throttled to one key per
+        loop tick."""
+        _keys: 'list[str]' = []
+        try:
+            self._stdscr.timeout(0)
+            while True:
+                try:
+                    _keys.append(self._stdscr.getkey())
+                except curses.error:
+                    break
+        except curses.error:
+            pass
+        return _keys
+
     # ─── Teardown ────────────────────────────────────────────────────────
     def shutdown(self) -> None:
         """Restore terminal state.  Called on dispatcher exit."""

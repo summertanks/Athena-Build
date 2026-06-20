@@ -92,3 +92,6 @@ fork/source/*/debian/debhelper-build-stamp
 # only when running locally; gitignore can't easily express "match dir whose
 # name equals the parent's name", so rely on dh_clean to wipe these between
 # builds.
+
+# machine-local HMAC-signed selection sidecar (per-builder; never commit)
+config/selection.state

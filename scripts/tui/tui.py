@@ -20,14 +20,11 @@ import curses
 import signal
 import sys
 import threading
-import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
-
-import psutil
 
 from .dispatcher import Dispatcher
 from .events import (
-    ClearTab, ConsoleTrim, LogEvent, PrintEvent, Shutdown, StatusEvent,
+    ClearTab, ConsoleTrim, LogEvent, PrintEvent, Shutdown,
     WidgetAdd, WidgetRemove,
 )
 from .logging_bridge import LOGGER_NAME, setup_logging
@@ -120,87 +117,30 @@ class Tui:
             self._cmd_registry[name] = (fn, tooltip)
 
     def run(self) -> None:
-        """Launch dispatcher + input pump + shell + status monitor threads."""
-        from .input_pump import start_input_pump
+        """Start the SINGLE curses-owning UI thread.
 
-        # The `tui-shell` thread runs heavy commands (cache build parses ~100k
-        # package records via deb822, whose pure-Python dunder methods recurse
-        # in C, unbounded by sys.recursionlimit).  A pthread's default 8MB C
-        # stack overflows there → SIGABRT — but ONLY in a worker thread; the
-        # main thread's larger/growable stack is why `--headless` (REPL on the
-        # main thread) never crashes.  Give the TUI threads a generous C stack
-        # so the curses backend matches headless.  Best-effort (some platforms
-        # don't support setting it); restored so unrelated threads keep the
-        # default.
-        _BIG_STACK = 64 * 1024 * 1024
-        _prev_ss = None
-        _big_stack_ok = False
-        try:
-            _prev_ss = threading.stack_size()
-            threading.stack_size(_BIG_STACK)
-            # A successful set returns the new value on read-back; some
-            # platforms accept the call but clamp/ignore it, so verify.
-            _big_stack_ok = threading.stack_size() == _BIG_STACK
-        except (ValueError, RuntimeError):
-            _prev_ss = None
-        if not _big_stack_ok:
-            # Don't fall back silently to the default ~8MB C stack — the
-            # `tui-shell` worker would then SIGABRT on a deep deb822 parse
-            # (cache build) with no explanation.  Queue a warning via the
-            # dispatcher (renders once its loop starts below).
-            self.print(
-                "WARNING: could not enlarge the worker-thread C stack — "
-                "heavy commands (e.g. `cache build`) may crash (SIGABRT) "
-                "in the TUI on this host.  Re-run with `--headless` if that "
-                "happens (the REPL runs on the main thread, which is safe).",
-                COLOR_WARNING)
-        try:
-            # Status monitor (psutil sampling).  Keep a ref so wait() can
-            # JOIN it before the interpreter finalizes — a daemon thread
-            # left running inside psutil's C extension at finalization
-            # SIGSEGVs (random, WSL-timing-sensitive).
-            self._status_thread = threading.Thread(
-                target=self._status_pump, daemon=True, name='tui-status')
-            self._status_thread.start()
-            # Shell loop — blocking request_prompt + dispatch.
-            self._shell_thread = threading.Thread(
-                target=self._shell, daemon=True, name='tui-shell')
-            self._shell_thread.start()
-            # Input pump — blocking getkey -> KeyEvent.
-            start_input_pump(self._stdscr, self.dispatcher)
-
-            # Dispatcher loop (and thus all curses redraws) runs on a dedicated
-            # non-daemon `tui-dispatch` thread; run() returns to the caller and
-            # wait() joins it.
-            self._dispatcher_thread = threading.Thread(
-                target=self._run_dispatcher, daemon=False, name='tui-dispatch')
-            self._dispatcher_thread.start()
-        finally:
-            if _prev_ss is not None:
-                try:
-                    threading.stack_size(_prev_ss)
-                except (ValueError, RuntimeError):
-                    pass
+        The UI thread (the dispatcher loop) now reads input, samples the
+        resource meters, AND renders — so it is the only thread that touches
+        ncurses (no input-pump/status-pump threads → no curses race and no
+        psutil-daemon-at-finalization SIGSEGV).  The COMMAND REPL runs on the
+        MAIN thread in wait() — commands get the main thread's large growable
+        stack, so deep deb822 parses (cache build) can't overflow an 8MB
+        worker stack.  This is the headless safety model + a UI thread."""
+        self._dispatcher_thread = threading.Thread(
+            target=self._run_dispatcher, daemon=False, name='tui-dispatch')
+        self._dispatcher_thread.start()
 
     def wait(self) -> None:
-        if hasattr(self, '_dispatcher_thread'):
-            self._dispatcher_thread.join()
-        # The dispatcher has stopped (state.quit is set).  JOIN the daemon
-        # pump threads before returning to the caller's Exit()/interpreter
-        # finalize: a daemon thread still inside a C extension when
-        # finalization begins — `tui-status` mid-`psutil` sample — causes a
-        # use-after-free SIGSEGV at process exit (intermittent, surfaces on
-        # WSL where scheduling makes the race far more likely than on the
-        # VM).  Bounded joins so a wedged thread can't hang the exit; the
-        # interruptible status pump below exits within ~0.2s of quit.
-        for _attr, _timeout in (('_status_thread', 3.0),
-                                ('_shell_thread', 2.0)):
-            _t = getattr(self, _attr, None)
-            if _t is not None:
-                try:
-                    _t.join(timeout=_timeout)
-                except RuntimeError:
-                    pass
+        # Run the command REPL ON THE MAIN THREAD (growable stack → deb822
+        # parses are safe).  It blocks here until a command (or `quit`/Ctrl-C)
+        # sets state.quit; then we join the single UI thread.  No daemon
+        # threads remain, so the subsequent Exit()/sys.exit finalizes cleanly
+        # (no daemon mid-C-call → no teardown SIGSEGV).
+        try:
+            self._shell()
+        finally:
+            if hasattr(self, '_dispatcher_thread'):
+                self._dispatcher_thread.join()
         if self._exit_code != 0:
             print(f'Exited with error code: {self._exit_code}\r\n')
 
@@ -324,51 +264,7 @@ class Tui:
         finally:
             self._renderer.shutdown()
 
-    # ─── Status monitor (psutil sampling) ────────────────────────────────
-    def _status_pump(self) -> None:
-        _net0 = None
-        try:
-            _net0 = psutil.net_io_counters()
-        except Exception:
-            _net0 = None
-        # Prime the NON-blocking cpu sampler: the first call returns 0.0
-        # (or % since process start); each later call reports % since the
-        # previous call, so the inter-sample sleep IS the window.  We use
-        # interval=None + a quit-aware sleep instead of the old blocking
-        # cpu_percent(interval=2) so this daemon thread is almost never
-        # parked inside psutil's C extension — it checks `quit` every 0.2s
-        # and returns promptly, so it's joined-out before the interpreter
-        # finalizes (the daemon-thread-at-exit SIGSEGV).
-        try:
-            psutil.cpu_percent(interval=None)
-        except Exception:
-            pass
-        while not self.dispatcher.state.quit:
-            # Interruptible ~2s window: wake every 0.2s to re-check quit.
-            _t0 = time.monotonic()
-            for _ in range(10):
-                if self.dispatcher.state.quit:
-                    return
-                time.sleep(0.2)
-            try:
-                cpu  = psutil.cpu_percent(interval=None)
-                mem  = psutil.virtual_memory().percent
-                disk = psutil.disk_usage('/').percent
-                up = down = 0.0
-                try:
-                    _net1 = psutil.net_io_counters()
-                    _dt = max(0.5, time.monotonic() - _t0)
-                    if _net0 is not None:
-                        up   = max(0.0, (_net1.bytes_sent - _net0.bytes_sent) / _dt)
-                        down = max(0.0, (_net1.bytes_recv - _net0.bytes_recv) / _dt)
-                    _net0 = _net1
-                except Exception:
-                    pass
-                self.dispatcher.post(StatusEvent(cpu, mem, disk, up, down))
-            except Exception:
-                time.sleep(0.5)
-
-    # ─── Shell loop ──────────────────────────────────────────────────────
+    # ─── Shell loop (runs on the MAIN thread via wait()) ─────────────────
     def _shell(self) -> None:
         while not self.dispatcher.state.quit:
             try:
@@ -401,8 +297,15 @@ class Tui:
             fn, _tip = entry
             try:
                 fn(*parts[1:])
-            except SystemExit:
-                raise
+            except SystemExit as _se:
+                # A handler called sys.exit().  We're on the MAIN thread now,
+                # so a bare re-raise would tear the process down with the
+                # terminal still in raw mode (the UI thread never gets to
+                # endwin).  Convert to a graceful TUI shutdown instead: post
+                # Shutdown, let the UI thread restore the terminal, and let
+                # wait() join it.
+                self.exit(int(_se.code) if isinstance(_se.code, int) else 0)
+                return
             except Exception as e:
                 self.dispatcher.post(PrintEvent(f'  Error: {e}'))
                 import logging

@@ -32,11 +32,13 @@ Logging:
 
 Internals (don't import from outside this package):
     .events, .state, .wrap, .dispatcher,
-    .render, .input_pump, .widgets, .facade, .logging_bridge, .tui
+    .render, .widgets, .facade, .logging_bridge, .tui
 
 Architecture:
-    Single event queue.  One dispatcher thread is the sole state
-    mutator.  Pure renderer.  Adaptive idle (events.get(timeout=...)
+    Single event queue.  One UI thread (the dispatcher loop) is the sole
+    curses owner AND state mutator — it reads input, samples the resource
+    meters, and renders.  Commands run on the MAIN thread (wait()).  Pure
+    renderer.  Adaptive idle (events.get(timeout=...)
     blocks until an animation deadline or the next producer post).
 """
 from __future__ import annotations
