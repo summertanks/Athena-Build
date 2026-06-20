@@ -155,12 +155,17 @@ class Tui:
                 "happens (the REPL runs on the main thread, which is safe).",
                 COLOR_WARNING)
         try:
-            # Status monitor (psutil sampling).
-            threading.Thread(target=self._status_pump, daemon=True,
-                              name='tui-status').start()
+            # Status monitor (psutil sampling).  Keep a ref so wait() can
+            # JOIN it before the interpreter finalizes — a daemon thread
+            # left running inside psutil's C extension at finalization
+            # SIGSEGVs (random, WSL-timing-sensitive).
+            self._status_thread = threading.Thread(
+                target=self._status_pump, daemon=True, name='tui-status')
+            self._status_thread.start()
             # Shell loop — blocking request_prompt + dispatch.
-            threading.Thread(target=self._shell, daemon=True,
-                              name='tui-shell').start()
+            self._shell_thread = threading.Thread(
+                target=self._shell, daemon=True, name='tui-shell')
+            self._shell_thread.start()
             # Input pump — blocking getkey -> KeyEvent.
             start_input_pump(self._stdscr, self.dispatcher)
 
@@ -180,6 +185,22 @@ class Tui:
     def wait(self) -> None:
         if hasattr(self, '_dispatcher_thread'):
             self._dispatcher_thread.join()
+        # The dispatcher has stopped (state.quit is set).  JOIN the daemon
+        # pump threads before returning to the caller's Exit()/interpreter
+        # finalize: a daemon thread still inside a C extension when
+        # finalization begins — `tui-status` mid-`psutil` sample — causes a
+        # use-after-free SIGSEGV at process exit (intermittent, surfaces on
+        # WSL where scheduling makes the race far more likely than on the
+        # VM).  Bounded joins so a wedged thread can't hang the exit; the
+        # interruptible status pump below exits within ~0.2s of quit.
+        for _attr, _timeout in (('_status_thread', 3.0),
+                                ('_shell_thread', 2.0)):
+            _t = getattr(self, _attr, None)
+            if _t is not None:
+                try:
+                    _t.join(timeout=_timeout)
+                except RuntimeError:
+                    pass
         if self._exit_code != 0:
             print(f'Exited with error code: {self._exit_code}\r\n')
 
@@ -310,13 +331,27 @@ class Tui:
             _net0 = psutil.net_io_counters()
         except Exception:
             _net0 = None
+        # Prime the NON-blocking cpu sampler: the first call returns 0.0
+        # (or % since process start); each later call reports % since the
+        # previous call, so the inter-sample sleep IS the window.  We use
+        # interval=None + a quit-aware sleep instead of the old blocking
+        # cpu_percent(interval=2) so this daemon thread is almost never
+        # parked inside psutil's C extension — it checks `quit` every 0.2s
+        # and returns promptly, so it's joined-out before the interpreter
+        # finalizes (the daemon-thread-at-exit SIGSEGV).
+        try:
+            psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
         while not self.dispatcher.state.quit:
+            # Interruptible ~2s window: wake every 0.2s to re-check quit.
+            _t0 = time.monotonic()
+            for _ in range(10):
+                if self.dispatcher.state.quit:
+                    return
+                time.sleep(0.2)
             try:
-                # cpu_percent(interval=2) blocks ~2s and is our sample
-                # window; bracket the network counters around it so up/down
-                # are bytes/s over that same window.
-                _t0 = time.monotonic()
-                cpu  = psutil.cpu_percent(interval=2)
+                cpu  = psutil.cpu_percent(interval=None)
                 mem  = psutil.virtual_memory().percent
                 disk = psutil.disk_usage('/').percent
                 up = down = 0.0
@@ -331,7 +366,7 @@ class Tui:
                     pass
                 self.dispatcher.post(StatusEvent(cpu, mem, disk, up, down))
             except Exception:
-                time.sleep(2)
+                time.sleep(0.5)
 
     # ─── Shell loop ──────────────────────────────────────────────────────
     def _shell(self) -> None:
