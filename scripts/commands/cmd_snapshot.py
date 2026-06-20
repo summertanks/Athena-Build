@@ -345,9 +345,19 @@ class SnapshotCommandsMixin(SessionState):
             return False
         utils.write_snapshot_state(self.config, current=target)
         utils.append_snapshot_history(self.config, target)
+        # Sync build.conf [Snapshot] Timestamp NOW, as part of a successful
+        # `snapshot select` — NOT lazily on the next startup's
+        # reconcile_snapshot_pin.  Otherwise the visible config lies about the
+        # active pin between this command and the next process start, where it
+        # would surface as a surprise "updated build.conf to match" warning on
+        # an unrelated run.  snapshot.state stays the authoritative pin; this
+        # just keeps its build.conf mirror honest immediately.
+        _synced = utils.reconcile_snapshot_pin(self.config)
         console.print(
             f"snapshot select: current pin set to {target} "
-            f"(config/snapshot.state; appended to config/snapshot.history)")
+            "(config/snapshot.state; appended to config/snapshot.history"
+            + ("; build.conf [Snapshot] Timestamp synced" if _synced else "")
+            + ")")
         # The resolved pin changed → the in-memory cache is now stale; force
         # the operator to re-resolve at the new pin before building.
         self.flags.cache_ready = False
