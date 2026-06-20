@@ -132,12 +132,28 @@ class Tui:
         # so the curses backend matches headless.  Best-effort (some platforms
         # don't support setting it); restored so unrelated threads keep the
         # default.
+        _BIG_STACK = 64 * 1024 * 1024
         _prev_ss = None
+        _big_stack_ok = False
         try:
             _prev_ss = threading.stack_size()
-            threading.stack_size(64 * 1024 * 1024)
+            threading.stack_size(_BIG_STACK)
+            # A successful set returns the new value on read-back; some
+            # platforms accept the call but clamp/ignore it, so verify.
+            _big_stack_ok = threading.stack_size() == _BIG_STACK
         except (ValueError, RuntimeError):
             _prev_ss = None
+        if not _big_stack_ok:
+            # Don't fall back silently to the default ~8MB C stack — the
+            # `tui-shell` worker would then SIGABRT on a deep deb822 parse
+            # (cache build) with no explanation.  Queue a warning via the
+            # dispatcher (renders once its loop starts below).
+            self.print(
+                "WARNING: could not enlarge the worker-thread C stack — "
+                "heavy commands (e.g. `cache build`) may crash (SIGABRT) "
+                "in the TUI on this host.  Re-run with `--headless` if that "
+                "happens (the REPL runs on the main thread, which is safe).",
+                COLOR_WARNING)
         try:
             # Status monitor (psutil sampling).
             threading.Thread(target=self._status_pump, daemon=True,
