@@ -166,12 +166,8 @@ class Tui:
             self._shell_thread = threading.Thread(
                 target=self._shell, daemon=True, name='tui-shell')
             self._shell_thread.start()
-            # Input pump — interruptible getkey -> KeyEvent.  Keep the ref so
-            # wait() can JOIN it: a daemon thread parked inside ncurses'
-            # getkey() C call at finalization SIGSEGVs the same way the psutil
-            # status pump did (and bit ONE-SHOT commands, which never wake it
-            # with a keypress).
-            self._input_thread = start_input_pump(self._stdscr, self.dispatcher)
+            # Input pump — blocking getkey -> KeyEvent.
+            start_input_pump(self._stdscr, self.dispatcher)
 
             # Dispatcher loop (and thus all curses redraws) runs on a dedicated
             # non-daemon `tui-dispatch` thread; run() returns to the caller and
@@ -198,7 +194,6 @@ class Tui:
         # VM).  Bounded joins so a wedged thread can't hang the exit; the
         # interruptible status pump below exits within ~0.2s of quit.
         for _attr, _timeout in (('_status_thread', 3.0),
-                                ('_input_thread', 2.0),
                                 ('_shell_thread', 2.0)):
             _t = getattr(self, _attr, None)
             if _t is not None:

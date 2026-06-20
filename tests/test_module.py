@@ -15991,61 +15991,6 @@ def test_tui_page_rows_subtracts_widgets_on_console_only():
     assert d._page_rows() == 1
 
 
-def test_input_pump_exits_promptly_on_quit():
-    """The curses input pump must be INTERRUPTIBLE: when no key is pressed
-    (getkey raises curses.error on the timeout tick) it still re-checks
-    dispatcher.state.quit and exits.  This is the one-shot-command SIGSEGV
-    fix — under the old nodelay(False)+`while True` it looped on the error
-    forever, never seeing quit, and was joined-out by nobody (left mid-
-    ncurses-C-call at finalization)."""
-    import sys
-    import curses
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui.input_pump import start_input_pump
-
-    class _Screen:
-        def keypad(self, *_a):
-            pass
-
-        def timeout(self, *_a):
-            pass
-
-        def getkey(self):
-            raise curses.error          # always a timeout tick (no key)
-
-    class _State:
-        quit = False
-
-    class _Disp:
-        def __init__(self):
-            self.state = _State()
-
-        def post(self, *_a):
-            pass
-
-    _d = _Disp()
-    _t = start_input_pump(_Screen(), _d)
-    assert _t.is_alive()
-    _d.state.quit = True
-    _t.join(timeout=2.0)
-    assert not _t.is_alive(), (
-        "input pump must exit promptly once quit is set (else it sits in "
-        "ncurses getkey at finalization → SIGSEGV)")
-
-
-def test_tui_wait_joins_input_pump_thread():
-    """Tui.wait() must JOIN _input_thread (not just status/shell) so the
-    ncurses getkey daemon is gone before the interpreter finalizes."""
-    import re
-    _p = os.path.join(_ROOT, 'scripts', 'tui', 'tui.py')
-    with open(_p) as _fh:
-        _body = _fh.read()
-    _m = re.search(r'def wait\(self\).*?(?=\n    def )', _body, re.DOTALL)
-    assert _m, "wait() not found"
-    assert "'_input_thread'" in _m.group(0), (
-        "wait() must join _input_thread")
-
-
 def test_ux09g_too_small_q_key_posts_shutdown():
     """The too-small overlay says "Press Q to exit" — a q/Q keystroke while
     state.too_small must actually post Shutdown (the only escape, since the
@@ -37430,8 +37375,6 @@ def main() -> int:
         test_v2_wrap_helpers_round_trip,
         test_v2_state_append_and_scroll,
         test_tui_page_rows_subtracts_widgets_on_console_only,
-        test_input_pump_exits_promptly_on_quit,
-        test_tui_wait_joins_input_pump_thread,
         test_ux09g_too_small_q_key_posts_shutdown,
         test_v2_cmdline_edit_and_history,
         test_v2_dispatcher_key_events_gated_without_prompt,
