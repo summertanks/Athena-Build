@@ -1,0 +1,88 @@
+Description: disable Rust LTO on amd64 to keep gkrust rustc under OOM threshold
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-15
+Bug-Athena: Surfaced during GROUPS-01 phase 3 gnome build 2026-05-15
+ NOT a packaging bug — addresses a HOST-RESOURCE limit that surfaces
+ as an opaque SIGKILL during the firefox-esr build:
+ .
+   error: could not compile `gkrust` (lib)
+   Caused by:
+     process didn't exit successfully: `... rustc ... -Clto ...` (signal: 9, SIGKILL: kill)
+ .
+ `gkrust` is Mozilla's monolithic Rust library for libxul.  Mozilla's
+ `config/makefiles/rust.mk` appends `-Clto` to the `cargo rustc`
+ invocation for the main gkrust crate UNCONDITIONALLY (gated only on
+ sanitizer / coverage / gtest, NOT on MOZ_LTO).  So a mozconfig
+ `--disable-lto` does NOT disable Rust LTO — it only flips
+ MOZ_LTO_RUST_CROSS between thin/fat for the cross-language link.
+ The cargo rustc -Clto for gkrust persists.
+ .
+ Under this `-Clto`, the gkrust rustc link peaks at ~6-8 GB resident.
+ With our [Source] parallelism running multiple rustc workers
+ concurrently, total RAM saturates and the kernel OAM-killer fires.
+ cargo reports the SIGKILL as opaque `signal: 9` — the actual OOM
+ message lands in host dmesg, not in the build log.
+ .
+ Debian itself already encountered this on memory-constrained archs
+ and shipped `debian-hacks/Allow-to-override-rust-LTO-flag.patch`
+ (position 9 in `debian/patches/series` — applied automatically at
+ dpkg-source extraction).  That patch makes the cargo_rustc_flags
+ line honour a `DEBIAN_RUST_LTO` env var:
+ .
+   cargo_rustc_flags += $(or $(DEBIAN_RUST_LTO),-Clto…)
+ .
+ …and gates the `-Cembed-bitcode=yes` line on `DEBIAN_RUST_LTO` not
+ being `-Clto=off` (embed-bitcode is only required when LTO is on).
+ .
+ Debian's `debian/rules` then sets `DEBIAN_RUST_LTO=-Clto=thin` for
+ armhf and `DEBIAN_RUST_LTO=-Clto=off` for s390x — both
+ memory-constrained.  amd64 is NOT in the list, so it gets the
+ default `-Clto` and OOMs on hosts with < ~24 GB headroom per
+ parallel rustc.
+ .
+ Add an amd64 clause that mirrors the s390x branch
+ (`DEBIAN_RUST_LTO=-Clto=off`).  This:
+   - Skips the cargo `-Clto` for the gkrust crate (per the
+     Allow-to-override-rust-LTO-flag patch's `$(or ...)` fallback)
+   - Skips `-Cembed-bitcode=yes` (per the same patch's
+     `ifneq (-Clto=off,$(DEBIAN_RUST_LTO))` gate)
+ .
+ Each gkrust rustc now peaks at ~2-3 GB instead of ~6-8 GB.
+ Trade-off: ~3-5% firefox runtime perf loss from no link-time
+ optimisation across the Rust codebase.  Acceptable for an
+ installable-via-tasksel browser where build reliability matters
+ more than peak benchmark numbers — same trade Debian already made
+ on s390x.
+ .
+ Why not use the mozconfig `--disable-lto`: that controls MOZ_LTO
+ (C/C++ LTO via lld), not the Rust LTO.  C++ LTO uses lld with
+ lower per-process memory and isn't the dominant OOM contributor
+ here.  The previous mozconfig-based attempt (commit 97276da)
+ was at the wrong layer and had no effect on the gkrust rustc
+ invocation — confirmed by the cargo rustc command line in the
+ failed build log still showing `-Clto`.
+ .
+ Revert this patch only when paired with confirmation that the
+ build host has ≥ ~24 GB RAM headroom for parallel LTO rustc on
+ amd64, OR when [Source] parallelism is reduced to 1 (which would
+ also cap the build at ~30-40 minutes for gkrust alone — slower
+ than the ~7 min `-Clto=off` build).
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -245,6 +245,12 @@
+ ifeq (s390x,$(DEB_BUILD_ARCH))
+ export DEBIAN_RUST_LTO=-Clto=off
+ endif
++# amd64: gkrust LTO peaks at ~6-8 GB resident per rustc; with our
++# [Source] parallelism, total RAM saturates and the kernel OOM-killer
++# fires.  Cap memory via -Clto=off; same trade as s390x above.
++ifeq (amd64,$(DEB_BUILD_ARCH))
++export DEBIAN_RUST_LTO=-Clto=off
++endif
+
+ stamps/build-$(PRODUCT):: stamps/configure-check-$(PRODUCT)
+ 	+dh_auto_build --parallel --builddirectory=build-$(PRODUCT)
