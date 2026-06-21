@@ -34524,6 +34524,28 @@ def test_mirror_pull_falls_back_to_live_claims_when_no_ledger():
             _pulled
 
 
+def test_mirror_pull_progress_is_byte_sized_with_pkg_label():
+    """mirror pull's progress bar is byte-valued (downloaded/total SIZE at
+    MB/s, auto K/M/G) with the binary package name as a fixed-width label —
+    NOT an item count / it/s."""
+    import re
+    _p = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_mirror.py')
+    with open(_p) as _fh:
+        _body = _fh.read()
+    _m = re.search(r'def cmd_mirror_pull\(self.*?(?=\n    def )',
+                   _body, re.DOTALL)
+    assert _m, "cmd_mirror_pull not found"
+    _src = _m.group(0)
+    assert "itr_label='B/s'" in _src, "rate must be byte-based (B/s), not it/s"
+    assert "_bar.step(int(_ent.get('size')" in _src, \
+        "ledger path must step by byte size"
+    assert "_bar.step(int(_c.get('size')" in _src, \
+        "fallback path must step by byte size"
+    assert "_bar.label(_fn.split('_', 1)[0])" in _src, \
+        "label must be the binary package name"
+    assert "_bar.step(1)" not in _src, "no item-count stepping should remain"
+
+
 def test_cmd_mirror_pull_redownloads_stale_reclaimed_file():
     """RECLAIM-01 Chunk 6: the pull skip-present fast path stays
     hash-free for normal claims, but a claim carrying reclaims_seq
@@ -38240,6 +38262,7 @@ def main() -> int:
         test_cmd_mirror_reclaim_lists_resolves_and_confirms,
         test_mirror_pull_ledger_drives_mixed_snapshot_download,
         test_mirror_pull_falls_back_to_live_claims_when_no_ledger,
+        test_mirror_pull_progress_is_byte_sized_with_pkg_label,
         test_cmd_mirror_pull_redownloads_stale_reclaimed_file,
         test_cmd_mirror_pull_folds_superseded_old_claim,
         test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base,
