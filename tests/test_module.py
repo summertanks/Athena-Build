@@ -29721,9 +29721,11 @@ def test_mirror_pull_write_build_records_built_pkg_records_pulled_from():
 def test_mirror_pull_write_build_records_tunneled_pkg_records_republished_from():
     """A tunneled claim (republished_from set on the wire) pulled from
     a mirror yields a local build.json with phase=tunneled +
-    republished_from copied verbatim per filename.  pulled_from stays
-    None — tunneled records use republished_from as the provenance
-    signal, not pulled_from."""
+    republished_from copied verbatim per filename.  pulled_from is ALSO
+    set {mirror_name, owner_builder}: the tunnel was ADOPTED from the
+    mirror, so generate_pending_claims must skip it (the peer never
+    re-publishes a tunnel it pulled).  A self-tunnel carries no
+    pulled_from and stays claimable."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
@@ -29765,8 +29767,61 @@ def test_mirror_pull_write_build_records_tunneled_pkg_records_republished_from()
                 'upstream_sha256': 'b' * 64,
             },
         }
-        # pulled_from is None for tunneled records
-        assert _rec['pulled_from'] is None
+        # pulled_from IS set for an adopted tunnel — provenance of the
+        # adoption (mirror + republisher) so the peer never re-claims it.
+        assert _rec['pulled_from'] == {
+            'mirror_name':   'primary',
+            'owner_builder': 'athena-team-c',
+        }
+
+
+def test_generate_pending_claims_skips_adopted_tunnel_but_keeps_self_tunnel():
+    """Federation: an ADOPTED tunnel (phase=tunneled + republished_from +
+    pulled_from, written by `mirror pull`) must NOT be re-claimed — the
+    original republisher still ships it.  A SELF-tunnel (same shape but NO
+    pulled_from, written by `cmd_tunnel_package` as the first shipper)
+    stays claimable.  Prevents a peer re-pushing byte-identical copies of
+    no-owner firmware it merely pulled."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _pub
+
+    _recs = {}
+
+    def _mk(pkg, fn, *, pulled):
+        _recs[pkg] = {
+            'package': pkg, 'intended_version': '1.0', 'built_version': '1.0',
+            'phase': 'tunneled', 'status': 'TUNNELED',
+            'outputs': [fn], 'output_hashes': {fn: 'a' * 64},
+            'component': 'non-free-firmware', 'finished': 'S',
+            'republished_from': {fn: {'url': 'http://x/' + fn,
+                                      'upstream_sha256': 'a' * 64}},
+            'pulled_from': ({'mirror_name': 'm', 'owner_builder': 'origin'}
+                            if pulled else None),
+        }
+
+    _mk('firmware-adopted', 'firmware-adopted_1.0_all.deb', pulled=True)
+    _mk('firmware-self', 'firmware-self_1.0_all.deb', pulled=False)
+
+    with tempfile.TemporaryDirectory() as _td:
+        _log = os.path.join(_td, 'log')
+        _claims_dir = os.path.join(_td, 'claims')
+        os.makedirs(_log)
+        os.makedirs(_claims_dir)
+        for _pkg in _recs:
+            with open(os.path.join(_log, _pkg + '.build.json'), 'w') as _fh:
+                _fh.write('{}')
+
+        _pending = _pub.generate_pending_claims(
+            builder_id='BS2', buildlog_dir=_log, claims_dir=_claims_dir,
+            public_key_path='/nonexistent.pub', snapshot_pin='S',
+            read_build_record=lambda _d, _p: _recs.get(_p),
+            build_arch='amd64')
+        _fns = {c.get('filename') for c in _pending}
+        assert 'firmware-self_1.0_all.deb' in _fns, (
+            "self-tunnel (no pulled_from) must stay claimable")
+        assert 'firmware-adopted_1.0_all.deb' not in _fns, (
+            "adopted tunnel (pulled_from set) must NOT be re-claimed")
 
 
 def test_mirror_pull_write_build_records_aggregates_multi_output_pkg():
@@ -38219,6 +38274,7 @@ def main() -> int:
         test_generate_pending_claims_threads_republished_from_per_output,
         test_generate_pending_claims_non_tunneled_record_carries_none,
         test_generate_pending_claims_skips_pulled_from_peer,
+        test_generate_pending_claims_skips_adopted_tunnel_but_keeps_self_tunnel,
         test_build_mode_publish_implies_no_iso,
         test_mirror_builders_register_gates_and_uploads,
         test_revoke_builder_adds_to_revoked_preserving_head,

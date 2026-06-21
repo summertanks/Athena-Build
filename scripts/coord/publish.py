@@ -99,8 +99,12 @@ def generate_pending_claims(
         # It would be ownership-blocked anyway, but skipping avoids the noise
         # and the reverse-sync footgun where a publisher that pulled a peer's
         # packages tries to take ownership of them on its next publish.
-        # (Tunneled-from-upstream records carry `republished_from`, not
-        # `pulled_from`, and stay claimable as no-owner.)
+        # This INCLUDES adopted tunnels: `mirror pull` now stamps
+        # `pulled_from` on tunneled adoptions too, so a peer that pulled a
+        # no-owner republish does NOT re-push/re-claim byte-identical copies
+        # — only the original republisher ships it.  A SELF-tunnel
+        # (`cmd_tunnel_package`, the first shipper) carries no `pulled_from`
+        # and stays claimable.
         if _rec.get('pulled_from'):
             continue
         # a deprecated/retracted source must NOT regenerate
