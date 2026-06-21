@@ -433,14 +433,59 @@ def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
         )
 
 
+def _fork_is_pull_adopted(pkg_name: str,
+                          buildconfig: 'utils.BuildConfig') -> bool:
+    """True when a fork source's binaries were ADOPTED via `mirror pull`
+    rather than built locally.
+
+    A federation peer pulls the origin's published fork binaries; its
+    fork source tree is a pristine clone that already matches them.  The
+    adopted state is recognised by the source's build record carrying a
+    `pulled_from` annotation with every recorded output present on disk.
+    Such a fork must NOT be invalidated — wiping it would force a
+    needless local rebuild and make the peer take OWNERSHIP of forks it
+    merely adopted.  This is distinct from an orphan stale artifact (no
+    pull record), which SHOULD still be wiped.  Best-effort: any read
+    error answers False (fall through to the safe wipe).
+    """
+    try:
+        _buildlog = os.path.join(buildconfig.dir_log, 'build')
+        _rec = utils.read_build_record(_buildlog, pkg_name)
+        if not _rec or not _rec.get('pulled_from'):
+            return False
+        _outputs = _rec.get('outputs') or []
+        if not _outputs:
+            return False
+        # Search the same dir set the wipe would target (all_deb_dirs) so
+        # "is it present" is symmetric with "what would be removed", and
+        # udeb routing (debian-installer/) is covered without re-deriving
+        # the per-file subdir.
+        _deb_dirs = buildconfig.all_deb_dirs()
+        for _fn in _outputs:
+            if not any(os.path.isfile(os.path.join(_d, str(_fn)))
+                       for _d in _deb_dirs):
+                return False
+        return True
+    except Exception as _e:                       # noqa: BLE001
+        logger.warning(
+            f"fork_mirror: pull-adoption check failed for {pkg_name}: "
+            f"{_e}; treating as not-adopted")
+        return False
+
+
 def _check_and_invalidate_fork_pkg(pkg_dir: str,
                                    buildconfig: 'utils.BuildConfig') -> bool:
     """Compare current tree hash against persisted .tree-hash; on
     mismatch (including first-run-no-hash), wipe downstream artifacts
     so they regenerate cleanly.
 
+    EXCEPTION — federation-peer adoption: when there is no stored hash
+    but the fork's binaries were adopted via `mirror pull` (pulled_from),
+    the tree is pristine-and-in-sync, NOT orphaned; seed the hash and
+    skip the wipe (see `_fork_is_pull_adopted`).
+
     Returns True if invalidation happened, False if hash matched
-    (no-op, cached artifacts still valid).
+    (no-op, cached artifacts still valid) or the fork is pull-adopted.
     """
     _pkg_name = os.path.basename(pkg_dir)
     _hash_file = os.path.join(
@@ -460,6 +505,25 @@ def _check_and_invalidate_fork_pkg(pkg_dir: str,
     # a pre-invalidation-mechanism era (or a partial wipe); treat as
     # mismatch and wipe so subsequent runs are deterministic.
     if _current == _stored and _stored:
+        return False
+
+    # Federation-peer adoption guard.  A fresh peer has no persisted
+    # tree-hash, yet its fork binaries + build records were ADOPTED via
+    # `mirror pull` (pulled_from), not built locally — the pristine fork
+    # source matches the binary the peer pulled.  The blanket
+    # "no stored hash ⇒ wipe" above would delete those adopted binaries
+    # and records, forcing a needless rebuild AND making the peer take
+    # ownership of forks it only adopted (a federation violation).  When
+    # the source is pull-adopted, seed the tree-hash (so the tree reads
+    # as in-sync) and skip the wipe.  A genuine LOCAL edit later — a
+    # non-empty stored hash that differs — still invalidates normally.
+    if not _stored and _fork_is_pull_adopted(_pkg_name, buildconfig):
+        _persist_tree_hash(pkg_dir, buildconfig)
+        logger.info(
+            f"fork_mirror: {_pkg_name} adopted via mirror pull "
+            f"(pulled_from) — seeding tree-hash, preserving adopted "
+            f"binaries (no rebuild, no ownership)"
+        )
         return False
 
     logger.info(

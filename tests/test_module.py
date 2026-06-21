@@ -17774,6 +17774,79 @@ def test_fork_invalidation_no_op_when_hash_matches():
             "no-op invalidation re-ran dpkg-source-b unnecessarily")
 
 
+def _plant_adopted_fork(bc, pkg, fn, *, pulled_from):
+    """Helper: place an adopted-fork build record (+/- pulled_from) and the
+    binary on disk where deb_dest_for_filename expects it; remove any
+    persisted tree-hash (fresh-peer condition).  Returns (dst_path, hash_file)."""
+    import utils as _u
+    _hash_file = os.path.join(bc.dir_fork_source_repo, pkg + '.tree-hash')
+    if os.path.exists(_hash_file):
+        os.remove(_hash_file)
+    _dst = bc.dir_repo_main          # in all_deb_dirs(); where the wipe looks
+    os.makedirs(_dst, exist_ok=True)
+    with open(os.path.join(_dst, fn), 'w') as fh:
+        fh.write('adopted bytes')
+    _rec = _u.new_build_record(package=pkg, intended_version='1.0.0',
+                               patch_set_hash='')
+    _rec.update({'phase': 'done', 'outputs': [fn], 'component': 'main'})
+    if pulled_from:
+        _rec['pulled_from'] = {'mirror_name': 'test-mirror',
+                               'owner_builder': 'origin'}
+    _u.write_build_record(os.path.join(bc.dir_log, 'build'), _rec)
+    return os.path.join(_dst, fn), _hash_file
+
+
+def test_fork_invalidation_preserves_pull_adopted_binaries_on_fresh_peer():
+    """Federation peer regression: a fork whose binaries were ADOPTED via
+    `mirror pull` (build record carries pulled_from + binary present) but
+    has NO persisted tree-hash must NOT be invalidated.  The old blanket
+    'no stored hash ⇒ wipe' deleted the adopted binary + record, forcing a
+    needless rebuild AND making the peer take OWNERSHIP of forks it only
+    adopted.  The guard seeds the tree-hash and skips the wipe."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror, utils as _u
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        _pkg = 'athena-installer-data'
+        _pkg_dir = os.path.join(bc.dir_fork_source, _pkg)
+        _fn = _pkg + '_1.0.0+thor1_all.udeb'
+        _deb, _hash_file = _plant_adopted_fork(bc, _pkg, _fn, pulled_from=True)
+
+        _wiped = fork_mirror._check_and_invalidate_fork_pkg(_pkg_dir, bc)
+
+        assert _wiped is False, "pull-adopted fork must NOT be invalidated"
+        assert os.path.isfile(_deb), (
+            "adopted fork binary was wiped — peer forced to rebuild")
+        _rec = _u.read_build_record(os.path.join(bc.dir_log, 'build'), _pkg)
+        assert _rec is not None and _rec.get('pulled_from'), (
+            "adopted pulled_from record was wiped")
+        assert os.path.isfile(_hash_file), (
+            "tree-hash not seeded → wipe would recur every cache build")
+
+
+def test_fork_invalidation_still_wipes_orphan_without_pull_record():
+    """Guard must NOT weaken orphan cleanup: a fork binary present with NO
+    pulled_from record and NO stored hash is a genuine orphan and MUST
+    still be wiped (deterministic rebuild)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        _pkg = 'athena-installer-data'
+        _pkg_dir = os.path.join(bc.dir_fork_source, _pkg)
+        _fn = _pkg + '_1.0.0+thor1_all.udeb'
+        _deb, _ = _plant_adopted_fork(bc, _pkg, _fn, pulled_from=False)
+
+        _wiped = fork_mirror._check_and_invalidate_fork_pkg(_pkg_dir, bc)
+
+        assert _wiped is True, "orphan (no pull record) must still invalidate"
+        assert not os.path.isfile(_deb), "orphan binary should have been wiped"
+
+
 def test_fork_invalidation_covers_multi_binary_via_control_parse():
     """When a fork ships multiple binaries (athena-tasksel produces
     athena-tasksel + athena-tasksel-data), the wipe must hit each
@@ -37637,6 +37710,8 @@ def main() -> int:
         test_compute_tree_hash_missing_root_returns_empty_digest,
         test_fork_invalidation_wipes_artifacts_on_content_change,
         test_fork_invalidation_no_op_when_hash_matches,
+        test_fork_invalidation_preserves_pull_adopted_binaries_on_fresh_peer,
+        test_fork_invalidation_still_wipes_orphan_without_pull_record,
         test_fork_invalidation_covers_multi_binary_via_control_parse,
         test_binary_names_from_control_extracts_all_package_stanzas,
         test_compute_dep_hash_changes_on_depends_field_edit,
