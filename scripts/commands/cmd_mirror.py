@@ -2075,11 +2075,16 @@ class MirrorCommandsMixin(SessionState):
 
           - If any claim has `republished_from` (tunneled on mirror) →
             local record `phase='tunneled'`, `republished_from` copied
-            verbatim per-filename.  matches what cmd_tunnel_package
-            would have written if we'd tunneled locally.
-          - Else → local record `phase='done'`, `pulled_from` set to
-            `{mirror_name, owner_builder}` so subsequent `source
-            audit` runs know the file's provenance.
+            verbatim per-filename.
+          - Otherwise `phase='done'`.
+          - EITHER way the record carries `pulled_from`
+            `{mirror_name, owner_builder}`: these files were ADOPTED from
+            the mirror, so `generate_pending_claims` skips them and the
+            peer never re-publishes/re-claims them — INCLUDING adopted
+            tunnels, which the original republisher still ships (a peer
+            re-pushing byte-identical copies is pure duplication).  A
+            SELF-tunnel (`cmd_tunnel_package`) carries NO `pulled_from`
+            and stays claimable as the first shipper.
 
         SKIPS packages with no claims in `per_pkg`.  Skips on write
         failure (logged, but the pull itself succeeded — the .deb is
@@ -2115,12 +2120,14 @@ class MirrorCommandsMixin(SessionState):
                     if _fn:
                         _republished_from[_fn] = _rfrom
             _is_tunneled = bool(_republished_from)
-            # Owner builder for the local pulled_from annotation.
-            # All claims for one source on a mirror should share an
-            # owner (or all be tunneled).  Pick the first non-empty.
+            # Builder we ADOPTED these files from (the remote claim's
+            # owner / republisher).  Captured for tunneled adoptions TOO:
+            # a tunnel pulled off a mirror was adopted from whoever
+            # republished it, so pulled_from must be set and the peer must
+            # NOT re-publish it.  All claims for one source share an owner.
             _owner_builder = ''
             for _c, _bid_remote in _items:
-                if _bid_remote and not _is_tunneled:
+                if _bid_remote:
                     _owner_builder = str(_bid_remote)
                     break
             _now = utils._utc_now_iso()
@@ -2168,10 +2175,13 @@ class MirrorCommandsMixin(SessionState):
                 'outputs':          _outputs,
                 'output_hashes':    _output_hashes,
                 'republished_from': _republished_from,
-                'pulled_from':      (None if _is_tunneled else {
+                # Set for tunneled adoptions too — see docstring: an
+                # adopted tunnel is NOT re-claimed (only the original
+                # republisher ships it); a self-tunnel has no pulled_from.
+                'pulled_from':      {
                     'mirror_name':    mirror_name,
                     'owner_builder':  _owner_builder,
-                }),
+                },
                 'component':        _comp,
             })
             try:
