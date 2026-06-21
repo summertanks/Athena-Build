@@ -172,7 +172,41 @@ class SourceCommandsMixin(SessionState):
                           # produces a proper terminal phase.
         'stale_pass',     # record=PASS but state has drifted (binaries
                           # gone OR patches changed) — repair would CLEAR
+        'needs_bump',     # binaries present + record=PASS, but a newer
+                          # same-base security/NMU re-spin (~debNuN) is in
+                          # the snapshot → needs a fresh +asg<R>u<N>
+                          # rebuild.  The OLD binary is valid (so
+                          # `_source_state` alone says 'ok'; its
+                          # find_matching_artifact gate accepts a stale
+                          # +asg) — only the stricter exact-uN
+                          # `_needs_bump_build` catches it.  Surfaced by
+                          # `_audit_state` so the audit rebuild queue
+                          # matches UPDATE-mode `source build`.  Repair
+                          # LEAVES ALONE (the present binary isn't a lie —
+                          # it's simply superseded by an upstream update).
     )
+
+    def _audit_state(self, pkg: str, src, bump_ledger: dict,
+                     bump_release: 'int | None') -> str:
+        """`_source_state` + the UPDATE-mode re-spin reclassification.
+
+        `_source_state`'s predicted-binary check uses
+        `find_matching_artifact`, which accepts a STALE older +asg as
+        "present" — so a same-base security/NMU re-spin (e.g. apache2
+        2.4.67-1~deb12u2 → ~deb12u3) classifies 'ok' even though `source
+        build` (UPDATE mode) WILL rebuild it via the stricter exact-uN
+        `_needs_bump_build` gate.  Reclassify such a source to
+        'needs_bump' so the audit rebuild queue matches what `source
+        build` actually does.  Only an otherwise-'ok' source is ever
+        reclassified — a hard state (needs_build / stale_pass / …) is
+        already actionable and left intact.  Read-only, no container.
+        """
+        _state = self._source_state(pkg, src)
+        if (_state == 'ok' and bump_release is not None
+                and self._needs_bump_build(
+                    pkg, src, bump_ledger, bump_release)):
+            return 'needs_bump'
+        return _state
 
     def _source_state(self, pkg: str, src) -> str:
         """Classify one source's current state.  Returns one of
@@ -796,6 +830,13 @@ class SourceCommandsMixin(SessionState):
                           (binaries gone OR patches changed since last
                           successful build) → run `source repair` to
                           clear the lie; next `source build` will rebuild.
+          needs_bump    — WARN: binary present + record=PASS, but a newer
+                          same-base security/NMU re-spin (~debNuN) is in
+                          the snapshot → `source build` (UPDATE mode)
+                          rebuilds it +asg-stamped.  Surfaced so the
+                          rebuild queue matches what `source build` does
+                          (the lenient 'ok' presence check accepts the
+                          stale +asg; `_needs_bump_build` is stricter).
           interrupted   — WARN: record has a non-terminal phase (build
                           was killed mid-flight) → run `source repair`
                           to clear the record; next `source build` will
@@ -844,6 +885,19 @@ class SourceCommandsMixin(SessionState):
         _verbose = 'verbose' in args
         _summary = 'summary' in args
 
+        # Published manifest + release for the same-base re-spin (+asg
+        # bump) detection in `_audit_state` — surfaces 'needs_bump' so the
+        # rebuild queue matches UPDATE-mode `source build`.  N authority is
+        # the PUBLISHED manifest only (mirrors `_do_update_build`).
+        # Read-only, no container required.
+        _bump_ledger = repo_audit.published_ledger(self.config)
+        _bump_release: 'int | None' = None
+        try:
+            _bump_release = int(
+                str(self.config.build_version).strip('"').strip("'"))
+        except (TypeError, ValueError):
+            pass
+
         # Merge deb + udeb dep trees.  Source objects shared via
         # source_hashtable, so the dict-update naturally dedupes.
         assert self.dep_tree is not None
@@ -864,7 +918,8 @@ class SourceCommandsMixin(SessionState):
         try:
             for _name, _src in sorted(_srcs.items()):
                 _bar.step(1)
-                _state = self._source_state(_name, _src)
+                _state = self._audit_state(
+                    _name, _src, _bump_ledger, _bump_release)
                 _by_state[_state].append(_name)
         finally:
             _bar.close()
@@ -901,6 +956,7 @@ class SourceCommandsMixin(SessionState):
         _rebuild_candidates = (
             _by_state.get('needs_build', [])
             + _by_state.get('stale_pass', [])
+            + _by_state.get('needs_bump', [])
         )
         _by_subset: 'dict[str, list[str]]' = _dd(list)
         for _n in _rebuild_candidates:
@@ -943,6 +999,13 @@ class SourceCommandsMixin(SessionState):
                 f"  {len(_by_state['stale_pass']):5d}  "
                 "stale_pass (WARN: record=PASS but state drifted; "
                 "run `source repair`)",
+                tui.COLOR_WARNING,
+            )
+        if _by_state.get('needs_bump'):
+            console.print(
+                f"  {len(_by_state['needs_bump']):5d}  "
+                "needs_bump (upstream security/NMU re-spin available — "
+                "`source build` rebuilds it +asg-stamped)",
                 tui.COLOR_WARNING,
             )
         if _by_state.get('interrupted'):
@@ -1001,8 +1064,8 @@ class SourceCommandsMixin(SessionState):
         # actionable state is non-empty.  One line per state, names
         # wrapped to fit terminal width.  `verbose` adds per-name
         # subset annotation.
-        _actionable = ('needs_build', 'stale_pass', 'interrupted',
-                       'needs_sync')
+        _actionable = ('needs_build', 'stale_pass', 'needs_bump',
+                       'interrupted', 'needs_sync')
         _any_actionable = any(_by_state.get(_s) for _s in _actionable)
         if _any_actionable:
             console.print("")
