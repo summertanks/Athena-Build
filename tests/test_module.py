@@ -1022,6 +1022,14 @@ def test_source_audit_naturally_scopes_to_indl_in_build_mode():
     # the classification).
     _sess._source_state = lambda _n, _s: 'ok'                # type: ignore[method-assign]
     _sess._print_obsolete_patch_warning = lambda _srcs: None # type: ignore[method-assign]
+    # cmd_source_audit now consults the published manifest + the UPDATE-mode
+    # 'needs_bump' check (_audit_state).  Stub both so this scope test stays
+    # isolated: no real ledger file, no re-spin → still classifies 'ok'.
+    _sess.config = type('_C', (), {'build_version': '1'})()
+    _sess._needs_bump_build = lambda *_a, **_k: False        # type: ignore[method-assign]
+    import repo_audit as _ra
+    _orig_pl = _ra.published_ledger
+    _ra.published_ledger = lambda _cfg: {}
 
     _lines: 'list[str]' = []
     _orig = build.console.print
@@ -1031,6 +1039,7 @@ def test_source_audit_naturally_scopes_to_indl_in_build_mode():
         _sess.cmd_source_audit()
     finally:
         build.console.print = _orig
+        _ra.published_ledger = _orig_pl
     _joined = '\n'.join(_lines)
     # Audit reports the corpus-size totals.  selected_srcs has 1
     # entry → total = 1 (would be hundreds in dist mode).
@@ -25429,6 +25438,37 @@ def test_needs_bump_build_per_file_exact_un():
         assert _sess._needs_bump_build('foo', _delta, _led2, 1) is False
 
 
+def test_audit_state_reclassifies_security_respin_as_needs_bump():
+    """`_audit_state` surfaces a same-base security/NMU re-spin as
+    'needs_bump' when `_source_state` calls it 'ok' (lenient +asg presence)
+    but `_needs_bump_build` says a fresh +asg bump is due — so the audit
+    rebuild queue matches UPDATE-mode `source build`.  Only an otherwise-'ok'
+    source is reclassified; hard states and release=None are left intact."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    _src = object()
+
+    # binary present ('ok') + a bump is due → 'needs_bump'
+    _sess._source_state = lambda p, s: 'ok'
+    _sess._needs_bump_build = lambda p, s, lg, rl: True
+    assert _sess._audit_state('apache2', _src, {}, 1) == 'needs_bump'
+
+    # 'ok' but NO bump due → stays 'ok'
+    _sess._needs_bump_build = lambda p, s, lg, rl: False
+    assert _sess._audit_state('apache2', _src, {}, 1) == 'ok'
+
+    # a hard state is NEVER reclassified, even if a bump would be due
+    _sess._source_state = lambda p, s: 'needs_build'
+    _sess._needs_bump_build = lambda p, s, lg, rl: True
+    assert _sess._audit_state('apache2', _src, {}, 1) == 'needs_build'
+
+    # release=None (non-integer VERSION) → bump check skipped, returns 'ok'
+    _sess._source_state = lambda p, s: 'ok'
+    _sess._needs_bump_build = lambda p, s, lg, rl: True
+    assert _sess._audit_state('apache2', _src, {}, None) == 'ok'
+
+
 def test_preflight_stamp_invariant_roundtrips_and_flags_bad_version():
     """Guard A: a clean prediction round-trips (no offenders); a non-integer
     [Build] VERSION is flagged BEFORE any build."""
@@ -38120,6 +38160,7 @@ def main() -> int:
         test_generate_top_release_avoids_self_reference_via_tempfile,
         # UPD-01 step 6: workload + Guard A preflight
         test_needs_bump_build_per_file_exact_un,
+        test_audit_state_reclassifies_security_respin_as_needs_bump,
         test_preflight_stamp_invariant_roundtrips_and_flags_bad_version,
         # UPD-01 steps 7-8: snapshot commands + repo refresh orchestrator
         test_reconcile_snapshot_pin_syncs_build_conf_to_state,
