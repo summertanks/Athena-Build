@@ -1614,48 +1614,60 @@ class MirrorCommandsMixin(SessionState):
                         "back to live claims", tui.COLOR_WARNING)
                     _ledger = None
 
+            # Byte-valued progress: the bar shows downloaded/total SIZE (auto
+            # K/M/G) at MB/s, with the current binary package name as a fixed-
+            # width label — far more meaningful than an item count for a
+            # multi-GB fresh-peer adoption.  step() advances by each file's
+            # byte size; the ProgressBar already humanises value/total and the
+            # rate (`itr_label='B/s'` → "5.20MB/s").
             if _ledger is not None:
                 _entries = _ledger.get('entries') or {}
+                _total_b = sum(int(_e.get('size') or 0)
+                               for _e in _entries.values())
                 _bar = ProgressBar(
-                    label=f'pull {_n}', maxvalue=max(len(_entries), 1),
-                    show_rate=True)
+                    label=f'pull {_n}', itr_label='B/s',
+                    maxvalue=max(_total_b, 1), show_rate=True,
+                    label_width=26, bar_width=20)
                 for _ent in _entries.values():
-                    _bar.step(1)
                     _fn = _ent.get('filename')
                     if not isinstance(_fn, str) or not _fn:
                         continue
+                    _bar.label(_fn.split('_', 1)[0])     # binary package name
                     _claim, _builder = _claim_by_fn.get(_fn, (None, None))
-                    # ownership: a file WE built is already local — skip.
                     if _claim is not None and _claim.get('builder') == _bid:
-                        _skip_own += 1
-                        continue
-                    if _claim is None:
+                        _skip_own += 1                   # a file WE built
+                    elif _claim is None:
                         # ledger names a file no live claim covers — anomaly
                         # (audit catches it); can't record provenance, skip.
                         _no_claim += 1
-                        continue
-                    _pull_file(
-                        _fn, str(_ent.get('sha256') or ''),
-                        str(_ent.get('component') or 'main'),
-                        _claim, _builder,
-                        isinstance(_claim.get('reclaims_seq'), int))
+                    else:
+                        _pull_file(
+                            _fn, str(_ent.get('sha256') or ''),
+                            str(_ent.get('component') or 'main'),
+                            _claim, _builder,
+                            isinstance(_claim.get('reclaims_seq'), int))
+                    _bar.step(int(_ent.get('size') or 0))
             else:
                 # Fallback: walk the live-claim set.  NO snapshot-equality
                 # filter — the supersession fold above already leaves one
                 # live version per filename across base..current.
+                _total_b = sum(int(_c.get('size') or 0)
+                               for _c, _ in _claim_by_fn.values())
                 _bar = ProgressBar(
-                    label=f'pull {_n}', maxvalue=max(len(_claim_by_fn), 1),
-                    show_rate=True)
+                    label=f'pull {_n}', itr_label='B/s',
+                    maxvalue=max(_total_b, 1), show_rate=True,
+                    label_width=26, bar_width=20)
                 for _fn, (_c, _builder) in _claim_by_fn.items():
-                    _bar.step(1)
+                    _bar.label(_fn.split('_', 1)[0])     # binary package name
                     if _c.get('builder') == _bid:
                         _skip_own += 1
-                        continue
-                    _pull_file(
-                        _fn, str(_c.get('sha256') or ''),
-                        str(_c.get('component') or 'main'),
-                        _c, _builder,
-                        isinstance(_c.get('reclaims_seq'), int))
+                    else:
+                        _pull_file(
+                            _fn, str(_c.get('sha256') or ''),
+                            str(_c.get('component') or 'main'),
+                            _c, _builder,
+                            isinstance(_c.get('reclaims_seq'), int))
+                    _bar.step(int(_c.get('size') or 0))
             # write local build.json record per
             # pulled package so source audit + repo audit see the .deb
             # as already-present (not needs_build).  Tunneled claims
