@@ -187,7 +187,8 @@ class SourceCommandsMixin(SessionState):
     )
 
     def _audit_state(self, pkg: str, src, bump_ledger: dict,
-                     bump_release: 'int | None') -> str:
+                     bump_release: 'int | None',
+                     workload_set: 'set[str]') -> str:
         """`_source_state` + the UPDATE-mode re-spin reclassification.
 
         `_source_state`'s predicted-binary check uses
@@ -197,12 +198,25 @@ class SourceCommandsMixin(SessionState):
         build` (UPDATE mode) WILL rebuild it via the stricter exact-uN
         `_needs_bump_build` gate.  Reclassify such a source to
         'needs_bump' so the audit rebuild queue matches what `source
-        build` actually does.  Only an otherwise-'ok' source is ever
-        reclassified — a hard state (needs_build / stale_pass / …) is
-        already actionable and left intact.  Read-only, no container.
+        build` actually does.
+
+        CRITICAL — scope to `workload_set` (the snapshot-delta sources
+        that actually changed between mirror floor and current).
+        `_needs_bump_build` is only meaningful for a workload source:
+        run on the WHOLE corpus it false-flags every adopted ~debNuN
+        package, because `asg_next_n` predicts a NEXT-generation +asg-N
+        that isn't on disk for a source whose adopted binary is already
+        current.  `_do_update_build` only checks the workload too — so
+        scoping here is what keeps the two in lock-step (178-false-flag
+        regression, 2026-06-21).
+
+        Only an otherwise-'ok' source is ever reclassified — a hard
+        state (needs_build / stale_pass / …) is already actionable and
+        left intact.  Read-only, no container.
         """
         _state = self._source_state(pkg, src)
         if (_state == 'ok' and bump_release is not None
+                and pkg in workload_set
                 and self._needs_bump_build(
                     pkg, src, bump_ledger, bump_release)):
             return 'needs_bump'
@@ -898,6 +912,21 @@ class SourceCommandsMixin(SessionState):
         except (TypeError, ValueError):
             pass
 
+        # Re-spin (+asg bump) targets are ONLY the snapshot-delta workload —
+        # sources whose version actually changed between the mirror floor and
+        # current.  Running _needs_bump_build over the WHOLE corpus false-flags
+        # every adopted ~debNuN package (asg_next_n predicts a next-gen +asg
+        # that isn't on disk); _do_update_build only checks the workload, so
+        # scope to it to keep audit ⇄ build in lock-step.  Gated on the cheap
+        # _update_build_pending() so a non-UPDATE-mode audit skips the
+        # floor-Sources fetch entirely.  A fetch failure degrades to "no
+        # bump targets" (under-report) — never the 178-false-flag over-report.
+        _workload_set: 'set[str]' = set()
+        if _bump_release is not None and self._update_build_pending():
+            _wl, _wl_err = self._workload_since_snapshot(self._mirror_floor())
+            if _wl_err is None and _wl is not None:
+                _workload_set = set(_wl)
+
         # Merge deb + udeb dep trees.  Source objects shared via
         # source_hashtable, so the dict-update naturally dedupes.
         assert self.dep_tree is not None
@@ -919,7 +948,7 @@ class SourceCommandsMixin(SessionState):
             for _name, _src in sorted(_srcs.items()):
                 _bar.step(1)
                 _state = self._audit_state(
-                    _name, _src, _bump_ledger, _bump_release)
+                    _name, _src, _bump_ledger, _bump_release, _workload_set)
                 _by_state[_state].append(_name)
         finally:
             _bar.close()
