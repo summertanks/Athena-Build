@@ -593,12 +593,31 @@ def local_published_packages_text(config: 'BuildConfig') -> str:
     return '\n'.join(_parts)
 
 
+_PUBLISHED_LEDGER_CACHE: 'dict' = {}
+
+
 def published_ledger(config: 'BuildConfig') -> 'dict[str, list[str]]':
     """The authoritative {package: [version,...]} ledger for +asg bump
     derivation + merge-index — from the LOCAL signed manifest (works offline).
-    Empty dict when nothing has been published yet."""
+    Empty dict when nothing has been published yet.
+
+    Memoised on the manifest's (path, mtime, size): `source audit` calls this
+    up to 3x and each call re-read + GPG-verified + re-parsed the whole
+    manifest (the audit-startup delay).  Re-reads only when the manifest
+    actually changes (e.g. after a `mirror publish` in the same process).
+    Callers treat the result read-only.
+    """
+    _path = local_manifest_path(config)
+    try:
+        _st = os.stat(_path)
+        _key: tuple = (_path, _st.st_mtime_ns, _st.st_size)
+    except OSError:
+        _key = (_path, None, None)
+    if _key in _PUBLISHED_LEDGER_CACHE:
+        return _PUBLISHED_LEDGER_CACHE[_key]
     _text = read_published_manifest(config)
     if not _text.strip():
+        _PUBLISHED_LEDGER_CACHE[_key] = {}
         return {}
     import tempfile
     with tempfile.NamedTemporaryFile('w', suffix='.Packages',
@@ -606,9 +625,11 @@ def published_ledger(config: 'BuildConfig') -> 'dict[str, list[str]]':
         _fh.write(_text)
         _tp = _fh.name
     try:
-        return parse_packages_to_ledger(_tp)
+        _result = parse_packages_to_ledger(_tp)
     finally:
         os.remove(_tp)
+    _PUBLISHED_LEDGER_CACHE[_key] = _result
+    return _result
 
 
 def highest_stanza_per_pkg_arch(

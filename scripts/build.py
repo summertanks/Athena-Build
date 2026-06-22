@@ -1013,12 +1013,15 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             logger.error(f"BuildContainer() raised: {e}")
 
     def cmd_init_remote_container(self):
-        """Set up a RECIPE-ONLY build container for `source remotebuild` — no
-        local Docker connection and no local image build (the build runs on the
-        remote host).  Provides compose_recipe() + the post-build pipeline,
-        which are config-derived + file ops and need neither a local daemon nor
-        a local image.  Like `container init`, requires `cache build` first so
-        the recipe can expand virtual build-deps.
+        """Set up the build container for `source remotebuild` and ENSURE the
+        toolchain image for the SELECTED snapshot is on the remote host.
+
+        Locally it builds no image (the build runs on the remote) — it just
+        provides compose_recipe() + the post-build pipeline (config-derived +
+        file ops).  Then it ensures the remote's image: confirms if present,
+        streams it over the LAN if this host has it cached, else reports that
+        the first `source remotebuild` will build it on the remote.  Like
+        `container init`, requires `cache build` first.
         """
         self.flags.build_container_ready = False
         if not self.flags.cache_ready:
@@ -1026,17 +1029,36 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 "container init remote: requires `cache build` first "
                 "(the recipe expands virtual Build-Depends from the cache)")
             return
+        _host = getattr(self.config, 'remote_build_host', '') or ''
+        if not _host:
+            console.print(
+                "container init remote: set `[Build] RemoteBuildHost = "
+                "ssh://user@host` in config first")
+            return
         try:
             self.container = buildcontainer.BuildContainer(
                 self.config, cache=self.cache, connect=False)
-            self.flags.build_container_ready = True
-            console.print(
-                "  Remote build container ready (recipe-only — no local image)")
         except (RuntimeError,
                 buildcontainer.docker.errors.DockerException) as e:
             console.print(
                 f"  ERROR: remote build container init failed — {e}")
             logger.error(f"BuildContainer(connect=False) raised: {e}")
+            return
+        self.flags.build_container_ready = True
+        # Ensure the build image for the selected snapshot is on the remote:
+        # confirm if present, LAN-transfer if this host has it cached, else
+        # note it builds on the first `source remotebuild`.
+        import remote_orchestrate as _ro
+        _tag = self.container._image_tag
+        _state = _ro.ensure_remote_image(
+            _ro.parse_ssh_host(_host), _tag, log=console.print)
+        _how = {'present':     'present on remote',
+                'transferred': 'transferred over the LAN',
+                'build':       'absent — builds on first remotebuild'}.get(
+                    _state, _state)
+        console.print(
+            f"  Remote build container ready — image {_tag}: {_how}",
+            tui.COLOR_HIGHLIGHT)
 
 
     # ------------------------------------Command: build_bootable------------
