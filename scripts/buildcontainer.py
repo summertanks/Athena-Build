@@ -1477,7 +1477,13 @@ class BuildContainer:
 
             return _build_result
 
-        except docker.errors.APIError as e:
+        except _DOCKER_RELOAD_ERRORS as e:
+            # _DOCKER_RELOAD_ERRORS = APIError + the RAW urllib3/requests
+            # transient timeouts.  A bare `docker.errors.APIError` here would
+            # let a urllib3 ReadTimeoutError (NOT an APIError) escape the
+            # worker mid-build and crash the thread instead of recording a
+            # clean phase=failed — so the audit would see 'interrupted' and
+            # silently rebuild.  Catch the transient too and fail cleanly.
             _cid = container.short_id if container is not None else '<not-started>'
             logger.error(
                 f"Athena Build Docker error for {src_pkg.package} "
@@ -1503,9 +1509,19 @@ class BuildContainer:
             if container is not None:
                 try:
                     container.remove(force=True)
-                except docker.errors.APIError as e:
+                except _DOCKER_RELOAD_ERRORS as e:
                     # Cleanup failure is non-fatal — surface but do not
-                    # mask the original exception or build result.
+                    # mask the original exception or build result.  CRITICAL:
+                    # catch the RAW urllib3/requests transient timeouts too,
+                    # not just docker.errors.APIError.  When a heavy container
+                    # (e.g. libreoffice) is saturating dockerd, a sibling
+                    # build's force-remove can block past the client read
+                    # timeout and surface a urllib3 ReadTimeoutError.  The
+                    # build itself already SUCCEEDED (phase=done written
+                    # above); a bare APIError catch would let that timeout
+                    # escape the finally, mask the successful return, and the
+                    # worker would be tallied as FAILED.  Swallow it — the
+                    # container is left for reap_all_live to sweep.
                     logger.warning(
                         f"Failed to remove container {container.short_id} "
                         f"for {src_pkg.package}: {e}"
