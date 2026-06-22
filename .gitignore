@@ -95,3 +95,6 @@ fork/source/*/debian/debhelper-build-stamp
 
 # machine-local HMAC-signed selection sidecar (per-builder; never commit)
 config/selection.state
+
+# Generated frozen toolchain version stamp (scripts/freeze via bump_version --freeze-stamp)
+scripts/_buildstamp.py
