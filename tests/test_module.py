@@ -219,7 +219,6 @@ def _build_config_from(tmpdir: str, cfg_path: str):
 _BASE_CONF_BODY = """
     [Build]
     ARCH = amd64
-    NAME = "Test"
     DISTRIBUTION = "Testdistro"
     CODENAME = "test"
     VERSION = "1"
@@ -231,7 +230,6 @@ _BASE_CONF_BODY = """
     BASEID = debian
     RELEASE = bookworm
     BASEVERSION = 12.0
-    CONTAINER_RELEASE = bookworm
     {mirror_block}
     [Directories]
     Log = log
@@ -300,6 +298,28 @@ def test_buildconfig_mode_rejects_unknown_value():
         assert not cfg.is_valid
         assert "'distribution' or 'build'" in cfg.error_str
         assert 'banana' in cfg.error_str
+
+
+def test_container_release_defaults_to_release_unless_overridden():
+    """CONTAINER_RELEASE auto-tracks RELEASE when absent (container + target
+    stay in lockstep), and an explicit value pins it independently."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # absent → defaults to RELEASE (bookworm in the base fixture)
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
+        assert cfg.container_release == cfg.release == 'bookworm'
+    # explicit override holds the container behind/ahead of the target
+    _body = _BASE_CONF_BODY.replace(
+        'BASEVERSION = 12.0',
+        'BASEVERSION = 12.0\n    CONTAINER_RELEASE = trixie')
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _body.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
+        assert cfg.release == 'bookworm' and cfg.container_release == 'trixie'
 
 
 def _write_local_conf(tmp: str, body: str) -> None:
@@ -37484,6 +37504,7 @@ def main() -> int:
         test_buildconfig_mode_defaults_to_distribution,
         test_buildconfig_mode_build_mode_parses,
         test_buildconfig_mode_rejects_unknown_value,
+        test_container_release_defaults_to_release_unless_overridden,
         test_local_conf_mode_overrides_build_conf,
         test_local_conf_absent_falls_back_to_build_conf,
         test_local_conf_malformed_invalidates_config,

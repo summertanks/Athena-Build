@@ -62,17 +62,6 @@ logger = logging.getLogger('athena.cache')
 # truth rather than each carrying its own identical copy.
 VALID_CONSTRAINTS = frozenset({'=', '>=', '<=', '>>', '<<', '>', '<'})
 
-
-# Defaults previously hardcoded as `fallback=` literals inline in
-# BuildConfig.__init__ (HK-01e consolidation).  Promoted here so the
-# next-time-we-need-it edit happens in one place and is greppable.
-#
-# _DEFAULT_CONTAINER_RELEASE — Debian release the build container
-# pins to when [Base] CONTAINER_RELEASE is absent.  Today's only
-# tested target is bookworm; trixie would work but is unverified.
-# A non-Debian distro under COMP-11 would override this.
-_DEFAULT_CONTAINER_RELEASE = 'bookworm'
-
 # _DEFAULT_SECURITY_KEYRING — InRelease verification keyring.  The
 # host-installed debian-archive-keyring is the canonical default on
 # any Debian-derived build host.  A fork shipping its own keyring
@@ -2352,12 +2341,13 @@ class BuildConfig:
             self.build_codename     = _strip_quotes(config_parser.get('Build', 'CODENAME'))
             self.build_version      = _strip_quotes(config_parser.get('Build', 'VERSION'))
 
-            # CONTAINER_RELEASE lives under [Base] — it's a base-system
-            # pin (Debian release the build container tracks), not an
-            # Athena-build knob.  Moved from [Build] 2026-05-29.
+            # CONTAINER_RELEASE lives under [Base] — the Debian release the
+            # build container tracks.  Defaults to RELEASE so the container
+            # tracks the target unless explicitly pinned behind it; a hardcoded
+            # default would silently skew the image tag + dependency tree when
+            # RELEASE is rebased.
             self.container_release = config_parser.get(
-                'Base', 'CONTAINER_RELEASE',
-                fallback=_DEFAULT_CONTAINER_RELEASE)
+                'Base', 'CONTAINER_RELEASE', fallback=self.release)
             self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
             # When true, depth-1 Recommends of selected packages are
             # pulled into selected_pkgs / selected_srcs (downloaded but not
