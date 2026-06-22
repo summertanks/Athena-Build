@@ -21683,6 +21683,48 @@ def test_docker_wait_for_exit_survives_read_timeouts():
     assert _propagated, "NotFound should propagate, not be swallowed"
 
 
+def test_docker_wait_for_exit_survives_raw_urllib3_timeout():
+    """Regression (firefox-esr -j1, 2026-06-21): docker-py's low-level
+    wait()/log-stream can raise the RAW urllib3 variants —
+    ReadTimeoutError (subclasses urllib3 TimeoutError, NOT requests.Timeout)
+    and ProtocolError (dropped keep-alive) — which the old _DOCKER_TRANSIENT
+    (requests-only) missed, so a quiet multi-hour build phase escaped
+    keep-polling and force-removed a healthy container.  _wait_for_exit must
+    keep-poll on these too and return the real exit code."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import urllib3.exceptions as _u3
+    import buildcontainer
+
+    class _Flaky:
+        short_id = 'u3'
+
+        def __init__(self, mk, timeouts):
+            self._left = timeouts
+            self._mk = mk
+            self.attrs = {'State': {'Status': 'running', 'Running': True}}
+
+        def wait(self):
+            if self._left > 0:
+                self._left -= 1
+                raise self._mk()
+            return {'StatusCode': 0}
+
+        def reload(self):
+            if self._left == 0:
+                self.attrs = {'State': {'Status': 'exited',
+                                        'Running': False, 'ExitCode': 0}}
+
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    # raw urllib3 ReadTimeoutError → keep-poll to real exit, never propagate
+    assert _bc._wait_for_exit(
+        _Flaky(lambda: _u3.ReadTimeoutError(None, '/', 'Read timed out'), 3)
+    ) == {'StatusCode': 0}
+    # urllib3 ProtocolError (dropped keep-alive mid-stream) → also keep-poll
+    assert _bc._wait_for_exit(
+        _Flaky(lambda: _u3.ProtocolError('Connection broken'), 2)
+    ) == {'StatusCode': 0}
+
+
 def test_sta32_wait_for_exit_tolerates_transient_reload():
     """STA-32(b): the recovery container.reload() is another HTTP GET — in
     the same daemon hiccup that timed out wait() it can raise a TRANSIENT
@@ -38010,6 +38052,7 @@ def main() -> int:
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
+        test_docker_wait_for_exit_survives_raw_urllib3_timeout,
         test_sta32_wait_for_exit_tolerates_transient_reload,
         test_sta32_pid_alive_and_connect_error_tuples,
         test_sta32_connect_and_reap_use_widened_handling,

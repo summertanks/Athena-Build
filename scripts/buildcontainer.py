@@ -16,6 +16,7 @@ from package import Source
 import docker
 import docker.errors  # noqa: F401 — explicit import so `docker.errors.X` resolves under mypy
 import requests.exceptions as _req_exc
+import urllib3.exceptions as _u3_exc
 import tui
 
 # Docker client read-timeout.  docker-py's default is 60s, which is the
@@ -30,11 +31,25 @@ import tui
 # only sets poll granularity).  Override via [Build] DockerTimeout.
 _DOCKER_TIMEOUT_DEFAULT = 1800   # 30 min
 
-# docker-py raises these (requests-layer) on a read/connection timeout;
-# we treat them as 'container still running, keep polling', never as a
-# build failure.  A genuinely-gone container raises docker.errors.NotFound
-# (reap_all_live) which deliberately propagates.
-_DOCKER_TRANSIENT = (_req_exc.Timeout, _req_exc.ConnectionError)
+# docker-py raises these on a read/connection timeout; we treat them as
+# 'container still running, keep polling', never as a build failure.  A
+# genuinely-gone container raises docker.errors.NotFound (reap_all_live)
+# which deliberately propagates.
+#
+# CRITICAL: include the RAW urllib3 variants, not just the requests-layer
+# wrappers.  docker-py's low-level log-stream (`container.logs(stream=True)`)
+# and `container.wait()` can surface `urllib3.exceptions.ReadTimeoutError`
+# / `ConnectTimeoutError` (both subclass urllib3's `TimeoutError`) and
+# `ProtocolError` (dropped keep-alive) WITHOUT wrapping them in
+# requests.exceptions — and those are NOT subclasses of `requests.Timeout`.
+# Without them, a quiet build phase longer than DockerTimeout escaped the
+# keep-polling in _stream_and_wait/_wait_for_exit, propagated past build()'s
+# `except docker.errors.APIError`, and the finally force-removed a HEALTHY
+# multi-hour build (firefox-esr at -j1, ~3-5h, killed at 30 min — 2026-06-21).
+_DOCKER_TRANSIENT = (
+    _req_exc.Timeout, _req_exc.ConnectionError,
+    _u3_exc.TimeoutError, _u3_exc.ProtocolError,
+)
 
 # docker-py's `DockerException` is the BASE class; `APIError` is a
 # subclass, so `except docker.errors.APIError` MISSES a raw
