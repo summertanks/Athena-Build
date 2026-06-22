@@ -21824,6 +21824,42 @@ def test_docker_stream_and_wait_backfills_log_on_timeout():
         assert 'full transcript' in open(_log).read()
 
 
+def test_build_source_cleanup_timeout_does_not_mask_success():
+    """Regression (BS2 3-way parallel, 2026-06-22): a build that SUCCEEDED
+    (phase=done + asg-stamp already written) was tallied as FAILED because
+    the `finally` container.remove(force=True) — caught only by
+    docker.errors.APIError — let a RAW urllib3 ReadTimeoutError escape.  When
+    a heavy container (libreoffice) saturates dockerd, a sibling's
+    force-remove blocks past the 1800s client read timeout and surfaces a
+    urllib3 ReadTimeout, which is NOT an APIError.  Both the body except and
+    the finally-remove except must catch _DOCKER_RELOAD_ERRORS (APIError +
+    the raw transient timeouts) so cleanup failure never masks the result."""
+    import inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    import requests.exceptions as _rexc
+    import urllib3.exceptions as _u3
+    # The reload tuple must already include the raw urllib3 ReadTimeoutError
+    # (subclasses urllib3.TimeoutError) — that's what escaped the finally.
+    assert _u3.TimeoutError in buildcontainer._DOCKER_RELOAD_ERRORS or \
+        any(issubclass(_u3.ReadTimeoutError, _t)
+            for _t in buildcontainer._DOCKER_RELOAD_ERRORS), \
+        buildcontainer._DOCKER_RELOAD_ERRORS
+    assert _rexc.ConnectionError in buildcontainer._DOCKER_RELOAD_ERRORS
+    # Source-pin: the build() method must NOT catch a bare
+    # `docker.errors.APIError` at either the body or the cleanup site —
+    # both must be widened to _DOCKER_RELOAD_ERRORS.
+    _src = inspect.getsource(buildcontainer.BuildContainer.build)
+    assert 'except docker.errors.APIError' not in _src, \
+        "build() still narrows an except to bare APIError — a urllib3 " \
+        "ReadTimeout would escape and mismark a successful build as failed"
+    # both widened catches are present (body + finally remove)
+    assert _src.count('except _DOCKER_RELOAD_ERRORS') >= 2, _src
+    # the cleanup widening sits right on the force-remove
+    assert 'container.remove(force=True)' in _src and \
+        'reap_all_live to sweep' in _src, _src
+
+
 def test_segregate_never_deletes_existing_published_deb():
     """An exact-name collision in a published dir KEEPs the existing artifact
     (append-only) and drops the freshly-built dup at repo/ root — never
@@ -38064,6 +38100,7 @@ def main() -> int:
         test_sta32_pid_alive_and_connect_error_tuples,
         test_sta32_connect_and_reap_use_widened_handling,
         test_docker_stream_and_wait_backfills_log_on_timeout,
+        test_build_source_cleanup_timeout_does_not_mask_success,
         # UPD-01 step 2: append-only enforcement
         test_segregate_never_deletes_existing_published_deb,
         # OBS-04: exhaustive per-package build/tunnel log
