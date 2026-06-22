@@ -1186,6 +1186,9 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             'sync':     'fetch source tarballs: `source sync` (bulk) or '
                         '`source sync <pkg> [force]` (per-pkg)',
             'build':    'build sources: source build [force] [pkg | live | installer | recommended | all | <pkg>…] [[profile,…]]',
+            'remotebuild': 'build ONE source on a remote Docker host over SSH '
+                        '([Build] RemoteBuildHost) and recover the .debs into '
+                        'repo/: `source remotebuild <pkg>`',
             'tunnel':   'pull prebuilt .debs from upstream Debian repo '
                         'for packages we do NOT build from source: '
                         '`source tunnel [pkg…]`.  Records a tunneled '
@@ -1206,6 +1209,8 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             return self.cmd_source_sync(*args)
         if action == 'build':
             return self.cmd_source_build(*args)
+        if action == 'remotebuild':
+            return self.cmd_source_remotebuild(*args)
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
         if action == 'audit':

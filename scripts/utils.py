@@ -2395,6 +2395,12 @@ class BuildConfig:
             self.container_release = config_parser.get(
                 'Base', 'CONTAINER_RELEASE', fallback=self.release)
             self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
+            # Remote host for `source remotebuild` — ssh://user@host (or
+            # user@host).  Empty = remote builds disabled.  The build runs THERE
+            # (Docker is local on the remote), distinct from DOCKER_SERVER which
+            # would drive a remote daemon's API.
+            self.remote_build_host = config_parser.get(
+                'Build', 'RemoteBuildHost', fallback='')
             # When true, depth-1 Recommends of selected packages are
             # pulled into selected_pkgs / selected_srcs (downloaded but not
             # built by default; not installed in chroot).  See build.conf for
