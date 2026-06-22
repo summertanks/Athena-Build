@@ -322,6 +322,71 @@ def test_container_release_defaults_to_release_unless_overridden():
         assert cfg.release == 'bookworm' and cfg.container_release == 'trixie'
 
 
+def test_check_mirror_reachability_dedups_and_classifies():
+    """check_mirror_reachability probes the InRelease URL the cache will fetch:
+    the dozen component-mirror sections collapse to the few distinct suite URLs
+    (dedup), a 200 = reachable, a non-200 or an exception = down."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    # two component-mirrors sharing one suite → ONE InRelease URL after dedup
+    _two = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    [Mirror.contrib]
+    Suffix =
+    Component = contrib
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_two))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, cfg.error_str
+        assert len(cfg.mirrors) == 2
+        # 200 → reachable, and only ONE HEAD despite two mirror sections
+        _sess = mock.Mock()
+        _sess.head.return_value = mock.Mock(status_code=200)
+        with mock.patch.object(_u, '_http_session', return_value=_sess):
+            _res = _u.check_mirror_reachability(
+                cfg.mirrors, None, cfg.snapshot_baseurl)
+        assert len(_res) == 1, _res
+        assert _res[0][1] is True
+        assert _sess.head.call_count == 1
+        # non-200 → down, status surfaced
+        _sess.head.return_value = mock.Mock(status_code=404)
+        with mock.patch.object(_u, '_http_session', return_value=_sess):
+            _res = _u.check_mirror_reachability(
+                cfg.mirrors, None, cfg.snapshot_baseurl)
+        assert _res[0][1] is False and '404' in _res[0][2], _res
+        # exception → down, exception type surfaced
+        _sess.head.side_effect = OSError("boom")
+        with mock.patch.object(_u, '_http_session', return_value=_sess):
+            _res = _u.check_mirror_reachability(
+                cfg.mirrors, None, cfg.snapshot_baseurl)
+        assert _res[0][1] is False and 'OSError' in _res[0][2], _res
+
+
+def test_cache_build_gates_on_mirror_reachability_and_config_command_wired():
+    """Source-pins: `cache build` runs the reachability probe and ABORTS on any
+    down mirror before constructing Cache(); the `config` command is registered
+    and allowed before configure."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_cache.py')) as _fh:
+        _src = _fh.read()
+    assert 'check_mirror_reachability(' in _src
+    # the gate returns before Cache() when mirrors are down
+    _gate = _src[_src.index('check_mirror_reachability('):]
+    assert 'cache build aborted' in _gate and 'return' in _gate
+    assert _gate.index('return') < _gate.index('Cache(self.config)')
+    assert 'config' in onboarding.ALLOW_BEFORE_CONFIGURE
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _fh:
+        assert "register_command('config'" in _fh.read()
+    with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_run.py')) as _fh:
+        assert 'def cmd_config' in _fh.read()
+
+
 def _write_local_conf(tmp: str, body: str) -> None:
     """Drop a config/local.conf alongside the synthetic build.conf."""
     with open(os.path.join(tmp, 'config', 'local.conf'), 'w') as fh:
@@ -7961,9 +8026,12 @@ def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
     _sess.flags.cache_ready = True
     _sess.cache = object()
     # Stub config — only the bits cmd_build_cache reads on the early
-    # path before Cache() is constructed.
+    # path before Cache() is constructed.  Empty mirrors → the reachability
+    # gate finds nothing down and proceeds to Cache().
     class _StubCfg:
         snapshot_enabled = False
+        mirrors: list = []
+        snapshot_baseurl = ''
     _sess.config = _StubCfg()
 
     # Spinner inside cmd_build_cache reads tui.tui_instance — must be
@@ -37505,6 +37573,8 @@ def main() -> int:
         test_buildconfig_mode_build_mode_parses,
         test_buildconfig_mode_rejects_unknown_value,
         test_container_release_defaults_to_release_unless_overridden,
+        test_check_mirror_reachability_dedups_and_classifies,
+        test_cache_build_gates_on_mirror_reachability_and_config_command_wired,
         test_local_conf_mode_overrides_build_conf,
         test_local_conf_absent_falls_back_to_build_conf,
         test_local_conf_malformed_invalidates_config,
