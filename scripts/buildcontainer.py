@@ -943,6 +943,144 @@ class BuildContainer:
                     f"{getattr(container, 'short_id', '?')}: {_e}")
         return _exit
 
+    def _image_build_args(self) -> dict:
+        """Docker build-args for the toolchain image — the single source for
+        both the local image build (__init__) and the remote recipe
+        (compose_recipe).  The Dockerfile pins apt to the snapshot from these."""
+        return {
+            'RELEASE':               self.config.container_release,
+            'SNAPSHOT_BASEURL':      self.config.snapshot_baseurl,
+            'ARCHIVE_NAME':          'debian',
+            'SECURITY_ARCHIVE_NAME': 'debian-security',
+            'SNAPSHOT_TS':           self.snapshot_ts,
+        }
+
+    def compose_recipe(self, src_pkg: Source, *,
+                       profiles_override=None,
+                       options_override=None) -> 'Optional[dict]':
+        """Assemble the full build recipe for one source package WITHOUT running
+        anything — image tag + build-args, the container `cmd_str`, and the
+        per-package input descriptors (dsc, source-file prefix, patch dir +
+        list, patch_set_hash, component, effective profiles/options).
+
+        Pure: no container, no build-record writes, no prompts.  Both the local
+        builder (build(), which bind-mounts + runs here) and the remote
+        orchestrator (`source remotebuild`, which ships the bundle to another
+        host) call this, so a remote build is byte-identical to a local one.
+
+        Returns None when the source has no .dsc — caller treats as a hard skip
+        (mirrors build()'s prior behaviour).
+        """
+        _active_profiles = (frozenset(profiles_override)
+                            if profiles_override is not None
+                            else self.config.build_profiles_for(src_pkg.package))
+        _active_options = (frozenset(options_override)
+                           if options_override is not None
+                           else self.config.build_options_for(src_pkg.package))
+
+        _plain_deps: 'list[str]' = []
+        _or_groups: 'list[list[str]]' = []
+        for _grp in src_pkg.build_depends(self.arch, _active_profiles,
+                                          cache=self.cache):
+            if not _grp:
+                continue
+            if len(_grp) == 1:
+                _plain_deps.append(_grp[0][0])
+            else:
+                _or_groups.append([alt[0] for alt in _grp])
+
+        _filename_prefix = src_pkg.package
+        try:
+            _dsc_file = [f for f in src_pkg.files if f.endswith('.dsc')][0]
+        except IndexError:
+            logger.error(f"DSC not found for {src_pkg.package}")
+            return None
+
+        _deb_build_opts = ' '.join(sorted(_active_options))
+        _deb_build_profiles = ' '.join(sorted(_active_profiles))
+        deb_build_env = (
+            f'DEB_BUILD_OPTIONS="{_deb_build_opts}" '
+            f'DEB_BUILD_PROFILES="{_deb_build_profiles}" '
+            f'ATHENA_CODENAME="{self.codename}" '
+        )
+
+        # Read the patch list fresh from disk so patches added after the last
+        # `dep parse` are still picked up.
+        _live_patch_dir = os.path.join(
+            self.patch_path, src_pkg.package, version_no_epoch(src_pkg.version),
+        )
+        try:
+            _live_patch_list = sorted(
+                _f for _f in os.listdir(_live_patch_dir)
+                if _f.endswith('.patch')
+            )
+        except (FileNotFoundError, OSError):
+            _live_patch_list = []
+        patch_cmd = (
+            f'for PATCH in {" ".join(_live_patch_list)}; do patch -p1 < /patch/"$PATCH"; done; '
+            if _live_patch_list else ''
+        )
+        _patch_set_hash = utils.patch_set_hash(_live_patch_dir, _live_patch_list)
+        _comp = getattr(
+            getattr(src_pkg, '_mirror', None), 'component', '') or 'main'
+        # patch dir to mount (local) or ship (remote); empty fallback.
+        _src_patch_path = (_live_patch_dir if os.path.exists(_live_patch_dir)
+                           else self.patch_empty)
+
+        patches_applied_cmd = (
+            'if [ -f debian/patches-applied/series ]; then '
+            'echo "Applying debian/patches-applied/ series"; '
+            'while IFS= read -r p; do '
+            '[ -z "$p" ] && continue; '
+            '[ "${p#\\#}" != "$p" ] && continue; '
+            'p="${p% }"; '
+            'patch -p1 -N -i "debian/patches-applied/$p"; '
+            'done < debian/patches-applied/series; '
+            'fi; '
+        )
+        _dep_install = self._render_install_cmd(
+            _plain_deps, _or_groups, simulate=False)
+        _token_subst = (
+            '{ find debian -type f 2>/dev/null; '
+            'if [ -d data ]; then find data -type f; fi; '
+            'if [ -d tasks ]; then find tasks -type f; fi; } '
+            "| (xargs -d '\\n' -r grep -lE '@(DISTRIBUTION|BASE_ID|CODENAME)@' "
+            '2>/dev/null || true) '
+            "| xargs -d '\\n' -r sed -i "
+            f"-e 's|@DISTRIBUTION@|{self.build_distribution}|g' "
+            f"-e 's|@BASE_ID@|{self.build_base_id}|g' "
+            f"-e 's|@CODENAME@|{self.codename}|g'; "
+        )
+        _write_sources = self._write_snapshot_sources_cmd()
+        cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
+                  f'{_write_sources}' \
+                  f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
+                  f'{_dep_install}' \
+                  f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
+                  f'dpkg-source -x {_dsc_file} {_filename_prefix}; ' \
+                  f'cd {_filename_prefix}; ' \
+                  f'{patches_applied_cmd}' \
+                  f'{patch_cmd}' \
+                  f'{_token_subst}' \
+                  f'{deb_build_env} dpkg-checkbuilddeps; {deb_build_env} dpkg-buildpackage -a {self.arch} -b -us -uc -nc; cd ..;' \
+                  f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;'
+
+        return {
+            'active_profiles': _active_profiles,
+            'active_options':  _active_options,
+            'plain_deps':      _plain_deps,
+            'or_groups':       _or_groups,
+            'filename_prefix': _filename_prefix,
+            'dsc_file':        _dsc_file,
+            'patch_dir':       _src_patch_path,
+            'patch_list':      _live_patch_list,
+            'patch_set_hash':  _patch_set_hash,
+            'component':       _comp,
+            'cmd_str':         cmd_str,
+            'image_tag':       self._image_tag,
+            'build_args':      self._image_build_args(),
+        }
+
     def build(self, src_pkg: Source, *,
               profiles_override=None, options_override=None) -> bool:
         """Build a single source package inside the container.
@@ -959,23 +1097,19 @@ class BuildContainer:
         nodoc to actually produce -doc binaries that the default build
         would skip.
         """
-        _plain_deps: 'list[str]' = []
-        _or_groups: 'list[list[str]]' = []
-        # per-pkg override precedence —
-        #   per-invocation `[bracket]` token  (profiles_override / options_override)
-        #     ↓ falls back to ↓
-        #   `[Source.<pkg>]` block in build.conf  (config.build_*_for(pkg))
-        #     ↓ falls back to ↓
-        #   global `[Source]` block in build.conf  (config.build_*)
-        _active_profiles = (frozenset(profiles_override)
-                            if profiles_override is not None
-                            else self.config.build_profiles_for(src_pkg.package))
-        _active_options = (frozenset(options_override)
-                           if options_override is not None
-                           else self.config.build_options_for(src_pkg.package))
-        # Log the EFFECTIVE values (post-precedence), not the raw override
-        # args — `profiles=None` used to read as "no profiles" when it
-        # actually meant "no override; config defaults in effect".
+        _recipe = self.compose_recipe(
+            src_pkg, profiles_override=profiles_override,
+            options_override=options_override)
+        if _recipe is None:
+            return False                       # no .dsc — hard skip
+        _active_profiles = _recipe['active_profiles']
+        _active_options = _recipe['active_options']
+        _plain_deps = _recipe['plain_deps']
+        _or_groups = _recipe['or_groups']
+        _filename_prefix = _recipe['filename_prefix']
+        _live_patch_list = _recipe['patch_list']
+        cmd_str = _recipe['cmd_str']
+        # Log the EFFECTIVE values (post-precedence), not the raw override args.
         logger.info(
             f"build {src_pkg.package} v{src_pkg.version} "
             f"(profiles={' '.join(sorted(_active_profiles)) or '(none)'}"
@@ -983,14 +1117,6 @@ class BuildContainer:
             f"options={' '.join(sorted(_active_options)) or '(none)'}"
             f"{' [override]' if options_override is not None else ''})"
         )
-
-        for _grp in src_pkg.build_depends(self.arch, _active_profiles, cache=self.cache):
-            if not _grp:
-                continue
-            if len(_grp) == 1:
-                _plain_deps.append(_grp[0][0])
-            else:
-                _or_groups.append([alt[0] for alt in _grp])
 
         # opt-in build-dep audit gate.  Runs an apt-get install
         # --simulate preview in a transient container before the real
@@ -1002,210 +1128,16 @@ class BuildContainer:
             if not self._audit_build_deps_gate(
                     src_pkg, _plain_deps, _or_groups):
                 return False
-        _filename_prefix = src_pkg.package
-        _dsc_file = ''
-
-        try:
-            _dsc_file = [file for file in src_pkg.files if file.endswith('.dsc')][0]
-        except IndexError:
-            logger.error(f"DSC not found for {src_pkg.package}")
-            return False
-
-        # DEB_BUILD_OPTIONS and DEB_BUILD_PROFILES are different namespaces:
-        # options control build-time behaviour (nodoc, nocheck,
-        # parallel=N), profiles activate Build-Depends annotations like
-        # `<!nodoc>` and `<!stage1>`.  Source.build_depends has already had
-        # `_active_profiles` applied above for build-dep filtering; the env
-        # vars below propagate the right values into dpkg-buildpackage.
-        _deb_build_opts     = ' '.join(sorted(_active_options))
-        _deb_build_profiles = ' '.join(sorted(_active_profiles))
-        # ATHENA_CODENAME: forks under fork/source/ that
-        # need to substitute the distribution codename into shipped files
-        # (lsb-release, default-release, debootstrap script symlinks) read
-        # this in their debian/rules via $(ATHENA_CODENAME).  Sourced from
-        # config/build.conf [Build] CODENAME via BuildConfig.build_codename.
-        # Harmless for upstream pkgs that don't reference it.
-        deb_build_env = (
-            f'DEB_BUILD_OPTIONS="{_deb_build_opts}" '
-            f'DEB_BUILD_PROFILES="{_deb_build_profiles}" '
-            f'ATHENA_CODENAME="{self.codename}" '
-        )
-
-        # Read the patch list fresh from disk at build time so patches
-        # added AFTER the last `dep parse` run are still picked up.
-        # The cached `src_pkg.patch_list` (set by `_refresh_patches`
-        # during dep parse) goes stale the moment an operator drops a
-        # new patch file in `patch/source/<pkg>/<ver>/` — and there's
-        # no way for them to know they need to re-run `dep parse force`
-        # before `source build`.  Symptom: build re-runs with the same
-        # error as before, looking like the patch silently didn't
-        # apply.
-        _live_patch_dir = os.path.join(
-            self.patch_path, src_pkg.package, version_no_epoch(src_pkg.version),
-        )
-        try:
-            _live_patch_list = sorted(
-                _f for _f in os.listdir(_live_patch_dir)
-                if _f.endswith('.patch')
-            )
-        except (FileNotFoundError, OSError):
-            _live_patch_list = []
-        patch_cmd = (
-            f'for PATCH in {" ".join(_live_patch_list)}; do patch -p1 < /patch/"$PATCH"; done; '
-            if _live_patch_list else ''
-        )
-
-        # compute the patch_set_hash once up front and stamp the
-        # entry-phase record.  The build.json file is the canonical
-        # build state from this point — any crash before the next phase
-        # write leaves the record at phase=entry, which the audit
-        # classifies as 'interrupted' (signal: rebuild me).
-        _patch_set_hash = utils.patch_set_hash(
-            _live_patch_dir, _live_patch_list,
-        )
+        # phase=entry record is the canonical build state from here — a crash
+        # before the next phase write classifies as 'interrupted' (rebuild me).
         _t_start = time.monotonic()
-        _comp = getattr(
-            getattr(src_pkg, '_mirror', None), 'component', '') or 'main'
         _entry_record = utils.new_build_record(
             package=src_pkg.package,
             intended_version=str(src_pkg.version),
-            patch_set_hash=_patch_set_hash,
-            component=_comp,
+            patch_set_hash=_recipe['patch_set_hash'],
+            component=_recipe['component'],
         )
         self._record_phase(src_pkg.package, initial=_entry_record)
-
-        # A few packages (notably pam) ship a second quilt-managed patch series
-        # at debian/patches-applied/series in addition to debian/patches/series.
-        # dpkg-source only applies debian/patches/series during 3.0 (quilt)
-        # extraction, and dh_quilt_patch in such packages silently no-ops because
-        # the .pc/ directory is already pinned to debian/patches/.  The result
-        # is a half-patched source tree (e.g. pam without 031_pam_include, which
-        # adds @include directive support to libpam → broken /etc/pam.d/login).
-        #
-        # Apply debian/patches-applied/ ourselves before our custom /patch/
-        # patches and before dpkg-buildpackage.  For packages without this
-        # directory the [ -f ... ] guard skips the loop entirely.
-        patches_applied_cmd = (
-            'if [ -f debian/patches-applied/series ]; then '
-            'echo "Applying debian/patches-applied/ series"; '
-            'while IFS= read -r p; do '
-            '[ -z "$p" ] && continue; '
-            '[ "${p#\\#}" != "$p" ] && continue; '
-            'p="${p% }"; '
-            'patch -p1 -N -i "debian/patches-applied/$p"; '
-            'done < debian/patches-applied/series; '
-            'fi; '
-        )
-        _dep_install = self._render_install_cmd(
-            _plain_deps, _or_groups, simulate=False)
-
-        # Token substitution: replace @DISTRIBUTION@, @BASE_ID@,
-        # @CODENAME@ in fork content with values from BuildConfig.
-        # This is THE mechanism by which fork packages get branded:
-        # their debian/control Description, data/lsb-release strings,
-        # data/*.templates fields, tasks/* descriptions, etc. carry
-        # tokens; we resolve them here once per build.
-        #
-        # Scope: debian/, data/, and tasks/ subdirs.  Substitution
-        # runs AFTER patches have been applied (so patches can also
-        # use tokens) but BEFORE _changelog_bump (so the bump
-        # operates on post-substitution source).
-        #
-        # Selectivity: a grep-first filter finds files that actually
-        # contain a token, then xargs sed runs only on those.
-        # Upstream packages have no tokens → grep finds nothing →
-        # sed never runs → zero-cost no-op.
-        #
-        # See memory/project_three_layer_identity.md for the model.
-        # Two non-obvious shell choices, both because cmd_str runs
-        # under `set -e -o pipefail`:
-        #
-        # 1. `if [ -d X ]; then find X; fi` for the optional data/ +
-        #    tasks/ dirs (not `[ -d X ] && find X`).  With `&&`, a
-        #    missing dir leaves the brace group's last command exit
-        #    at 1; pipefail picks that up and set -e kills the build.
-        #    `if`-blocks return 0 when the condition is false.
-        #
-        # 2. `(grep -lE … || true)` wrapper for the grep filter.
-        #    `grep -l` exits 1 when it finds NO matches — true for
-        #    every upstream package (none carry @TOKENS@).  Under
-        #    pipefail, the pipeline inherits that 1 and set -e kills.
-        #    The `|| true` rescues the no-match case while still
-        #    letting actual grep errors (filesystem) propagate as
-        #    non-zero — but since `|| true` flattens any non-zero to
-        #    0, we accept this trade for the much more common no-
-        #    match path.
-        # Bash brace-group syntax: `{ cmd1; cmd2; }` needs SPACE after
-        # the opening `{` and a `;` (or newline) before the closing `}`.
-        # Regular (non-f) Python strings here pass literal `{` and `}`
-        # through.  An earlier draft wrote `{{ ... }}` thinking Python's
-        # f-string escape would collapse to single braces — but these
-        # lines are NOT f-strings, so bash saw literal `{{` and exited
-        # 127 ("command not found").  Fixed 2026-05-18.
-        _token_subst = (
-            '{ find debian -type f 2>/dev/null; '
-            'if [ -d data ]; then find data -type f; fi; '
-            'if [ -d tasks ]; then find tasks -type f; fi; } '
-            "| (xargs -d '\\n' -r grep -lE '@(DISTRIBUTION|BASE_ID|CODENAME)@' "
-            '2>/dev/null || true) '
-            "| xargs -d '\\n' -r sed -i "
-            f"-e 's|@DISTRIBUTION@|{self.build_distribution}|g' "
-            f"-e 's|@BASE_ID@|{self.build_base_id}|g' "
-            f"-e 's|@CODENAME@|{self.codename}|g'; "
-        )
-
-        # Pin the container's apt to the exact mirrors our cache was built
-        # from.  Without this the base image's stock sources (live mirror)
-        # are used, and a security update landing between our cache
-        # snapshot and the build run will produce dep version skew between
-        # the .deb we build and what the cache thinks.
-        #
-        # `[check-valid-until=no]` — snapshot.debian.org's InRelease files
-        # carry a Valid-Until ~7 days after Date (replay-attack defense in
-        # the normal apt flow).  We intentionally pin to a fixed snapshot
-        # for reproducibility, so the file naturally goes "expired" as the
-        # snapshot ages.  Override is safe here because:
-        #   1. The build container only ever talks to our snapshot URLs
-        #      (no other apt sources to be tricked into replaying).
-        #   2. We pin a content-hashed snapshot by timestamp — the file
-        #      is already the trusted artifact, not a stream from a live
-        #      mirror.
-        # When the snapshot rolls forward, this option silently becomes
-        # a no-op (current InRelease is within Valid-Until again).
-        _write_sources = self._write_snapshot_sources_cmd()
-
-        # `-b` (--build=binary) skips the source rebuild step.  No
-        # version-bump is performed; the produced .debs ship at the
-        # pristine upstream source version.  Post-build, the BuildContainer
-        # runs utils.strip_nmu_from_deb on every produced artifact to
-        # normalise the Version field + all dep-constraint version
-        # references — stripping +bN, +debNuN, ~bpoN+N, +rpiN, etc.
-        # so internal cross-refs resolve cleanly inside our repo.
-        #
-        # the per-build `apt-get -y --allow-downgrades dist-upgrade`
-        # step that used to live here was removed once the toolchain layer
-        # was pinned to the snapshot at image-build time (Dockerfile +
-        # __init__ buildargs).  The image's installed packages are already
-        # at snapshot's view; per-build sources.list expands to the full
-        # mirror set (main + security + updates) at the SAME snapshot TS,
-        # so apt-get update + the per-source apt-get install resolve
-        # entirely within the snapshot universe with no drift to correct.
-        # If a future change reintroduces drift (e.g. moving back to a
-        # live-mirror base image), bring this back as `sudo apt-get -y
-        # -o Acquire::Retries=5 --allow-downgrades dist-upgrade;`
-        # between _write_sources and _dep_install.
-        cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
-                  f'{_write_sources}' \
-                  f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
-                  f'{_dep_install}' \
-                  f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
-                  f'dpkg-source -x {_dsc_file} {_filename_prefix}; ' \
-                  f'cd {_filename_prefix}; ' \
-                  f'{patches_applied_cmd}' \
-                  f'{patch_cmd}' \
-                  f'{_token_subst}' \
-                  f'{deb_build_env} dpkg-checkbuilddeps; {deb_build_env} dpkg-buildpackage -a {self.arch} -b -us -uc -nc; cd ..;' \
-                  f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;'
 
         # `container` is initialised to None so the finally block can tell
         # whether containers.run() actually produced a container (failure
@@ -1232,9 +1164,7 @@ class BuildContainer:
         _container_name = ''
         _emitted_scan: 'list[tuple[str, int]]' = []
         try:
-            src_patch_path = os.path.join(self.patch_path, src_pkg.package, version_no_epoch(src_pkg.version))
-            if not os.path.exists(src_patch_path):
-                src_patch_path = self.patch_empty
+            src_patch_path = _recipe['patch_dir']
 
             # Client is non-None by the time build() is called — __init__
             # raises if both the configured and local daemon paths fail.
