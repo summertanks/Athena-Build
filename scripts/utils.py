@@ -1800,6 +1800,52 @@ def _validate_snapshot_timestamp(
     return True
 
 
+def check_mirror_reachability(
+        mirrors: 'List[Mirror]', ts: 'Optional[str]',
+        snapshot_baseurl: str) -> 'List[Tuple[str, bool, str]]':
+    """HEAD-probe each mirror's top-level Release/InRelease at the URL the
+    cache will actually fetch (snapshot-rewritten when `ts` is set).
+
+    Pure read — no downloads, no mutation.  Returns
+    [(label, ok, detail), ...]; ok=False means the index is not reachable
+    (network down, wrong URL, or a snapshot timestamp that doesn't cover the
+    suite).  Deduped by URL: the dozen [Mirror.*] component sections collapse
+    to the few distinct InRelease URLs (one per suite) they actually share.
+    file:// mirrors are checked for on-disk existence instead of HTTP.
+    """
+    _out: 'List[Tuple[str, bool, str]]' = []
+    _seen: 'set[str]' = set()
+    for _m in mirrors:
+        _snap = _m.with_snapshot(ts, baseurl=snapshot_baseurl)
+        _base = _snap.dist_url
+        _is_local = _base.startswith('file://')
+        _url = _base + ('Release' if _is_local else 'InRelease')
+        if _url in _seen:
+            continue
+        _seen.add(_url)
+        _label = f"{_snap.baseid} {_snap.suite}".strip()
+        if _is_local:
+            _path = _url[len('file://'):]
+            _ok = os.path.isfile(_path)
+            _out.append((_label, _ok,
+                         _url if _ok else f"missing local file: {_path}"))
+            continue
+        try:
+            _resp = _http_session().head(
+                _url, timeout=_HTTP_TIMEOUT_FAST,
+                allow_redirects=True, headers=_HTTP_HEADERS)
+        except Exception as _e:           # noqa: BLE001 — any failure = down
+            _out.append((_label, False, f"{type(_e).__name__} — {_url} ({_e})"))
+            continue
+        if _resp.status_code == 200:
+            _out.append((_label, True, _url))
+        else:
+            _out.append((_label, False,
+                         f"HTTP {_resp.status_code} — {_url} (wrong URL, or the "
+                         f"snapshot timestamp does not cover this suite)"))
+    return _out
+
+
 def format_snapshot_timestamp(ts: str) -> str:
     """Render a Debian-snapshot YYYYMMDDTHHMMSSZ string as a human-readable
     UTC datetime, e.g. '20260506T120451Z' → '2026-05-06 12:04:51 UTC'.

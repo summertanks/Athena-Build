@@ -219,6 +219,70 @@ class ConfigRunCommandsMixin(SessionState):
                 _code = getattr(self.config, 'build_codename', '')
                 console.print(f"  builds   {_distro} {_bv} ({_code})")
 
+    def cmd_config(self, action: str = '', *args) -> None:
+        """config check — validate build.conf identity + probe mirror
+        reachability.  Read-only: no downloads, no mutation.  Surfaces config
+        problems and dead mirrors up front instead of failing deep inside
+        `cache build`.
+        """
+        if action and action != 'check':
+            console.print(
+                f"unknown config action {action!r}; try `config check`",
+                tui.COLOR_ERROR)
+            return
+        _cfg = self.config
+        # 1. validity
+        if getattr(_cfg, 'is_valid', True):
+            console.print("config: valid", tui.COLOR_HIGHLIGHT)
+        else:
+            console.print(
+                f"config: INVALID — {getattr(_cfg, 'error_str', '')}",
+                tui.COLOR_ERROR)
+        # 2. identity
+        console.print("identity:")
+        console.print(
+            f"  distribution    {_cfg.build_distribution} ({_cfg.build_base_id})")
+        console.print(f"  codename        {_cfg.build_codename}")
+        console.print(f"  version         {_cfg.build_version}")
+        console.print(f"  arch            {_cfg.arch}")
+        console.print(f"  target release  {_cfg.release} {_cfg.baseversion}")
+        _tracks = ("tracks target" if _cfg.container_release == _cfg.release
+                   else "pinned behind/ahead of target")
+        console.print(
+            f"  container rel   {_cfg.container_release}  ({_tracks})")
+        # 3. snapshot
+        _ts = None
+        if _cfg.snapshot_enabled:
+            try:
+                _ts = utils.resolve_snapshot_timestamp(_cfg)
+                _human = (utils.format_snapshot_timestamp(_ts)
+                          if _ts else '<unresolved>')
+                console.print(f"  snapshot        {_human}")
+            except Exception as _e:        # noqa: BLE001
+                console.print(
+                    f"  snapshot        resolution FAILED — {_e}",
+                    tui.COLOR_ERROR)
+        else:
+            console.print("  snapshot        disabled (live mirrors)")
+        # 4. mirror reachability
+        console.print(
+            f"mirror reachability ({len(_cfg.mirrors)} configured):")
+        _reach = utils.check_mirror_reachability(
+            _cfg.mirrors, _ts, _cfg.snapshot_baseurl)
+        for _lbl, _ok, _det in _reach:
+            console.print(
+                f"  [{'OK  ' if _ok else 'DOWN'}] {_lbl}",
+                tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+            if not _ok:
+                console.print(f"         {_det}", tui.COLOR_ERROR)
+        _bad = [_l for _l, _ok, _d in _reach if not _ok]
+        if _bad:
+            console.print(
+                f"{len(_bad)} mirror URL(s) unreachable — cache build will "
+                "refuse until fixed.", tui.COLOR_ERROR)
+        elif _reach:
+            console.print("all mirrors reachable.", tui.COLOR_HIGHLIGHT)
+
     def cmd_auto_run(self, action: str = '', *args):
         """Group dispatcher: bare `autorun` → autorun live (preserves
         existing UX); explicit `autorun live` or `autorun installer`

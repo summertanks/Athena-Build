@@ -37,7 +37,7 @@ from tui import console, Prompt, PROMPT_INPUT, PROMPT_OPTIONS
 # state and leave).  Everything else (the build pipeline, mirror ops, etc.) is
 # gated and refused with a `configure` hint.
 ALLOW_BEFORE_CONFIGURE = frozenset({
-    'configure', 'get', 'print', 'version',
+    'configure', 'get', 'print', 'version', 'config',
     'help', 'clear', 'history', 'quit', 'exit',
 })
 

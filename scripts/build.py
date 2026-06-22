@@ -1532,6 +1532,7 @@ def main(banner: str) -> None:
     tui.register_command('print',     session.cmd_print,     'Print:      \tprint build state — try `print help`')
     tui.register_command('configure', session.cmd_configure, 'Configure:  \tconfigure — first-run setup wizard (role, mirror, mode)')
     tui.register_command('version',   session.cmd_version,   'Version:    \tversion [--verbose] — Athena-Build toolchain version + provenance')
+    tui.register_command('config',    session.cmd_config,    'Config:     \tconfig check — validate build.conf + probe mirror reachability')
 
     # Command gate: until this box is configured (config/local.conf
     # SetupComplete), the backends refuse everything except `configure` and a

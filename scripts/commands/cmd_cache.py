@@ -56,6 +56,7 @@ class CacheCommandsMixin(SessionState):
         console.print("Building Cache...", tui.COLOR_INFO)
         self.flags.cache_ready = False  # reset in case we're re-running
 
+        _ts = None
         if self.config.snapshot_enabled:
             try:
                 _ts = utils.resolve_snapshot_timestamp(self.config)
@@ -70,6 +71,27 @@ class CacheCommandsMixin(SessionState):
 
         else:
             console.print("Snapshot pinning: disabled (live mirrors)", tui.COLOR_INFO)
+
+        # Reachability gate: probe each mirror's InRelease at the exact URL the
+        # cache will fetch.  Everything downstream depends on cache build, so a
+        # dead/typo'd mirror — or a snapshot timestamp that doesn't cover a
+        # suite — fails fast here with a per-mirror message instead of churning
+        # through a partial build.  Run `config check` for the same probe
+        # on-demand.
+        _reach = utils.check_mirror_reachability(
+            self.config.mirrors, _ts, self.config.snapshot_baseurl)
+        _down = [(_lbl, _det) for _lbl, _ok, _det in _reach if not _ok]
+        if _down:
+            console.print(
+                "ERROR: cache build aborted — unreachable mirror(s):",
+                tui.COLOR_ERROR)
+            for _lbl, _det in _down:
+                console.print(f"  {_lbl}: {_det}", tui.COLOR_ERROR)
+            console.print(
+                "Check network and the URLs in config/build.conf "
+                "[Base]/[Mirror.*], or the snapshot timestamp's suite coverage.",
+                tui.COLOR_INFO)
+            return
 
         # Top-level Spinner that covers the whole Cache() construction.
         # Cache() internally raises its own ProgressBars during the
