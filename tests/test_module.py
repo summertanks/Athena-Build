@@ -3411,13 +3411,18 @@ def test_sec05_build_gates_on_audit_when_enabled_in_source():
     assert 'return False' in _build_body, (
         "SEC-05: build() must `return False` on operator decline (no "
         "container.run, no .result side-effect)")
-    # And the gate must be after dep enumeration so plain_deps + or_groups
-    # are available — i.e. it must reference both lists.
+    # Deps are now resolved in compose_recipe(); the gate must run AFTER that
+    # call so plain_deps + or_groups are available to preview.
     _gate_call_idx = _build_body.index('self._audit_build_deps_gate(')
-    _enum_idx = _build_body.index('for _grp in src_pkg.build_depends(')
-    assert _enum_idx < _gate_call_idx, (
-        "SEC-05: gate must run AFTER build-dep enumeration so deps are "
-        "available to preview")
+    _recipe_idx = _build_body.index('self.compose_recipe(')
+    assert _recipe_idx < _gate_call_idx, (
+        "SEC-05: gate must run AFTER compose_recipe() so deps are available "
+        "to preview")
+    # The build-dep enumeration itself lives in compose_recipe().
+    _cr_start = _src.index('def compose_recipe(')
+    _cr_end = _src.index('\n    def ', _cr_start + 1)
+    assert 'for _grp in src_pkg.build_depends(' in _src[_cr_start:_cr_end], (
+        "SEC-05: build-dep enumeration must live in compose_recipe()")
 
 
 def test_sec05_gate_short_circuits_when_no_deps():
@@ -3433,6 +3438,56 @@ def test_sec05_gate_short_circuits_when_no_deps():
     assert _result is True
     # No preview should have been generated — gate short-circuits.
     _bc._capture_apt_simulate.assert_not_called()
+
+
+def test_compose_recipe_assembles_image_args_and_cmd_str():
+    """compose_recipe() assembles the full build recipe (image tag/args,
+    cmd_str, per-pkg descriptors) WITHOUT running anything — the single source
+    both build() (local) and `source remotebuild` (remote) consume, so a remote
+    build is byte-identical to a local one."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    _bc.arch = 'amd64'
+    _bc.cache = None
+    _bc.codename = 'thor'
+    _bc.build_distribution = 'Asgard'
+    _bc.build_base_id = 'asgard'
+    _bc.patch_path = '/nonexistent/patch'
+    _bc.patch_empty = '/nonexistent/patch-empty'
+    _bc.snapshot_ts = '20260602T173733Z'
+    _bc._image_tag = 'athenalinux:build-bookworm-20260602T173733Z'
+    _bc.config = mock.Mock(container_release='bookworm',
+                           snapshot_baseurl='https://snapshot.debian.org/archive')
+    _bc.config.build_profiles_for.return_value = frozenset({'nodoc', 'nocheck'})
+    _bc.config.build_options_for.return_value = frozenset({'nodoc', 'nocheck'})
+    _bc._render_install_cmd = mock.Mock(return_value='APT_INSTALL; ')
+    _bc._write_snapshot_sources_cmd = mock.Mock(return_value='WRITE_SOURCES; ')
+    _src = mock.Mock(package='adduser', version='3.134',
+                     files=['adduser_3.134.dsc', 'adduser_3.134.tar.xz'])
+    _src.build_depends.return_value = [[('debhelper', '', '')]]
+    _src._mirror = mock.Mock(component='main')
+
+    _recipe = _bc.compose_recipe(_src)
+    assert _recipe is not None
+    assert _recipe['image_tag'] == 'athenalinux:build-bookworm-20260602T173733Z'
+    assert _recipe['build_args']['RELEASE'] == 'bookworm'
+    assert _recipe['build_args']['SNAPSHOT_TS'] == '20260602T173733Z'
+    assert _recipe['build_args']['ARCHIVE_NAME'] == 'debian'
+    assert _recipe['dsc_file'] == 'adduser_3.134.dsc'
+    assert _recipe['filename_prefix'] == 'adduser'
+    assert _recipe['component'] == 'main'
+    assert _recipe['plain_deps'] == ['debhelper']
+    _cmd = _recipe['cmd_str']
+    assert 'WRITE_SOURCES;' in _cmd and 'APT_INSTALL;' in _cmd
+    assert 'dpkg-source -x adduser_3.134.dsc adduser' in _cmd
+    assert 'dpkg-buildpackage -a amd64 -b -us -uc -nc' in _cmd
+    assert 'cp *.deb /repo/' in _cmd
+    # a source with no .dsc → None (hard skip)
+    _nodsc = mock.Mock(package='x', version='1', files=['x_1.tar.xz'])
+    _nodsc.build_depends.return_value = []
+    assert _bc.compose_recipe(_nodsc) is None
 
 
 def test_sec05_gate_returns_false_when_operator_declines():
@@ -37790,6 +37845,7 @@ def main() -> int:
         test_sec05_render_install_cmd_injects_simulate_flag,
         test_sec05_build_gates_on_audit_when_enabled_in_source,
         test_sec05_gate_short_circuits_when_no_deps,
+        test_compose_recipe_assembles_image_args_and_cmd_str,
         test_sec05_gate_returns_false_when_operator_declines,
         test_sec05_gate_returns_false_when_preview_infrastructure_fails,
         # COMP-03 Phase 0: parallel-build config plumbing
