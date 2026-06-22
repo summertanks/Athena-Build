@@ -5,7 +5,7 @@
 > stable ID (`AREA-NN`); cite the ID when committing or referencing work.
 > Update the **Status** column inline rather than renumbering.
 
-- **Review date:** 2026-05-07 (initial), maintenance pass 2026-05-14 (`master` @ `37cabc9`), consolidation audit 2026-05-21 (`master` @ `a1e193c`), maintenance pass 2026-05-25 (`master` @ `564cf19`), maintenance pass 2026-06-12 (`master` @ `6598c93`), **full-tree code review 2026-06-12** (8 parallel deep-review agents over every module + cross-cutting seams, all P0/P1 findings hand-verified against source; `master` @ `479d950`) — filed SEC-07, STA-27..53, ARCH-19, UX-08/09, HK-07
+- **Review date:** 2026-05-07 (initial), maintenance pass 2026-05-14 (`master` @ `37cabc9`), consolidation audit 2026-05-21 (`master` @ `a1e193c`), maintenance pass 2026-05-25 (`master` @ `564cf19`), maintenance pass 2026-06-12 (`master` @ `6598c93`), **full-tree code review 2026-06-12** (8 parallel deep-review agents over every module + cross-cutting seams, all P0/P1 findings hand-verified against source; `master` @ `479d950`) — filed SEC-07, STA-27..53, ARCH-19, UX-08/09, HK-07.  Maintenance pass 2026-06-22 — verified the session-memory backlog against current source and filed the survivors: SELECT-01/02, PERF-01, FED-01/02, SUP-01, DIST-01; dropped four as already-done/fixed (virtual arch-gate → arch_filter.py 14edc2e, build-dep provider-expansion → package.py a37727f, dep-drift removal audit → dep_drift.py WARN, Case-C +asg re-normalise of the 19 sources → complete + tool removed in f5d3534)
 - **Reviewer:** Claude (read-only audit, with subsequent maintenance reconciling actual state vs ticket status)
 - **Tree size:** ~79,900 LOC (scripts/ + tests/) — 31 top-level scripts modules + `commands`/`coord`/`tui`/`webapi` packages (69 `.py` files), single-file test suite (~34.2k LOC, 1086 tests)
 - **Pipeline state:** end-to-end working — `cache build → dep parse →
@@ -95,7 +95,11 @@ and an 8-check chroot verifier that gates ISO build.
 
 ## 1. Stability & correctness — P0 / P1
 
-_All stability & correctness tickets are closed — see [`docs/done.md`](docs/done.md) § 1._
+| ID    | Sev | Status | Title |
+|-------|-----|--------|-------|
+| SELECT-01 | P2 | todo | **SELECT-LOCK restore fidelity — store raw list bytes.**  `cache restore` regenerates `config/{pkg,live,installer,pool}.list` from the lockfile's parsed seed NAMES only (`selection_lock.restore_list_files` / `render_pkg_list` / `render_flat_list`), so (a) comments are destroyed (pool.list lost ~156 operator-doc lines) and (b) pkg-group order is ALPHABETIZED because `write_selection_state` serialises via `json.dumps(sort_keys=True)`.  The reorder is NOT cosmetic — group order changes the closure (+xterm +libutempter0; see SELECT-02).  Fix: capture `seeds_raw` (verbatim bytes of each list file) in `assemble_state`; `restore_list_files` writes it byte-for-byte (fall back to the name-render for older lockfiles); the closure guard keeps using the parsed seeds.  ~5-10 KB on a ~155 KB lockfile.  Removes the TRIGGER for the closure drift.  (Filed 2026-06-22 from session backlog.) |
+| SELECT-02 | P2 | todo | **Order-independent OR-dependency resolution.**  `dependencytree.py` (~582-614) resolves `a \| b` OR-groups in a SINGLE greedy pass against the IN-PROGRESS closure ("use an already-selected alt, else pull the first declared"), so the resolved closure depends on seed ORDER, not just the set — a determinism worry.  Reproduced: `xorg` Depends `xterm \| x-terminal-emulator`; `gnome-terminal` Provides `x-terminal-emulator` — pkg.list group order flips whether xterm (+ its dep libutempter0) is pulled (1580 vs 1582 bins).  Fix: defer ORs, resolve each against the FINAL closure to fixpoint (Pass A = seeds + hard Depends/Pre-Depends; Pass B = ORs satisfied if ANY alt in closure else first; iterate to fixpoint).  Makes the closure a pure function of the SET.  Risk: deferring can legitimately drop OTHER currently-pulled first-alternatives → needs old-vs-new closure diff + many-ordering verification.  Removes the CAUSE (SELECT-01 removes the trigger).  (Filed 2026-06-22 from session backlog.) |
+| PERF-01 | P3 | todo | **Skip re-downloading the immutable pinned-snapshot InRelease.**  `cache.py:268` re-fetches `InRelease` per mirror on EVERY cache build; for a PINNED snapshot the timestamp is fixed → the file is immutable, so the re-download is pointless.  Fix: when snapshot-pinned AND a cached InRelease exists, skip the download — but keep `verify_inrelease` (GPG) UNCONDITIONAL on whichever file is on disk; on GPG fail delete + re-download once + re-verify (pinning controls re-fetch, GPG controls trust).  LOW value since the IPv4-pin fix (fce12f3) cut re-fetch to ~0.2s (was a multi-min IPv6 connect stall, not server latency) — keep as a minor optimization, not a fix.  Optional belt-and-suspenders: stash the InRelease sha256 in `snapshot.state` at pin time and require a match alongside GPG.  (Filed 2026-06-22 from session backlog.) |
 
 ## 2. Conformity to Debian/Ubuntu process — P1
 
@@ -138,7 +142,11 @@ _All architecture & coding-practice tickets are closed — see [`docs/done.md`](
 
 ## 7. Security & supply-chain — P0 / P1
 
-_All security & supply-chain tickets are closed — see [`docs/done.md`](docs/done.md) § 7._
+| ID    | Sev | Status | Title |
+|-------|-----|--------|-------|
+| FED-01 | P2 | todo | **Pull-side stale / closure-limited-ledger detector (design first).**  A peer's `mirror pull` TRUSTS the fetched signed closure ledger as its adoption set; when the ledger is stale or closure-limited (`ledger ⊊ folded live claims`) the peer adopts only the subset and STRANDS the rest → phantom `virtual_hash_conflict` at virtual-build (3522 this session: ledger 1731 = install closure vs 4699 actually claimed; heal required the OWNER to republish, and nothing told the peer its mirror was stale).  Today `cmd_mirror.py:1639` only COUNTS ledger-names-no-claim (`_no_claim`) — not a WARNING — and the inverse SUBSET case (live claims the ledger omits) is unguarded.  Fix idea: at pull, fold live claims, compare filename sets vs the fetched ledger; if ledger is a strict subset WARN loudly and/or fall back to adopting the live-claim union.  Open Qs: is folded-live-claims the authoritative published set (any subset = bug) or can they legitimately diverge (snapshot timing / pruning)?  warn-only vs auto-adopt-union?  redundancy vs the owner-side `closure_ledger_entry_missing` CRITICAL.  (Filed 2026-06-22 from session backlog.) |
+| FED-02 | P2 | todo | **Co-publisher snapshot-advance coherence (NOT a block).**  A `role=federation` peer running `snapshot select latest` AHEAD of the mirror is the INTENDED multi-publisher test — it BUILDS + OWNS the forward delta while ADOPTING the unchanged base.  Do NOT block/warn the advance.  The guard work is CONSISTENCY of the resulting MIXED-snapshot mirror (base / current / two owners on adjacent versions): drift packages attributed as the peer's-delta-to-own, virtual build / audit must not false-conflict on them, the ledger's latest-per-pkg must prefer the peer's newer-version delta once published, supersession across two builders at adjacent snapshots, and `reconcile_snapshot_pin` forward-adopt when the origin later catches up.  Design + invariants first.  (Filed 2026-06-22 from session backlog.) |
+| SUP-01 | P3 | todo | **Live-dpkg grype matcher (deferred until a consumer asks).**  SBOM-driven CVE scanning already ships (`cmd_supply_chain.py` `cmd_cve` shells grype over the SBOM — the source of truth, since NMU-stripped binaries false-positive against live grype), and `strip_nmu` stamps `X-Athena-Upstream-Version` for provenance.  A grype matcher that scans the LIVE dpkg status of an installed system (mapping our stripped versions back to upstream via the X-field) is intentionally deferred — row kept open so the capability isn't forgotten if a consumer needs installed-system scanning.  (Filed 2026-06-22 from session backlog.) |
 
 ## 8. Operator UX — P2 / P3
 
@@ -149,7 +157,9 @@ _All security & supply-chain tickets are closed — see [`docs/done.md`](docs/do
 
 ## 9. House-cleaning — P3
 
-_All house-cleaning tickets are closed — see [`docs/done.md`](docs/done.md) § 9._
+| ID    | Sev | Status | Title |
+|-------|-----|--------|-------|
+| DIST-01 | P3 | todo | **Closed-source distribution strategy (discuss later, low priority).**  Explore compiling/packaging the toolchain without shipping the Python source (Nuitka / Cython / PyArmor), with the GPL caveat that derivative-distro tooling interacting with GPL components may compel source availability regardless of the obfuscation method.  Strategic/legal discussion item — no code yet.  (Filed 2026-06-22 from session backlog.) |
 
 ---
 
