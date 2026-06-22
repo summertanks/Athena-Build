@@ -22112,6 +22112,99 @@ def test_get_version_is_cached():
     assert _version._CACHED_VERSION == _a
 
 
+def test_remote_build_run_container_command_shape():
+    """remote_build.run_container builds a `docker run` with the three local
+    bind mounts (source/patch/repo), the cpu/mem caps, and `bash -c <cmd_str>`."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_build
+    with tempfile.TemporaryDirectory() as _b:
+        os.makedirs(os.path.join(_b, 'source'))
+        with mock.patch.object(remote_build, 'subprocess') as _sp:
+            _sp.run.return_value = mock.Mock(returncode=0)
+            _rc = remote_build.run_container(
+                _b, 'athenalinux:build-x', 'set -e; dpkg-buildpackage',
+                7.0, '28g')
+        assert _rc == 0
+        _argv = _sp.run.call_args[0][0]
+        _joined = ' '.join(_argv)
+        assert _argv[:3] == ['docker', 'run', '--rm']
+        assert '/source:rw' in _joined and '/patch:rw' in _joined and \
+            '/repo:rw' in _joined
+        assert '--cpus' in _argv and '7.0' in _argv
+        assert '--memory' in _argv and '28g' in _argv
+        assert _argv[-3:] == ['bash', '-c', 'set -e; dpkg-buildpackage']
+        # out/ was created world-writable for the container's copy-out
+        assert os.path.isdir(os.path.join(_b, 'out'))
+
+
+def test_remote_build_image_uses_args_and_skips_when_present():
+    """build_image passes --build-arg for each param and SKIPS the build when
+    the tag already exists (cached on the remote after run 1)."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_build
+    with tempfile.TemporaryDirectory() as _b:
+        with open(os.path.join(_b, 'Dockerfile'), 'w') as _fh:
+            _fh.write('FROM debian:bookworm-slim\n')
+        # present → no docker build
+        with mock.patch.object(remote_build, '_image_exists', return_value=True), \
+                mock.patch.object(remote_build, 'subprocess') as _sp:
+            remote_build.build_image(_b, 'tag', {'RELEASE': 'bookworm'})
+            _sp.run.assert_not_called()
+        # absent → docker build with --build-arg
+        with mock.patch.object(remote_build, '_image_exists', return_value=False), \
+                mock.patch.object(remote_build, 'subprocess') as _sp:
+            _sp.run.return_value = mock.Mock(returncode=0)
+            remote_build.build_image(
+                _b, 'tag', {'RELEASE': 'bookworm', 'SNAPSHOT_TS': '20260602T0Z'})
+            _argv = _sp.run.call_args[0][0]
+            assert _argv[:3] == ['docker', 'build', '-t']
+            assert '--build-arg' in _argv and 'RELEASE=bookworm' in _argv
+            assert 'SNAPSHOT_TS=20260602T0Z' in _argv
+
+
+def test_remote_build_main_emits_result_marker():
+    """main() loads build.json, runs the build, and prints a single machine-
+    readable result line listing the produced artifacts; exit 0 on success,
+    exit 3 on a clean run that produced nothing."""
+    from unittest import mock
+    import io
+    import json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_build
+    with tempfile.TemporaryDirectory() as _b:
+        with open(os.path.join(_b, 'Dockerfile'), 'w') as _fh:
+            _fh.write('FROM debian:bookworm-slim\n')
+        with open(os.path.join(_b, 'build.json'), 'w') as _fh:
+            json.dump({'package': 'adduser', 'image_tag': 'tag',
+                       'cmd_str': 'true', 'build_args': {}}, _fh)
+        os.makedirs(os.path.join(_b, 'out'))
+        # success: an artifact present → exit 0 + marker lists it
+        with open(os.path.join(_b, 'out', 'adduser_3.1_all.deb'), 'w') as _fh:
+            _fh.write('x')
+        with mock.patch.object(remote_build, '_image_exists', return_value=True), \
+                mock.patch.object(remote_build, 'subprocess') as _sp, \
+                mock.patch('sys.stdout', new=io.StringIO()) as _out:
+            _sp.run.return_value = mock.Mock(returncode=0)
+            _rc = remote_build.main([_b])
+        _printed = _out.getvalue()
+        assert _rc == 0
+        assert remote_build.RESULT_MARKER in _printed
+        _line = [ln for ln in _printed.splitlines()
+                 if ln.startswith(remote_build.RESULT_MARKER)][0]
+        _res = json.loads(_line[len(remote_build.RESULT_MARKER):])
+        assert _res['exit_code'] == 0
+        assert _res['outputs'] == ['adduser_3.1_all.deb']
+        # clean exit but no artifacts → exit 3
+        os.remove(os.path.join(_b, 'out', 'adduser_3.1_all.deb'))
+        with mock.patch.object(remote_build, '_image_exists', return_value=True), \
+                mock.patch.object(remote_build, 'subprocess') as _sp, \
+                mock.patch('sys.stdout', new=io.StringIO()):
+            _sp.run.return_value = mock.Mock(returncode=0)
+            assert remote_build.main([_b]) == 3
+
+
 def test_segregate_never_deletes_existing_published_deb():
     """An exact-name collision in a published dir KEEPs the existing artifact
     (append-only) and drops the freshly-built dup at repo/ root — never
@@ -37586,6 +37679,9 @@ def main() -> int:
         test_check_mirror_reachability_dedups_and_classifies,
         test_cache_build_gates_on_mirror_reachability_and_config_command_wired,
         test_startup_banner_runs_config_check,
+        test_remote_build_run_container_command_shape,
+        test_remote_build_image_uses_args_and_skips_when_present,
+        test_remote_build_main_emits_result_marker,
         test_local_conf_mode_overrides_build_conf,
         test_local_conf_absent_falls_back_to_build_conf,
         test_local_conf_malformed_invalidates_config,
