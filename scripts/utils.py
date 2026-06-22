@@ -16,6 +16,7 @@ import argparse
 
 import requests
 import tui
+import _version
 from tui import Prompt, Spinner, ProgressBar
 from typing import (
     Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple,
@@ -119,7 +120,9 @@ _STALE_SCAN_SUBDIRS = ('main', 'main-udeb', 'doc', 'dbgsym', 'tests')
 # can be triaged.  Setting this here makes every requests.{get,head}
 # call use the same identifier, so we never re-introduce the throttle
 # by adding a new call site that forgets the header.
-_HTTP_HEADERS = {'User-Agent': 'athena-build/0.1'}
+# Uses the stable SemVer base (NOT the full git-describe string) so the
+# identifier doesn't churn per-commit on snapshot.debian.org's logs.
+_HTTP_HEADERS = {'User-Agent': f'athena-build/{_version.base_version()}'}
 
 # Outbound HTTP timeouts (seconds).  Single-value (not (connect, read)
 # tuple) on purpose: urllib3 2.x has a real bug where, against

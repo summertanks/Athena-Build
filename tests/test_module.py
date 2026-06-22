@@ -21860,6 +21860,65 @@ def test_build_source_cleanup_timeout_does_not_mask_success():
         'reap_all_live to sweep' in _src, _src
 
 
+def test_version_module_resolution():
+    """_version is the single source of truth for the TOOLCHAIN version.
+    base_version() is the stable SemVer base (no git suffix); get_version() is
+    provenance-exact (carries +g<sha> until a v* tag exists)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import _version
+    assert _version.base_version() == '0.1.0'
+    _v = _version.get_version()
+    assert isinstance(_v, str) and _v
+    # a checkout with no v* tag yet resolves to <base>+g<sha>[-dirty]
+    assert _v.startswith('0.1.0'), _v
+    assert _version.version_line().startswith('athena-build '), \
+        _version.version_line()
+    _vb = _version.version_line(verbose=True)
+    assert 'athena-build' in _vb and 'python' in _vb, _vb
+
+
+def test_version_base_matches_pyproject():
+    """pyproject [project].version and _version._BASE_VERSION must stay in
+    lockstep — bump_version.py rewrites both; this guards against drift."""
+    import re as _re
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import _version
+    with open(os.path.join(_ROOT, 'pyproject.toml')) as _fh:
+        _txt = _fh.read()
+    _m = _re.search(r'(?m)^\s*version\s*=\s*["\']([^"\']+)["\']', _txt)
+    assert _m, "no [project].version found in pyproject.toml"
+    assert _m.group(1) == _version._BASE_VERSION, \
+        (f"pyproject {_m.group(1)!r} != _version._BASE_VERSION "
+         f"{_version._BASE_VERSION!r} — keep them in lockstep")
+
+
+def test_version_git_describe_matches_only_version_tags():
+    """The repo carries descriptive savepoint tags (working-branding-*) that a
+    bare `git describe` would emit AS the version; _from_git MUST restrict to
+    v[0-9]* tags.  Source-pin so the guard can't be silently dropped."""
+    import inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import _version
+    _src = inspect.getsource(_version._from_git)
+    assert '--match' in _src and 'v[0-9]*' in _src, _src
+
+
+def test_version_command_registered_and_user_agent_derived():
+    """`version` is a real dispatcher noun, allowed before configure, has a
+    handler, and the HTTP User-Agent derives from the SAME single source — no
+    hardcoded '0.1' literal that could drift."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    import utils
+    assert 'version' in onboarding.ALLOW_BEFORE_CONFIGURE
+    assert utils._HTTP_HEADERS['User-Agent'] == 'athena-build/0.1.0', \
+        utils._HTTP_HEADERS
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _fh:
+        assert "register_command('version'" in _fh.read()
+    with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_run.py')) as _fh:
+        assert 'def cmd_version' in _fh.read()
+
+
 def test_segregate_never_deletes_existing_published_deb():
     """An exact-name collision in a published dir KEEPs the existing artifact
     (append-only) and drops the freshly-built dup at repo/ root — never
@@ -28803,12 +28862,15 @@ def test_http_session_is_module_level_singleton():
     fast back to ~15min of TLS handshake overhead."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import _version as _ver
     import utils as _u
     _a = _u._http_session()
     _b = _u._http_session()
     assert _a is _b, "expected same Session instance, got distinct objects"
     # Session must carry our User-Agent so per-call headers aren't required.
-    assert _a.headers.get('User-Agent') == 'athena-build/0.1'
+    # Derived from _version.base_version() (the single source) — not a hardcoded
+    # literal that would silently drift from the real UA on a version bump.
+    assert _a.headers.get('User-Agent') == f'athena-build/{_ver.base_version()}'
 
 
 def test_every_outbound_request_uses_http_session():
@@ -38101,6 +38163,10 @@ def main() -> int:
         test_sta32_connect_and_reap_use_widened_handling,
         test_docker_stream_and_wait_backfills_log_on_timeout,
         test_build_source_cleanup_timeout_does_not_mask_success,
+        test_version_module_resolution,
+        test_version_base_matches_pyproject,
+        test_version_git_describe_matches_only_version_tags,
+        test_version_command_registered_and_user_agent_derived,
         # UPD-01 step 2: append-only enforcement
         test_segregate_never_deletes_existing_published_deb,
         # OBS-04: exhaustive per-package build/tunnel log
