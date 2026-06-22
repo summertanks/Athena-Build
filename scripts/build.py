@@ -1550,21 +1550,16 @@ def main(banner: str) -> None:
         tui_inst.set_status_provider(lambda: _pc.status_lines(session))
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
-    console.print("Starting Athena Build System...", tui.COLOR_HIGHLIGHT)
-    console.print(f"\tArch\t\t\t{config.arch}")
-    console.print(f"\tParent Distribution\t{config.release} {config.baseversion}")
-    console.print(f"\tBuild Distribution\t{config.build_distribution} {config.build_version} ({config.build_codename})")
-    _mode = getattr(config, 'build_mode', 'distribution')
-    _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'build'
-                   else tui.COLOR_INFO)
-    if _mode == 'build':
-        _build_pkg_names = utils.parse_build_pkg_list(
-            getattr(config, 'build_pkg_list_path', '') or '')
+    # Startup banner = `config check`: show build identity AND probe mirror
+    # reachability up front, so a misconfig or unreachable mirror is visible the
+    # moment the session starts.  Informational here (cache build is the hard
+    # gate); the build mode is shown in the configured-status line below.
+    # Wrapped so a banner hiccup can never block the session.
+    try:
+        session.cmd_config('check')
+    except Exception as _e:                      # noqa: BLE001 — banner only
         console.print(
-            f"\tMode\t\t\tbuild  [{len(_build_pkg_names)} pkg(s) in build_pkg.list]",
-            _mode_color)
-    else:
-        console.print("\tMode\t\t\tdistribution", _mode_color)
+            f"startup config check failed (non-fatal): {_e}", tui.COLOR_WARNING)
 
     # Configuration status: nudge an unconfigured box toward `configure`
     # (commands are gated until then), or confirm the configured state.
