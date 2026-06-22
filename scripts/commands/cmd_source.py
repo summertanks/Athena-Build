@@ -1677,10 +1677,17 @@ class SourceCommandsMixin(SessionState):
         import uuid as _uuid
         import remote_orchestrate as _ro
 
-        if self.cache is None or self.dep_tree is None or self.container is None:
+        if self.cache is None or self.dep_tree is None:
             console.print("remotebuild: run `cache build` + `cache parse` first",
                           tui.COLOR_ERROR)
             return
+        if self.container is None:
+            # recipe-only container — no local Docker / image (the build runs
+            # on the remote).  Auto-init so remotebuild "just works" after
+            # `cache parse`, even on a host with no local build image.
+            self.cmd_init_remote_container()
+        if self.container is None:
+            return                       # init failed — message already printed
         _host = getattr(self.config, 'remote_build_host', '') or ''
         if not _host:
             console.print(
