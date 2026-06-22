@@ -120,7 +120,8 @@ def _container_cpu_pct(stats: dict) -> 'Optional[float]':
 
 class BuildContainer:
 
-    def __init__(self, config: BuildConfig, docker_server=None, cache=None):
+    def __init__(self, config: BuildConfig, docker_server=None, cache=None,
+                 connect: bool = True):
 
         # Cache (optional) — when wired, `build()` passes it to
         # `Source.build_depends(cache=…)` so that multi-provider virtual
@@ -192,7 +193,20 @@ class BuildContainer:
             for m in config.mirrors
         ]
 
+        # image tag is config-derived — set unconditionally so a recipe-only
+        # container (connect=False) can compose the recipe without a local
+        # Docker connection or image build.
+        self._image_tag = (
+            f"athenalinux:build-{config.container_release}-{self.snapshot_ts}")
+
         self.client = None
+
+        # recipe-only mode (used by `source remotebuild`): everything
+        # compose_recipe() and the post-build pipeline (_segregate / _normalize
+        # / _record_phase) need is already set above; skip the LOCAL Docker
+        # connect + image build — the build runs on a REMOTE host.
+        if not connect:
+            return
 
         if docker_server is not None:
             # Refuse to silently talk to an unsafely-exposed Docker daemon.
@@ -263,8 +277,6 @@ class BuildContainer:
         # operator's `[Snapshot] Timestamp` change wouldn't invalidate
         # the existing image even though its toolchain layer was now
         # against an older snapshot.
-        self._image_tag = (
-            f"athenalinux:build-{config.container_release}-{self.snapshot_ts}")
         _image_tag = self._image_tag
         dockerfile_hash = self._hash_dockerfile(config.dir_config)
         _needs_build = False

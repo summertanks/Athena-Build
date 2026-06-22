@@ -1012,6 +1012,32 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             console.print(f"  ERROR: build container initialisation failed — {e}")
             logger.error(f"BuildContainer() raised: {e}")
 
+    def cmd_init_remote_container(self):
+        """Set up a RECIPE-ONLY build container for `source remotebuild` — no
+        local Docker connection and no local image build (the build runs on the
+        remote host).  Provides compose_recipe() + the post-build pipeline,
+        which are config-derived + file ops and need neither a local daemon nor
+        a local image.  Like `container init`, requires `cache build` first so
+        the recipe can expand virtual build-deps.
+        """
+        self.flags.build_container_ready = False
+        if not self.flags.cache_ready:
+            console.print(
+                "container init remote: requires `cache build` first "
+                "(the recipe expands virtual Build-Depends from the cache)")
+            return
+        try:
+            self.container = buildcontainer.BuildContainer(
+                self.config, cache=self.cache, connect=False)
+            self.flags.build_container_ready = True
+            console.print(
+                "  Remote build container ready (recipe-only — no local image)")
+        except (RuntimeError,
+                buildcontainer.docker.errors.DockerException) as e:
+            console.print(
+                f"  ERROR: remote build container init failed — {e}")
+            logger.error(f"BuildContainer(connect=False) raised: {e}")
+
 
     # ------------------------------------Command: build_bootable------------
 
@@ -1224,9 +1250,13 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
     def cmd_container(self, action: str = '', *args):
         _table = {
             'init':  'build the Docker build sandbox image',
+            'init remote': 'recipe-only container for `source remotebuild` — '
+                           'no local Docker / image (build runs on the remote)',
             'purge': 'stop+remove athenalinux containers + images (force rebuild on next init)',
         }
         if action == 'init':
+            if args and args[0] == 'remote':
+                return self.cmd_init_remote_container()
             return self.cmd_init_container(*args)
         if action == 'purge':
             return self.cmd_container_purge(*args)

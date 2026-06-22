@@ -22350,6 +22350,44 @@ def test_remote_orchestrate_run_remote_flow():
         assert any('rm -rf /tmp/rd' in j for j in _joined)   # cleanup always
 
 
+def test_recipe_only_container_skips_local_docker():
+    """BuildContainer(connect=False) is a recipe-only container — sets the
+    image tag + config-derived attrs but NO local Docker client / image build,
+    so `source remotebuild` works on a host with no local build image."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _cfg = mock.Mock(
+        dir_repo='/r', dir_source='/s', dir_log='/l', arch='amd64',
+        container_release='bookworm', snapshot_baseurl='https://snap',
+        build_distribution='Asgard', build_base_id='asgard',
+        build_codename='thor', dir_config='/c', dir_patch_source='/p',
+        dir_patch_empty='/pe', build_profiles=frozenset(),
+        build_options=frozenset(), audit_build_deps=False,
+        docker_timeout=1800, mirrors=[])
+    with mock.patch('utils.resolve_snapshot_timestamp',
+                    return_value='20260602T0Z'), \
+            mock.patch.object(buildcontainer.docker, 'from_env') as _fe:
+        _bc = buildcontainer.BuildContainer(_cfg, cache=None, connect=False)
+    assert _bc.client is None                 # no local daemon connection
+    _fe.assert_not_called()                   # never even tried
+    assert _bc._image_tag == 'athenalinux:build-bookworm-20260602T0Z'
+    assert _bc.arch == 'amd64' and _bc.codename == 'thor'
+
+
+def test_remote_container_init_wired():
+    """`container init remote` builds a recipe-only (connect=False) container;
+    remotebuild auto-inits it so it needs no local image."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _f:
+        _b = _f.read()
+    assert 'def cmd_init_remote_container' in _b
+    assert "args[0] == 'remote'" in _b and 'cmd_init_remote_container()' in _b
+    assert 'connect=False' in _b
+    with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_source.py')) as _f:
+        assert 'self.cmd_init_remote_container()' in _f.read()
+
+
 def test_remotebuild_command_wired():
     """`source remotebuild` is dispatched, the handler + RemoteBuildHost config
     exist — the local `source build` path is separate."""
@@ -37843,6 +37881,8 @@ def main() -> int:
         test_remote_orchestrate_parse_host_stage_and_result,
         test_remote_orchestrate_run_remote_flow,
         test_remotebuild_command_wired,
+        test_recipe_only_container_skips_local_docker,
+        test_remote_container_init_wired,
         test_local_conf_mode_overrides_build_conf,
         test_local_conf_absent_falls_back_to_build_conf,
         test_local_conf_malformed_invalidates_config,
