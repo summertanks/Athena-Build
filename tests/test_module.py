@@ -22419,6 +22419,48 @@ def test_ensure_remote_image_lan_transfer_paths():
         assert _ro.ensure_remote_image('h', 'tag', log=_quiet) == 'transferred'
 
 
+def test_published_ledger_memoised():
+    """published_ledger memoises on the manifest's (path, mtime, size) so
+    `source audit`'s repeated calls don't re-read/re-verify/re-parse it — the
+    audit-startup delay."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    repo_audit._PUBLISHED_LEDGER_CACHE.clear()
+    try:
+        with mock.patch('repo_audit.os.stat',
+                        return_value=mock.Mock(st_mtime_ns=111, st_size=222)), \
+                mock.patch.object(repo_audit, 'local_manifest_path',
+                                  return_value='/m'), \
+                mock.patch.object(repo_audit, 'read_published_manifest',
+                                  return_value='Package: foo\nVersion: 1\n\n'
+                                  ) as _rd, \
+                mock.patch.object(repo_audit, 'parse_packages_to_ledger',
+                                  return_value={'foo': ['1']}) as _pp:
+            _r1 = repo_audit.published_ledger(mock.Mock())
+            _r2 = repo_audit.published_ledger(mock.Mock())
+        assert _r1 == {'foo': ['1']}
+        assert _r2 is _r1                       # same cached object
+        assert _rd.call_count == 1              # read ONCE despite two calls
+        assert _pp.call_count == 1
+    finally:
+        repo_audit._PUBLISHED_LEDGER_CACHE.clear()
+
+
+def test_container_init_remote_ensures_image():
+    """`container init remote` ensures the remote image for the SELECTED
+    snapshot (confirm / LAN-transfer / build), gated on RemoteBuildHost — not a
+    passive local-only object."""
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _f:
+        _b = _f.read()
+    _s = _b.index('def cmd_init_remote_container')
+    _e = _b.index('\n    def ', _s + 1)
+    _body = _b[_s:_e]
+    assert 'ensure_remote_image(' in _body
+    assert 'RemoteBuildHost' in _body
+    assert 'connect=False' in _body
+
+
 def test_remotebuild_command_wired():
     """`source remotebuild` is dispatched, the handler + RemoteBuildHost config
     exist — the local `source build` path is separate."""
@@ -37912,6 +37954,8 @@ def main() -> int:
         test_remote_orchestrate_parse_host_stage_and_result,
         test_remote_orchestrate_run_remote_flow,
         test_ensure_remote_image_lan_transfer_paths,
+        test_published_ledger_memoised,
+        test_container_init_remote_ensures_image,
         test_remotebuild_command_wired,
         test_recipe_only_container_skips_local_docker,
         test_remote_container_init_wired,
