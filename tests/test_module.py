@@ -25483,32 +25483,39 @@ def test_needs_bump_build_per_file_exact_un():
 def test_audit_state_reclassifies_security_respin_as_needs_bump():
     """`_audit_state` surfaces a same-base security/NMU re-spin as
     'needs_bump' when `_source_state` calls it 'ok' (lenient +asg presence)
-    but `_needs_bump_build` says a fresh +asg bump is due — so the audit
-    rebuild queue matches UPDATE-mode `source build`.  Only an otherwise-'ok'
-    source is reclassified; hard states and release=None are left intact."""
+    but `_needs_bump_build` says a fresh +asg bump is due AND the source is in
+    the snapshot-delta workload — so the audit rebuild queue matches UPDATE-mode
+    `source build`.  A bump-due re-spin OUTSIDE the workload must stay 'ok'
+    (else every adopted ~debNuN false-flags — the 178 regression).  Hard states
+    and release=None are left intact."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
     _sess = BuildSession.__new__(BuildSession)
     _src = object()
+    _wl = {'apache2'}                       # apache2 IS in the delta workload
 
-    # binary present ('ok') + a bump is due → 'needs_bump'
+    # 'ok' + bump due + IN workload → 'needs_bump'
     _sess._source_state = lambda p, s: 'ok'
     _sess._needs_bump_build = lambda p, s, lg, rl: True
-    assert _sess._audit_state('apache2', _src, {}, 1) == 'needs_bump'
+    assert _sess._audit_state('apache2', _src, {}, 1, _wl) == 'needs_bump'
+
+    # bump due but NOT in workload (adopted ~debNuN that didn't change) →
+    # stays 'ok' — the 178-false-flag regression guard
+    assert _sess._audit_state('glibc', _src, {}, 1, _wl) == 'ok'
 
     # 'ok' but NO bump due → stays 'ok'
     _sess._needs_bump_build = lambda p, s, lg, rl: False
-    assert _sess._audit_state('apache2', _src, {}, 1) == 'ok'
+    assert _sess._audit_state('apache2', _src, {}, 1, _wl) == 'ok'
 
     # a hard state is NEVER reclassified, even if a bump would be due
     _sess._source_state = lambda p, s: 'needs_build'
     _sess._needs_bump_build = lambda p, s, lg, rl: True
-    assert _sess._audit_state('apache2', _src, {}, 1) == 'needs_build'
+    assert _sess._audit_state('apache2', _src, {}, 1, _wl) == 'needs_build'
 
     # release=None (non-integer VERSION) → bump check skipped, returns 'ok'
     _sess._source_state = lambda p, s: 'ok'
     _sess._needs_bump_build = lambda p, s, lg, rl: True
-    assert _sess._audit_state('apache2', _src, {}, None) == 'ok'
+    assert _sess._audit_state('apache2', _src, {}, None, _wl) == 'ok'
 
 
 def test_preflight_stamp_invariant_roundtrips_and_flags_bad_version():
