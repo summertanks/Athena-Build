@@ -21919,6 +21919,46 @@ def test_version_command_registered_and_user_agent_derived():
         assert 'def cmd_version' in _fh.read()
 
 
+def test_bump_version_next_computation():
+    """bump_version._next_version implements SemVer part-bumps + explicit set,
+    and refuses non-SemVer input."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump_version
+    assert bump_version._next_version('0.1.0', 'major') == '1.0.0'
+    assert bump_version._next_version('0.1.0', 'minor') == '0.2.0'
+    assert bump_version._next_version('0.1.0', 'patch') == '0.1.1'
+    assert bump_version._next_version('1.4.9', 'patch') == '1.4.10'
+    assert bump_version._next_version('0.1.0', '2.3.4') == '2.3.4'
+    for _bad in ('1.2', 'xyz', 'v0.1.0'):
+        try:
+            bump_version._next_version('0.1.0', _bad)
+            raise AssertionError(f"expected SystemExit for bump {_bad!r}")
+        except SystemExit:
+            pass
+    # a non-SemVer *current* version is refused too
+    try:
+        bump_version._next_version('0.1.0-14-gdead', 'patch')
+        raise AssertionError("expected SystemExit for non-SemVer current")
+    except SystemExit:
+        pass
+
+
+def test_bump_version_rewrite_patterns_match_real_files():
+    """The bump rewrites pyproject [project].version and _version._BASE_VERSION
+    in lockstep; both regexes must match EXACTLY ONCE in the real files, or a
+    reformat would make a release silently no-op."""
+    import re as _re
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with open(os.path.join(_ROOT, 'pyproject.toml')) as _fh:
+        _, _n1 = _re.subn(r'(?m)^(version\s*=\s*")[^"]+(")', r'\g<1>X\g<2>',
+                          _fh.read(), count=1)
+    assert _n1 == 1, "pyproject version-rewrite pattern did not match once"
+    with open(os.path.join(_ROOT, 'scripts', '_version.py')) as _fh:
+        _, _n2 = _re.subn(r'(_BASE_VERSION\s*=\s*")[^"]+(")', r'\g<1>X\g<2>',
+                          _fh.read(), count=1)
+    assert _n2 == 1, "_version._BASE_VERSION rewrite pattern did not match once"
+
+
 def test_segregate_never_deletes_existing_published_deb():
     """An exact-name collision in a published dir KEEPs the existing artifact
     (append-only) and drops the freshly-built dup at repo/ root — never
@@ -38167,6 +38207,8 @@ def main() -> int:
         test_version_base_matches_pyproject,
         test_version_git_describe_matches_only_version_tags,
         test_version_command_registered_and_user_agent_derived,
+        test_bump_version_next_computation,
+        test_bump_version_rewrite_patterns_match_real_files,
         # UPD-01 step 2: append-only enforcement
         test_segregate_never_deletes_existing_published_deb,
         # OBS-04: exhaustive per-package build/tunnel log
