@@ -22260,6 +22260,109 @@ def test_remote_build_main_emits_result_marker():
             assert remote_build.main([_b]) == 3
 
 
+def test_remote_orchestrate_parse_host_stage_and_result():
+    """parse_ssh_host normalises ssh:// URLs; stage_bundle lays out the bundle
+    (Dockerfile, source/, patch/, remote_build.py, build.json params);
+    _parse_result pulls the result marker."""
+    import json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+    assert _ro.parse_ssh_host('ssh://h@1.2.3.4') == 'h@1.2.3.4'
+    assert _ro.parse_ssh_host('h@1.2.3.4') == 'h@1.2.3.4'
+    assert _ro.parse_ssh_host('ssh://u@h/') == 'u@h'
+    with tempfile.TemporaryDirectory() as _t:
+        _df = os.path.join(_t, 'Dockerfile')
+        with open(_df, 'w') as _f:
+            _f.write('FROM debian:bookworm-slim\n')
+        _rb = os.path.join(_t, 'remote_build.py')
+        with open(_rb, 'w') as _f:
+            _f.write('# rb\n')
+        _sd = os.path.join(_t, 'src')
+        os.makedirs(_sd)
+        _s1 = os.path.join(_sd, 'adduser_3.134.dsc')
+        with open(_s1, 'w') as _f:
+            _f.write('d')
+        _pd = os.path.join(_t, 'patch')
+        os.makedirs(_pd)
+        with open(os.path.join(_pd, '9001-x.patch'), 'w') as _f:
+            _f.write('p')
+        _recipe = {'filename_prefix': 'adduser', 'image_tag': 'tag',
+                   'build_args': {'RELEASE': 'bookworm'}, 'cmd_str': 'CMD'}
+        _bundle = os.path.join(_t, 'bundle')
+        os.makedirs(_bundle)
+        _ro.stage_bundle(_bundle, dockerfile=_df, source_files=[_s1],
+                         patch_dir=_pd, recipe=_recipe, build_cpus=7.0,
+                         build_memory='28g', remote_build_py=_rb)
+        assert os.path.isfile(os.path.join(_bundle, 'Dockerfile'))
+        assert os.path.isfile(os.path.join(_bundle, 'remote_build.py'))
+        assert os.path.isfile(
+            os.path.join(_bundle, 'source', 'adduser_3.134.dsc'))
+        assert os.path.isfile(os.path.join(_bundle, 'patch', '9001-x.patch'))
+        with open(os.path.join(_bundle, 'build.json')) as _f:
+            _bj = json.load(_f)
+        assert _bj['image_tag'] == 'tag' and _bj['cmd_str'] == 'CMD'
+        assert _bj['build_args']['RELEASE'] == 'bookworm'
+        assert _bj['build_cpus'] == 7.0 and _bj['build_memory'] == '28g'
+    _good = (f"noise\n{_ro.RESULT_MARKER} "
+             + json.dumps({'exit_code': 0, 'outputs': ['a.deb']}) + "\ntail")
+    assert _ro._parse_result(_good) == (0, ['a.deb'])
+    assert _ro._parse_result('no marker') == (1, [])
+
+
+def test_remote_orchestrate_run_remote_flow():
+    """run_remote scps the bundle up, ssh-runs remote_build.py, parses the
+    result, scps the .debs back, and ALWAYS cleans up the remote dir."""
+    from unittest import mock
+    import json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+    with tempfile.TemporaryDirectory() as _t:
+        _bundle = os.path.join(_t, 'b')
+        os.makedirs(_bundle)
+        with open(os.path.join(_bundle, 'build.json'), 'w') as _f:
+            _f.write('{}')
+        _marker = (f"{_ro.RESULT_MARKER} "
+                   + json.dumps({'exit_code': 0,
+                                 'outputs': ['adduser_3.134_all.deb']}))
+        _calls = []
+
+        def _fake_run(cmd, **_kw):
+            _calls.append(cmd)
+            return mock.Mock(returncode=0)
+
+        class _FakeProc:
+            stdout = iter([_marker + "\n"])
+
+            def wait(self):
+                return 0
+
+        with mock.patch.object(_ro.subprocess, 'run', side_effect=_fake_run), \
+                mock.patch.object(_ro.subprocess, 'Popen',
+                                  return_value=_FakeProc()):
+            _exit, _outputs = _ro.run_remote(
+                'user@h', _bundle, '/tmp/rd', os.path.join(_t, 'out'),
+                log=lambda *_a: None)
+        assert _exit == 0 and _outputs == ['adduser_3.134_all.deb']
+        _joined = [' '.join(c) for c in _calls]
+        assert any('mkdir -p /tmp/rd' in j for j in _joined)
+        assert any(j.startswith('scp ') for j in _joined)
+        assert any('out/*.deb' in j for j in _joined)
+        assert any('rm -rf /tmp/rd' in j for j in _joined)   # cleanup always
+
+
+def test_remotebuild_command_wired():
+    """`source remotebuild` is dispatched, the handler + RemoteBuildHost config
+    exist — the local `source build` path is separate."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _f:
+        _b = _f.read()
+    assert "action == 'remotebuild'" in _b and 'cmd_source_remotebuild' in _b
+    with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_source.py')) as _f:
+        assert 'def cmd_source_remotebuild' in _f.read()
+    with open(os.path.join(_ROOT, 'scripts', 'utils.py')) as _f:
+        assert "'RemoteBuildHost'" in _f.read()
+
+
 def test_segregate_never_deletes_existing_published_deb():
     """An exact-name collision in a published dir KEEPs the existing artifact
     (append-only) and drops the freshly-built dup at repo/ root — never
@@ -37737,6 +37840,9 @@ def main() -> int:
         test_remote_build_run_container_command_shape,
         test_remote_build_image_uses_args_and_skips_when_present,
         test_remote_build_main_emits_result_marker,
+        test_remote_orchestrate_parse_host_stage_and_result,
+        test_remote_orchestrate_run_remote_flow,
+        test_remotebuild_command_wired,
         test_local_conf_mode_overrides_build_conf,
         test_local_conf_absent_falls_back_to_build_conf,
         test_local_conf_malformed_invalidates_config,

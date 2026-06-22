@@ -1661,6 +1661,113 @@ class SourceCommandsMixin(SessionState):
         console.print(f"  Building {_src_pkg.package} [FAIL]", tui.COLOR_ERROR)
         return ('failed', 0)
 
+    def cmd_source_remotebuild(self, *args):
+        """source remotebuild <pkg> — build ONE source package on a remote
+        Docker host over SSH and recover the .debs locally.
+
+        Ships the recipe (compose_recipe) + source + patches + Dockerfile +
+        remote_build.py to [Build] RemoteBuildHost, runs the build THERE (Docker
+        is local on the remote, so the container's bind mounts work), scps the
+        .debs back, then runs the SAME local post-build pipeline (segregate →
+        normalize → record) so the repo + build.json are identical to a local
+        build.  The local `source build` path is untouched.
+        """
+        import shutil as _shutil
+        import tempfile as _tempfile
+        import uuid as _uuid
+        import remote_orchestrate as _ro
+
+        if self.cache is None or self.dep_tree is None or self.container is None:
+            console.print("remotebuild: run `cache build` + `cache parse` first",
+                          tui.COLOR_ERROR)
+            return
+        _host = getattr(self.config, 'remote_build_host', '') or ''
+        if not _host:
+            console.print(
+                "remotebuild: set `[Build] RemoteBuildHost = ssh://user@host` "
+                "in config (or config/local.conf) first", tui.COLOR_ERROR)
+            return
+        if not args:
+            console.print("Usage: source remotebuild <pkg>", tui.COLOR_ERROR)
+            return
+        _name = args[0]
+        _src = (self.dep_tree.selected_srcs.get(_name)
+                or (self.udeb_dep_tree.selected_srcs.get(_name)
+                    if self.udeb_dep_tree is not None else None))
+        if _src is None:
+            console.print(f"Unknown package: {_name}", tui.COLOR_ERROR)
+            return
+
+        _recipe = self.container.compose_recipe(_src)
+        if _recipe is None:
+            console.print(f"remotebuild: {_name} has no .dsc — skipped",
+                          tui.COLOR_ERROR)
+            return
+
+        # phase=entry record (same as a local build) — a crash mid-remote-build
+        # classifies as 'interrupted'.
+        self.container._record_phase(
+            _src.package, initial=utils.new_build_record(
+                package=_src.package, intended_version=str(_src.version),
+                patch_set_hash=_recipe['patch_set_hash'],
+                component=_recipe['component']))
+
+        _source_files = [os.path.join(self.config.dir_source, _f)
+                         for _f in _src.files]
+        _ssh_host = _ro.parse_ssh_host(_host)
+        _scratch = os.path.join(self.config.dir_build_stage, _uuid.uuid4().hex)
+        _remote_dir = (f"/tmp/athena-remotebuild-{_src.package}-"
+                       f"{_uuid.uuid4().hex[:8]}")
+
+        console.print(f"remotebuild {_src.package} on {_ssh_host} …",
+                      tui.COLOR_INFO)
+        with _tempfile.TemporaryDirectory() as _bundle:
+            _ro.stage_bundle(
+                _bundle,
+                dockerfile=os.path.join(self.config.dir_config, 'Dockerfile'),
+                source_files=_source_files,
+                patch_dir=_recipe['patch_dir'],
+                recipe=_recipe,
+                build_cpus=getattr(self.config, 'build_cpus', 0) or None,
+                build_memory=getattr(self.config, 'build_memory', '') or None,
+                remote_build_py=os.path.join(
+                    self.config.working_dir, 'scripts', 'remote_build.py'),
+            )
+            _exit, _outputs = _ro.run_remote(
+                _ssh_host, _bundle, _remote_dir, _scratch,
+                log=console.print)
+
+        if _exit != 0 or not _outputs:
+            console.print(
+                f"  remotebuild {_src.package} [FAIL] — remote exit {_exit}, "
+                f"{len(_outputs)} artifact(s)", tui.COLOR_ERROR)
+            self.container._record_phase(
+                _src.package, phase='failed', exit_code=_exit)
+            _shutil.rmtree(_scratch, ignore_errors=True)
+            return
+
+        # local post-build pipeline — identical bookkeeping to a local build
+        _emitted = self.container._segregate_built_artifacts(_src, _scratch)
+        _final = self.container._normalize_built_artifacts(
+            _src, _emitted, bool(_recipe['patch_list']))
+        if not _final:
+            _final = list(_emitted)
+        _hashes = {}
+        for _p in _final:
+            _h = utils.get_sha256(_p, use_cache=False)
+            if _h:
+                _hashes[os.path.basename(_p)] = _h
+        self.container._record_phase(
+            _src.package, phase='done',
+            built_version=utils.strip_nmu_suffix(str(_src.version)),
+            output_count=len(_final),
+            outputs=sorted(os.path.basename(_p) for _p in _final),
+            output_hashes=_hashes)
+        _shutil.rmtree(_scratch, ignore_errors=True)
+        console.print(
+            f"  remotebuild {_src.package} [PASS] — {len(_final)} artifact(s) "
+            "into repo/", tui.COLOR_HIGHLIGHT)
+
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
