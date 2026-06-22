@@ -33,6 +33,7 @@ from typing import Optional
 
 import tui
 import utils
+import _version
 
 logger = logging.getLogger('athena')
 
@@ -641,6 +642,9 @@ def _write_subdir_release(
     Component/Architecture.  apt cross-checks these against the top-level
     Release; mismatch → apt refuses the repo with a useful error.
     """
+    # X-Athena-Build-Version: toolchain provenance.  An X- field is ignored by
+    # apt (and by the top-Release cross-check), so it carries which Athena-Build
+    # produced this repo metadata without disturbing the pinned identity fields.
     _content = (
         f"Origin: Athena\n"
         f"Label: Athena\n"
@@ -650,6 +654,7 @@ def _write_subdir_release(
         f"Component: {component}\n"
         f"Architecture: {arch_label}\n"
         f"Description: Athena installer media — {component}/{arch_label}\n"
+        f"X-Athena-Build-Version: {_version.get_version()}\n"
     )
     _path = os.path.join(target_dir, 'Release')
     # write a user-owned tempfile, then `sudo install -m 644`

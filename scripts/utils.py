@@ -1052,6 +1052,11 @@ def new_build_record(*, package: str,
     """
     return {
         'schema_version':   BUILD_RECORD_SCHEMA_VERSION,
+        # Toolchain provenance: which Athena-Build version produced this record.
+        # Informational/additive — no consumer gates on it and no schema bump
+        # is needed (the v3/v4 migration ignores unknown keys); read defensively
+        # with .get() since older on-disk records predate the field.
+        'athena_build_version': _version.get_version(),
         'package':          package,
         'intended_version': intended_version,
         'built_version':    None,

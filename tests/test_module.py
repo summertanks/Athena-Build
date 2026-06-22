@@ -4814,12 +4814,18 @@ def test_iso_installer_stage_disk_info_copies_files_skipping_readme():
             assert _stage_disk_info(_stage, _installer,
                                      'athena', '0.1') is True
             _disk = os.path.join(_stage, '.disk')
+            # `athena-build` is the generated toolchain-provenance marker
+            # (always written, like .disk/snapshot); the *.md README is the one
+            # that must NOT be copied from installer/disk/.
             assert sorted(os.listdir(_disk)) == [
-                'base_components', 'base_installable', 'info'
+                'athena-build', 'base_components', 'base_installable', 'info'
             ], (
                 "README.md should NOT be copied to .disk/; "
                 f"got {sorted(os.listdir(_disk))}"
             )
+            # provenance marker carries the toolchain version
+            with open(os.path.join(_disk, 'athena-build')) as fh:
+                assert fh.read().strip().startswith('0.1.0')
             # info content preserved verbatim
             with open(os.path.join(_disk, 'info')) as fh:
                 assert fh.read() == 'Athena 0.1 amd64 INSTALLER\n'
@@ -21959,6 +21965,48 @@ def test_bump_version_rewrite_patterns_match_real_files():
     assert _n2 == 1, "_version._BASE_VERSION rewrite pattern did not match once"
 
 
+def test_build_record_carries_toolchain_version():
+    """new_build_record stamps the producing Athena-Build version (provenance);
+    additive + informational, so it must not perturb the existing fields."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import _version
+    import utils as _u
+    _rec = _u.new_build_record(
+        package='foo', intended_version='1.0', patch_set_hash='ab' * 32)
+    assert _rec['athena_build_version'] == _version.get_version()
+    assert _rec['athena_build_version'].startswith('0.1.0')
+    # existing load-bearing fields still present + unchanged
+    assert _rec['schema_version'] == _u.BUILD_RECORD_SCHEMA_VERSION
+    assert _rec['package'] == 'foo' and _rec['phase'] == 'entry'
+
+
+def test_provenance_stamped_into_iso_and_repo_metadata():
+    """The toolchain version is stamped into the two shipped surfaces — the ISO
+    (.disk/athena-build marker) and the repo (per-component Release
+    X-Athena-Build-Version).  Source-pins (the value paths need sudo / a full
+    ISO stage to exercise)."""
+    import inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+    import iso_installer
+    _disk = inspect.getsource(iso_installer._stage_disk_info)
+    assert "'athena-build'" in _disk and '_version.get_version()' in _disk, _disk
+    _rel = inspect.getsource(apt_repo._write_subdir_release)
+    assert 'X-Athena-Build-Version' in _rel and '_version.get_version()' in _rel, \
+        _rel
+
+
+def test_get_version_is_cached():
+    """get_version() caches — provenance stampers call it per build record / per
+    Release without re-shelling to git each time."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import _version
+    _a = _version.get_version()
+    _b = _version.get_version()
+    assert _a == _b and _a
+    assert _version._CACHED_VERSION == _a
+
+
 def test_segregate_never_deletes_existing_published_deb():
     """An exact-name collision in a published dir KEEPs the existing artifact
     (append-only) and drops the freshly-built dup at repo/ root — never
@@ -27475,7 +27523,12 @@ def test_build_record_schema_v3_field_set():
 
     v4→v5 (OBS-03): added `resources` (None at entry; populated at the
     container_exited phase with {peak_rss_bytes, peak_rss_mb,
-    mem_limit_bytes, peak_cpu_pct, samples} from the per-build poll)."""
+    mem_limit_bytes, peak_cpu_pct, samples} from the per-build poll).
+
+    `athena_build_version` is INFORMATIONAL provenance (which Athena-Build
+    produced the record), NOT a functional schema field: no consumer gates on
+    it and the migration ignores it, so it does NOT carry a schema bump — but it
+    is still pinned here so an accidental record-shape change is caught."""
     _u = _utils_module()
     _rec = _u.new_build_record(
         package='libwmf', intended_version='0.2.12-5.1',
@@ -27491,6 +27544,7 @@ def test_build_record_schema_v3_field_set():
         'republished_from', 'pulled_from', 'component',
         'lifecycle_v', 'history',   # LEDGER-01 v4 baseline
         'resources',                # OBS-03 v5
+        'athena_build_version',     # toolchain provenance (informational)
     }
     assert set(_rec.keys()) == _required, (
         f"v5 schema drift: {set(_rec.keys()) ^ _required}")
@@ -38209,6 +38263,9 @@ def main() -> int:
         test_version_command_registered_and_user_agent_derived,
         test_bump_version_next_computation,
         test_bump_version_rewrite_patterns_match_real_files,
+        test_build_record_carries_toolchain_version,
+        test_provenance_stamped_into_iso_and_repo_metadata,
+        test_get_version_is_cached,
         # UPD-01 step 2: append-only enforcement
         test_segregate_never_deletes_existing_published_deb,
         # OBS-04: exhaustive per-package build/tunnel log
