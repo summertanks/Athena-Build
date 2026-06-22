@@ -387,6 +387,16 @@ def test_cache_build_gates_on_mirror_reachability_and_config_command_wired():
         assert 'def cmd_config' in _fh.read()
 
 
+def test_startup_banner_runs_config_check():
+    """Startup banner is now `config check` (build identity + mirror
+    reachability) — the old static Arch/Parent/Build/Mode header is retired."""
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _fh:
+        _src = _fh.read()
+    assert "session.cmd_config('check')" in _src
+    assert 'Starting Athena Build System' not in _src
+    assert 'Parent Distribution' not in _src
+
+
 def _write_local_conf(tmp: str, body: str) -> None:
     """Drop a config/local.conf alongside the synthetic build.conf."""
     with open(os.path.join(tmp, 'config', 'local.conf'), 'w') as fh:
@@ -37575,6 +37585,7 @@ def main() -> int:
         test_container_release_defaults_to_release_unless_overridden,
         test_check_mirror_reachability_dedups_and_classifies,
         test_cache_build_gates_on_mirror_reachability_and_config_command_wired,
+        test_startup_banner_runs_config_check,
         test_local_conf_mode_overrides_build_conf,
         test_local_conf_absent_falls_back_to_build_conf,
         test_local_conf_malformed_invalidates_config,
