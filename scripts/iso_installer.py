@@ -29,6 +29,7 @@ from typing import Optional, TYPE_CHECKING
 
 import tui
 import utils
+import _version
 
 if TYPE_CHECKING:
     import buildcontainer   # forward-reference target for type hints
@@ -631,6 +632,16 @@ def _stage_disk_info(
             tui.console.print(f"ERROR: write .disk/snapshot: {e}")
             logger.error(f"_stage_disk_info snapshot marker: {e}")
             return False
+    # Toolchain provenance marker: which Athena-Build version produced this
+    # media.  Its own .disk/ marker (like .disk/snapshot) — never touches the
+    # cdrom-detect-parsed .disk/info format.  Best-effort: a failure here must
+    # not fail the ISO (it's informational), so log + continue.
+    try:
+        with open(os.path.join(_dst_dir, 'athena-build'), 'w',
+                  encoding='utf-8') as fh:
+            fh.write(_version.get_version() + '\n')
+    except OSError as e:
+        logger.warning(f"_stage_disk_info athena-build marker: {e}")
     _shipped = 0
     for _entry in sorted(os.listdir(_src_dir)):
         if _entry.endswith('.md'):

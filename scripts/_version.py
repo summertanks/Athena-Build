@@ -54,7 +54,14 @@ def _git(*args: str) -> 'str | None':
             capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
-    if _r.returncode != 0:
+    # Defensive type checks: a test that broadly mocks subprocess.run returns a
+    # MagicMock whose .returncode/.stdout are also MagicMocks.  Without these
+    # guards a MagicMock would flow into get_version() (and thence a build
+    # record / Release file, breaking JSON serialisation).  Only a real
+    # success with real text output is trusted; anything else falls through.
+    if not isinstance(_r.returncode, int) or _r.returncode != 0:
+        return None
+    if not isinstance(_r.stdout, str):
         return None
     return _r.stdout.strip() or None
 
@@ -94,13 +101,28 @@ def _from_metadata() -> 'str | None':
         return None
 
 
+_CACHED_VERSION: 'str | None' = None
+
+
 def get_version() -> str:
-    """Full provenance-exact version string (carries the git suffix in a tree)."""
+    """Full provenance-exact version string (carries the git suffix in a tree).
+
+    Cached after the first resolution: the version is a property of the running
+    CODE, which doesn't change mid-process, so provenance stampers (build
+    records, ISO, repo) can call this freely without repeated git subprocesses.
+    The dirty flag is sampled once at first call — that's intentional, the code
+    didn't change just because the build wrote output files.
+    """
+    global _CACHED_VERSION
+    if _CACHED_VERSION is not None:
+        return _CACHED_VERSION
     for _fn in (_from_buildstamp, _from_git, _from_metadata):
         _v = _fn()
         if _v:
+            _CACHED_VERSION = _v
             return _v
-    return f"{_BASE_VERSION}+unknown"
+    _CACHED_VERSION = f"{_BASE_VERSION}+unknown"
+    return _CACHED_VERSION
 
 
 def get_commit() -> 'str | None':
