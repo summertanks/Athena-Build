@@ -58,6 +58,50 @@ def stage_bundle(bundle: str, *, dockerfile: str, source_files: 'list[str]',
         json.dump(_params, _fh, indent=2)
 
 
+def _has_image(image_tag: str, ssh_host: 'str | None' = None) -> bool:
+    """True if `image_tag` exists — on the remote (ssh_host set) or locally."""
+    if ssh_host:
+        _cmd = ['ssh', '-o', 'BatchMode=yes', ssh_host,
+                f'docker image inspect {image_tag}']
+    else:
+        _cmd = ['docker', 'image', 'inspect', image_tag]
+    return subprocess.run(_cmd, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
+def ensure_remote_image(host: str, image_tag: str, *, log=print) -> str:
+    """Make sure `image_tag` is available on the remote, the FAST way.
+
+    The remote rebuilding the toolchain image from the internet is the slow
+    path (~tens of minutes on a thin link).  If THIS host already has the image
+    (e.g. cached from a prior local build), stream it over the LAN instead
+    (`docker save | ssh docker load`) — far faster than re-downloading.
+
+    Returns:
+      'present'      — the remote already had it (nothing to do)
+      'transferred'  — copied from this host over the LAN
+      'build'        — neither has it; remote_build.py will build it remotely
+    """
+    if _has_image(image_tag, ssh_host=host):
+        return 'present'
+    if not _has_image(image_tag):
+        return 'build'                       # remote_build.py builds it remotely
+    log(f"image {image_tag} not on remote — streaming it over the LAN "
+        "(docker save | ssh docker load) …")
+    _save = subprocess.Popen(['docker', 'save', image_tag],
+                             stdout=subprocess.PIPE)
+    _load = subprocess.Popen(['ssh', '-o', 'BatchMode=yes', host, 'docker load'],
+                             stdin=_save.stdout)
+    if _save.stdout is not None:
+        _save.stdout.close()               # let _load receive SIGPIPE on exit
+    _load.wait()
+    _save.wait()
+    if _load.returncode == 0:
+        return 'transferred'
+    log("LAN image transfer failed — the remote will build the image instead")
+    return 'build'
+
+
 def _parse_result(stdout: str) -> 'tuple[int, list[str]]':
     """Pull the last `__ATHENA_REMOTE_RESULT__ {json}` line emitted by
     remote_build.py.  Returns (exit_code, [output basenames])."""
