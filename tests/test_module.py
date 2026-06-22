@@ -4824,8 +4824,9 @@ def test_iso_installer_stage_disk_info_copies_files_skipping_readme():
                 f"got {sorted(os.listdir(_disk))}"
             )
             # provenance marker carries the toolchain version
+            import _version as _ver
             with open(os.path.join(_disk, 'athena-build')) as fh:
-                assert fh.read().strip().startswith('0.1.0')
+                assert fh.read().strip().startswith(_ver.base_version())
             # info content preserved verbatim
             with open(os.path.join(_disk, 'info')) as fh:
                 assert fh.read() == 'Athena 0.1 amd64 INSTALLER\n'
@@ -21870,13 +21871,18 @@ def test_version_module_resolution():
     """_version is the single source of truth for the TOOLCHAIN version.
     base_version() is the stable SemVer base (no git suffix); get_version() is
     provenance-exact (carries +g<sha> until a v* tag exists)."""
+    import re as _re
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import _version
-    assert _version.base_version() == '0.1.0'
+    # base is a plain SemVer X.Y.Z (don't pin a literal — it bumps on release)
+    assert _re.fullmatch(r'\d+\.\d+\.\d+', _version.base_version()), \
+        _version.base_version()
     _v = _version.get_version()
     assert isinstance(_v, str) and _v
-    # a checkout with no v* tag yet resolves to <base>+g<sha>[-dirty]
-    assert _v.startswith('0.1.0'), _v
+    # full version starts from the SemVer base (exactly it when on a tag, or
+    # <base>+g<sha> / <base>-N-g<sha> between/after tags)
+    assert _v.startswith(_version.base_version()) or \
+        _re.match(r'\d+\.\d+\.\d+', _v), _v
     assert _version.version_line().startswith('athena-build '), \
         _version.version_line()
     _vb = _version.version_line(verbose=True)
@@ -21914,11 +21920,12 @@ def test_version_command_registered_and_user_agent_derived():
     handler, and the HTTP User-Agent derives from the SAME single source — no
     hardcoded '0.1' literal that could drift."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import _version
     import onboarding
     import utils
     assert 'version' in onboarding.ALLOW_BEFORE_CONFIGURE
-    assert utils._HTTP_HEADERS['User-Agent'] == 'athena-build/0.1.0', \
-        utils._HTTP_HEADERS
+    assert utils._HTTP_HEADERS['User-Agent'] == \
+        f'athena-build/{_version.base_version()}', utils._HTTP_HEADERS
     with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _fh:
         assert "register_command('version'" in _fh.read()
     with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_run.py')) as _fh:
@@ -21974,7 +21981,7 @@ def test_build_record_carries_toolchain_version():
     _rec = _u.new_build_record(
         package='foo', intended_version='1.0', patch_set_hash='ab' * 32)
     assert _rec['athena_build_version'] == _version.get_version()
-    assert _rec['athena_build_version'].startswith('0.1.0')
+    assert _rec['athena_build_version'].startswith(_version.base_version())
     # existing load-bearing fields still present + unchanged
     assert _rec['schema_version'] == _u.BUILD_RECORD_SCHEMA_VERSION
     assert _rec['package'] == 'foo' and _rec['phase'] == 'entry'
