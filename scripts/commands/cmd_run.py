@@ -202,6 +202,23 @@ class ConfigRunCommandsMixin(SessionState):
         _value = _getter(self)
         console.print(f"  {_param}  =  {_value}")
 
+    def cmd_version(self, *args) -> None:
+        """version [--verbose] — show the Athena-Build TOOLCHAIN version.
+
+        Distinct from the DISTRIBUTION version (`get build_version` / the Asgard
+        release stamped into the ISO).  `--verbose` adds python / commit / build
+        date and, for context, the distribution this toolchain is building.
+        """
+        import _version
+        _verbose = any(_a in ('--verbose', '-v', 'verbose') for _a in args)
+        console.print(_version.version_line(verbose=_verbose))
+        if _verbose:
+            _bv = getattr(self.config, 'build_version', None)
+            if _bv:
+                _distro = getattr(self.config, 'build_distribution', 'Asgard')
+                _code = getattr(self.config, 'build_codename', '')
+                console.print(f"  builds   {_distro} {_bv} ({_code})")
+
     def cmd_auto_run(self, action: str = '', *args):
         """Group dispatcher: bare `autorun` → autorun live (preserves
         existing UX); explicit `autorun live` or `autorun installer`

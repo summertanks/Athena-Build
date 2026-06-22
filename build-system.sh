@@ -14,6 +14,16 @@ DIR_LOG="log"
 DIR_SOURCE="source"
 DIR_GNUPG="gnupg"
 
+# Fast version exit — handled before any banner / getopt / preflight so the
+# output is clean (importing only scripts/_version: pure stdlib + git).
+for _arg in "$@"; do
+	case "$_arg" in
+		-V|--version)
+			/usr/bin/python3 -c "import sys; sys.path.insert(0, 'scripts'); import _version; print(_version.version_line())";
+			exit 0;;
+	esac
+done
+
 VERBOSE="0"
 CONFIG_FILE="config/build.conf"
 PKG_REQ_FILE="config/pkg.list"
@@ -28,6 +38,7 @@ usage() { \
         echo -e "\t -c|--config-file <filename> : Config file giving basic system config"; \
         echo -e "\t -p|--pkg-list <filename> : File listing all packages included in distro"; \
         echo -e "\t -v|--verbose : Set verbosity high"; \
+        echo -e "\t -V|--version : Print the Athena-Build toolchain version and exit"; \
         echo -e "\t --headless : Skip the curses TUI; run a plain stdin/stdout REPL (UX-05 Path B)"; \
         echo -e "\t --yes : Auto-answer informational YESNO prompts (UX-05a)"; \
         echo -e "\t --cmd \"<cmd>\" : Run one command then exit; repeat for multiple (UX-05e).  Implies --headless"; \
@@ -45,7 +56,7 @@ set -o pipefail
 echo -e "Athena Build System Check..."
 
 # Parsing args
-ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose,headless,yes,cmd:,api,api-port:' -- "$@") || exit
+ARGS=$(getopt -n Athena -o 'hc:p:vV' --long 'help,version,config-file:,pkg-list:,verbose,headless,yes,cmd:,api,api-port:' -- "$@") || exit
 eval "set -- $ARGS"
 
 while true; do
@@ -74,6 +85,11 @@ while true; do
 		(--api-port)
 			API_PORT=$2;
 			shift 2;;
+		(-V|--version)
+			# Fast, config-free version: import ONLY scripts/_version (pure
+			# stdlib + git) — skips the whole preflight + heavy build.py imports.
+			/usr/bin/python3 -c "import sys; sys.path.insert(0, 'scripts'); import _version; print(_version.version_line())";
+			exit;;
 		(-h|--help)
 			usage;
 			exit;;

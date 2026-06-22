@@ -44,6 +44,7 @@ import apt_pkg
 
 # Local imports
 import utils
+import _version
 from utils import BuildConfig
 from buildlog import BuildLog, human_size, safe_size
 from cache import Cache
@@ -1530,6 +1531,7 @@ def main(banner: str) -> None:
     tui.register_command('get',       session.cmd_get,       'Get:        \tget [param] — show current config value(s)')
     tui.register_command('print',     session.cmd_print,     'Print:      \tprint build state — try `print help`')
     tui.register_command('configure', session.cmd_configure, 'Configure:  \tconfigure — first-run setup wizard (role, mirror, mode)')
+    tui.register_command('version',   session.cmd_version,   'Version:    \tversion [--verbose] — Athena-Build toolchain version + provenance')
 
     # Command gate: until this box is configured (config/local.conf
     # SetupComplete), the backends refuse everything except `configure` and a
@@ -1633,6 +1635,13 @@ def main(banner: str) -> None:
 
 
 if __name__ == '__main__':
-    build_banner = "Athena Build System v0.1"
+    # `--version` / `-V` is a fast, config-free exit — print the toolchain
+    # version and stop before any backend / BuildConfig / network work.
+    # (build-system.sh has its own lighter fast-path that imports only
+    # _version; this handles a direct `python3 build.py --version`.)
+    if {'--version', '-V'} & set(sys.argv):
+        print(_version.version_line(verbose='--verbose' in sys.argv))
+        sys.exit(0)
+    build_banner = f"Athena Build System {_version.get_version()}"
     print(asciiart_logo)
     main(build_banner)
