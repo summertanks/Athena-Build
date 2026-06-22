@@ -1728,6 +1728,12 @@ class SourceCommandsMixin(SessionState):
 
         console.print(f"remotebuild {_src.package} on {_ssh_host} …",
                       tui.COLOR_INFO)
+        # Fast-path the toolchain image: if the remote lacks it but this host
+        # has it cached, stream it over the LAN instead of letting the remote
+        # rebuild from the internet (minutes vs tens of minutes on a thin link).
+        _img = _ro.ensure_remote_image(
+            _ssh_host, _recipe['image_tag'], log=console.print)
+        console.print(f"  remote image: {_img}", tui.COLOR_INFO)
         with _tempfile.TemporaryDirectory() as _bundle:
             _ro.stage_bundle(
                 _bundle,

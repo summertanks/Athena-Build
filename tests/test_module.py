@@ -22388,6 +22388,37 @@ def test_remote_container_init_wired():
         assert 'self.cmd_init_remote_container()' in _f.read()
 
 
+def test_ensure_remote_image_lan_transfer_paths():
+    """ensure_remote_image: remote-has → 'present'; remote-lacks + local-has →
+    LAN docker save|load → 'transferred'; neither → 'build' (remote builds)."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+    _quiet = lambda *_a: None       # noqa: E731
+    # remote already has it → present (one inspect, returncode 0)
+    with mock.patch.object(_ro.subprocess, 'run',
+                           return_value=mock.Mock(returncode=0)):
+        assert _ro.ensure_remote_image('h', 'tag', log=_quiet) == 'present'
+    # neither has it → build (both inspects non-zero)
+    with mock.patch.object(_ro.subprocess, 'run',
+                           return_value=mock.Mock(returncode=1)):
+        assert _ro.ensure_remote_image('h', 'tag', log=_quiet) == 'build'
+    # remote lacks, local has → LAN transfer
+    _seq = [mock.Mock(returncode=1),    # remote inspect: absent
+            mock.Mock(returncode=0)]    # local inspect: present
+
+    class _P:
+        returncode = 0
+        stdout = mock.Mock()
+
+        def wait(self):
+            return 0
+
+    with mock.patch.object(_ro.subprocess, 'run', side_effect=_seq), \
+            mock.patch.object(_ro.subprocess, 'Popen', return_value=_P()):
+        assert _ro.ensure_remote_image('h', 'tag', log=_quiet) == 'transferred'
+
+
 def test_remotebuild_command_wired():
     """`source remotebuild` is dispatched, the handler + RemoteBuildHost config
     exist — the local `source build` path is separate."""
@@ -37880,6 +37911,7 @@ def main() -> int:
         test_remote_build_main_emits_result_marker,
         test_remote_orchestrate_parse_host_stage_and_result,
         test_remote_orchestrate_run_remote_flow,
+        test_ensure_remote_image_lan_transfer_paths,
         test_remotebuild_command_wired,
         test_recipe_only_container_skips_local_docker,
         test_remote_container_init_wired,
