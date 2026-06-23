@@ -23,7 +23,7 @@ import buildcontainer
 import repo_audit
 import tui
 import utils
-from tui import console, Prompt, PROMPT_YESNO, ProgressBar
+from tui import console, Prompt, PROMPT_YESNO, ProgressBar, Spinner
 
 from commands.base import SessionState
 
@@ -1746,9 +1746,24 @@ class SourceCommandsMixin(SessionState):
                 remote_build_py=os.path.join(
                     self.config.working_dir, 'scripts', 'remote_build.py'),
             )
-            _exit, _outputs = _ro.run_remote(
-                _ssh_host, _bundle, _remote_dir, _scratch,
-                log=console.print)
+            # Remote build output goes to the per-package log file
+            # (log/build/<pkg>) — same as a local build's container log — NOT
+            # the console.  A spinner gives liveness since the stream is silent.
+            os.makedirs(self.container.buildlog_path, exist_ok=True)
+            _logpath = os.path.join(self.container.buildlog_path, _src.package)
+            console.print(
+                f"  building remotely — streaming to {_logpath} "
+                "(tail it to watch)", tui.COLOR_INFO)
+            _spin = Spinner(f"remotebuild {_src.package} on {_ssh_host}")
+            try:
+                with open(_logpath, 'w') as _lf:
+                    def _to_log(_m):
+                        _lf.write(str(_m) + '\n')
+                        _lf.flush()
+                    _exit, _outputs = _ro.run_remote(
+                        _ssh_host, _bundle, _remote_dir, _scratch, log=_to_log)
+            finally:
+                _spin.done()
 
         if _exit != 0 or not _outputs:
             console.print(
