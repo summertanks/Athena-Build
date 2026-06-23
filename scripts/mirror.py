@@ -546,52 +546,237 @@ def discover_federation_peers(
 # ─────────────────────────── state IO ──────────────────────────
 
 
-def mirror_state_path(config, name: str) -> str:
-    return os.path.join(
-        config.dir_config, f"{MIRROR_STATE_PREFIX}{name}{MIRROR_STATE_SUFFIX}")
+# Mirror state lives in ONE HMAC-SIGNED document, config/mirror.conf, holding
+# every registered mirror under its `mirrors` map.  Signing (the SAME local
+# HMAC key that signs build records + selection.state) makes manual edits
+# tamper-EVIDENT: a hand-edit that bypasses the `mirror` commands fails
+# verification, and the subsystem refuses to act on the file until `mirror
+# reseal` re-signs it.  The per-mirror config/mirror.<name>.state files are the
+# LEGACY layout; load_mirror_conf imports them once on first read.
+#
+# The storage functions keep their original signatures so every consumer is
+# unchanged — only the backing store moved from many files to one signed doc.
+
+MIRROR_CONF_BASENAME = 'mirror.conf'
+MIRROR_CONF_SCHEMA_VERSION = 1
 
 
-def read_mirror_state(config, name: str) -> Optional[dict]:
-    """Return the mirror's state dict, or None if absent/malformed.
-    Caller treats None as `mirror not registered`."""
-    _path = mirror_state_path(config, name)
+def mirror_conf_path(config) -> str:
+    """Path to the consolidated, signed config/mirror.conf."""
+    return os.path.join(config.dir_config, MIRROR_CONF_BASENAME)
+
+
+def _mirror_hmac_key(config) -> bytes:
+    """The signing key — the SAME local HMAC key that signs build records and
+    selection.state (one key, one threat model: local tamper detection).
+    Ensure the key dir exists so the key persists (else each call would mint a
+    fresh ephemeral key → every verify fails)."""
+    import utils as _utils
+    # Prefer dir_log/build (where build records keep the key); a stub config
+    # without dir_log (some tests) derives the same layout from dir_config's
+    # parent — real BuildConfig has dir_log = <working>/log = sibling of
+    # dir_config, so both paths agree.
+    _dl = getattr(config, 'dir_log', None) or os.path.join(
+        os.path.dirname(config.dir_config), 'log')
+    _kd = os.path.join(_dl, 'build')
     try:
-        with open(_path) as fh:
-            _d = json.load(fh)
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as _e:
-        logger.warning(f"read_mirror_state {name}: {_e}")
-        return None
-    if not isinstance(_d, dict):
-        return None
-    return _d
+        os.makedirs(_kd, exist_ok=True)
+    except OSError:
+        pass
+    return _utils._load_or_create_hmac_key(_kd)
 
 
-def write_mirror_state(config, name: str, state: dict) -> bool:
-    """Atomic write.  Always overwrites — operators call `add`/`remove`
-    to lifecycle the mirror, and the publish path uses
-    `update_mirror_state` for field merges."""
-    if not _valid_name(name):
-        logger.error(f"write_mirror_state: invalid name {name!r}")
-        return False
-    _path = mirror_state_path(config, name)
+def _empty_mirror_doc() -> dict:
+    return {'schema_version': MIRROR_CONF_SCHEMA_VERSION,
+            'mirrors': {}, 'registration': {}}
+
+
+def _migrate_legacy_mirror_state(config) -> Optional[dict]:
+    """Import any legacy config/mirror.<name>.state files into a fresh doc.
+    Returns the doc if ≥1 legacy mirror was found, else None.  Legacy files
+    are left in place (non-destructive); mirror.conf becomes authoritative."""
+    _dir = config.dir_config
+    _doc = _empty_mirror_doc()
+    _found = False
     try:
-        os.makedirs(os.path.dirname(_path), exist_ok=True)
-        # Reuse the project's atomic-write idiom for state files.
+        _entries = os.listdir(_dir)
+    except OSError:
+        return None
+    for _entry in _entries:
+        if not (_entry.startswith(MIRROR_STATE_PREFIX)
+                and _entry.endswith(MIRROR_STATE_SUFFIX)):
+            continue
+        _name = _entry[len(MIRROR_STATE_PREFIX):-len(MIRROR_STATE_SUFFIX)]
+        if not _valid_name(_name):
+            continue
+        try:
+            with open(os.path.join(_dir, _entry)) as _fh:
+                _st = json.load(_fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(_st, dict):
+            _doc['mirrors'][_name] = _st
+            _found = True
+    # Fold any legacy local.conf [Registration] markers (the old home) into
+    # the consolidated doc — best-effort (a stub config may have no config_path).
+    try:
         import utils as _utils
-        _utils._atomic_write_bytes(
-            _path, (json.dumps(state, indent=2, sort_keys=True) + '\n').encode('utf-8'),
-        )
+        _lc = _utils.read_local_conf(config)
+        if _lc.has_section('Registration'):
+            for _mname in _lc.options('Registration'):
+                _doc['registration'][_mname] = _lc.get('Registration', _mname)
+                _found = True
+    except Exception:
+        pass
+    return _doc if _found else None
+
+
+def load_mirror_conf(config) -> 'tuple[dict, str]':
+    """Load + verify config/mirror.conf.  Returns (doc, status):
+      'ok'        — present and HMAC-verified (or freshly migrated)
+      'missing'   — no mirror.conf and no legacy state (empty doc)
+      'badsig'    — present but HMAC mismatch → manual edit / tamper
+      'malformed' — present but not a valid signed mirror document
+    On 'badsig'/'malformed' the doc is empty — callers must NOT act on it;
+    `mirror reseal` re-signs an intentionally-edited file."""
+    import utils as _utils
+    _path = mirror_conf_path(config)
+    try:
+        with open(_path, 'rb') as _fh:
+            _raw = _fh.read()
+    except FileNotFoundError:
+        _migrated = _migrate_legacy_mirror_state(config)
+        if _migrated is not None:
+            save_mirror_conf(config, _migrated)
+            logger.info(
+                "mirror.conf: migrated %d legacy mirror.<name>.state file(s) "
+                "into the signed mirror.conf", len(_migrated['mirrors']))
+            return _migrated, 'ok'
+        return _empty_mirror_doc(), 'missing'
     except OSError as _e:
-        logger.error(f"write_mirror_state {name}: {_e}")
+        logger.error(f"mirror.conf read failed ({_path}): {_e}")
+        return _empty_mirror_doc(), 'malformed'
+    try:
+        _doc = json.loads(_raw.decode('utf-8'))
+    except (ValueError, UnicodeDecodeError):
+        return _empty_mirror_doc(), 'malformed'
+    if not isinstance(_doc, dict) or 'mirrors' not in _doc:
+        return _empty_mirror_doc(), 'malformed'
+    if not _utils._verify_record(_doc, _mirror_hmac_key(config)):
+        logger.error(
+            f"mirror.conf SIGNATURE VERIFY FAILED ({_path}) — refusing to act "
+            "on it (manual edit / tamper).  If the edit was intentional, run "
+            "`mirror reseal` to re-sign.")
+        return _empty_mirror_doc(), 'badsig'
+    _doc.setdefault('mirrors', {})
+    _doc.setdefault('registration', {})
+    return _doc, 'ok'
+
+
+def save_mirror_conf(config, doc: dict) -> bool:
+    """Sign `doc` with the local HMAC key and atomically write mirror.conf."""
+    import utils as _utils
+    _out = dict(doc)
+    _out.setdefault('schema_version', MIRROR_CONF_SCHEMA_VERSION)
+    _out.setdefault('mirrors', {})
+    _out.setdefault('registration', {})
+    _signed = _utils._sign_record(_out, _mirror_hmac_key(config))
+    try:
+        os.makedirs(os.path.dirname(mirror_conf_path(config)), exist_ok=True)
+        _utils._atomic_write_bytes(
+            mirror_conf_path(config),
+            (json.dumps(_signed, sort_keys=True, indent=2) + '\n').encode('utf-8'))
+    except OSError as _e:
+        logger.error(f"mirror.conf write failed: {_e}")
         return False
     return True
 
 
+def mirror_conf_status(config) -> str:
+    """The verification status of mirror.conf ('ok'|'missing'|'badsig'|
+    'malformed') — lets the `mirror` command group refuse to act on a
+    tampered file up front."""
+    return load_mirror_conf(config)[1]
+
+
+def reseal_mirror_conf(config) -> 'tuple[bool, str]':
+    """Re-sign the CURRENT on-disk mirror.conf (operator's explicit
+    acknowledgement that a manual edit was intentional): read the raw JSON
+    WITHOUT verifying, then re-sign + write."""
+    _path = mirror_conf_path(config)
+    try:
+        with open(_path, 'rb') as _fh:
+            _doc = json.loads(_fh.read().decode('utf-8'))
+    except FileNotFoundError:
+        return False, "no mirror.conf to reseal"
+    except (OSError, ValueError, UnicodeDecodeError) as _e:
+        return False, f"mirror.conf unreadable / not JSON: {_e}"
+    if not isinstance(_doc, dict) or 'mirrors' not in _doc:
+        return False, "mirror.conf is not a valid mirror document"
+    _doc.pop('sig', None)
+    if save_mirror_conf(config, _doc):
+        return True, (f"mirror.conf resealed ({len(_doc.get('mirrors', {}))} "
+                      "mirror(s)) — signature now matches on-disk content")
+    return False, "failed to write resealed mirror.conf"
+
+
+def get_registration(config) -> dict:
+    """The {mirror-name: builder-id} registration map from mirror.conf — the
+    sidecar that lets onboarding skip a re-register on a box already joined to
+    a mirror.  Empty on missing / tamper."""
+    _doc, _status = load_mirror_conf(config)
+    if _status not in ('ok', 'missing'):
+        return {}
+    _r = _doc.get('registration', {})
+    return dict(_r) if isinstance(_r, dict) else {}
+
+
+def set_registration(config, mirror_name: str, builder_id: str) -> bool:
+    """Record a builder registration in mirror.conf + re-sign.  Refuses on a
+    tampered file (reseal first)."""
+    _doc, _status = load_mirror_conf(config)
+    if _status in ('badsig', 'malformed'):
+        logger.error(f"set_registration: mirror.conf is {_status} — refusing")
+        return False
+    _doc.setdefault('registration', {})[mirror_name] = builder_id
+    return save_mirror_conf(config, _doc)
+
+
+def mirror_state_path(config, name: str) -> str:
+    """Back-compat shim — mirror state now lives in the single signed
+    mirror.conf, not per-name files.  Returned for log / error messages."""
+    return mirror_conf_path(config)
+
+
+def read_mirror_state(config, name: str) -> Optional[dict]:
+    """Return the mirror's state dict from mirror.conf, or None if absent /
+    tampered.  Caller treats None as `mirror not registered`."""
+    _doc, _status = load_mirror_conf(config)
+    if _status not in ('ok', 'missing'):
+        return None                       # badsig / malformed → refuse
+    _st = _doc.get('mirrors', {}).get(name)
+    return _st if isinstance(_st, dict) else None
+
+
+def write_mirror_state(config, name: str, state: dict) -> bool:
+    """Set the mirror's entry in mirror.conf + re-sign.  Refuses to write on
+    top of a tampered file (reseal first)."""
+    if not _valid_name(name):
+        logger.error(f"write_mirror_state: invalid name {name!r}")
+        return False
+    _doc, _status = load_mirror_conf(config)
+    if _status in ('badsig', 'malformed'):
+        logger.error(
+            f"write_mirror_state {name}: mirror.conf is {_status} — refusing "
+            "to overwrite; run `mirror reseal` if the edit was intentional")
+        return False
+    _doc.setdefault('mirrors', {})[name] = state
+    return save_mirror_conf(config, _doc)
+
+
 def update_mirror_state(config, name: str, **fields) -> bool:
     """Read-merge-write convenience.  Returns False if the mirror isn't
-    registered."""
+    registered (or the file is tampered)."""
     _cur = read_mirror_state(config, name)
     if _cur is None:
         return False
@@ -600,34 +785,24 @@ def update_mirror_state(config, name: str, **fields) -> bool:
 
 
 def delete_mirror_state(config, name: str) -> bool:
-    """Remove the state file.  Returns True if it existed; False otherwise."""
-    _path = mirror_state_path(config, name)
-    try:
-        os.unlink(_path)
-        return True
-    except FileNotFoundError:
+    """Drop the mirror's entry from mirror.conf.  Returns True if it existed."""
+    _doc, _status = load_mirror_conf(config)
+    if _status in ('badsig', 'malformed'):
+        logger.error(
+            f"delete_mirror_state {name}: mirror.conf is {_status} — refusing")
         return False
-    except OSError as _e:
-        logger.error(f"delete_mirror_state {name}: {_e}")
+    if name not in _doc.get('mirrors', {}):
         return False
+    del _doc['mirrors'][name]
+    return save_mirror_conf(config, _doc)
 
 
 def list_mirrors(config) -> List[str]:
-    """Return the sorted list of configured mirror names (one per
-    `config/mirror.<name>.state` file)."""
-    _dir = config.dir_config
-    _out: List[str] = []
-    try:
-        for _entry in os.listdir(_dir):
-            if (_entry.startswith(MIRROR_STATE_PREFIX)
-                    and _entry.endswith(MIRROR_STATE_SUFFIX)):
-                _name = _entry[len(MIRROR_STATE_PREFIX):-len(MIRROR_STATE_SUFFIX)]
-                if _valid_name(_name):
-                    _out.append(_name)
-    except OSError:
+    """Return the sorted list of configured mirror names (from mirror.conf)."""
+    _doc, _status = load_mirror_conf(config)
+    if _status not in ('ok', 'missing'):
         return []
-    _out.sort()
-    return _out
+    return sorted(_doc.get('mirrors', {}).keys())
 
 
 def find_mirror_by_url(config, url: str) -> Optional[str]:
