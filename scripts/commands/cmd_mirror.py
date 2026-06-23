@@ -41,10 +41,32 @@ class MirrorCommandsMixin(SessionState):
         """Manage federated publish-target mirrors and the build host's
         signed-claim identity.
 
-        Per-mirror durable state lives at config/mirror.<name>.state.
-        Per-builder Ed25519 identity (signed by tier-1 GPG via the
-        federation coord-head) lives at coord/identity/.
+        All mirror state lives in the HMAC-signed config/mirror.conf
+        (tamper-evident — a manual edit is detected and refused until
+        `mirror reseal` re-signs it).  Per-builder Ed25519 identity (signed by
+        tier-1 GPG via the federation coord-head) lives at coord/identity/.
         """
+        # Tamper gate: if mirror.conf fails its signature, refuse every action
+        # except `reseal` (and the help listing) so a manual edit can't silently
+        # take effect — the operator must explicitly reseal to acknowledge it.
+        if action not in ('', 'reseal'):
+            import mirror as _mirror
+            _ms = _mirror.mirror_conf_status(self.config)
+            if _ms == 'badsig':
+                console.print(
+                    "mirror.conf signature INVALID — a manual edit was "
+                    "detected.  Mirror operations are refused until you "
+                    "re-sign with `mirror reseal` (after confirming the edit "
+                    "was intentional).", tui.COLOR_ERROR)
+                return
+            if _ms == 'malformed':
+                console.print(
+                    "mirror.conf is malformed (not a valid signed mirror "
+                    "document) — fix or remove it, then re-add mirrors.",
+                    tui.COLOR_ERROR)
+                return
+        if action == 'reseal':
+            return self.cmd_mirror_reseal(*args)
         if action == 'init':
             return self.cmd_mirror_init(*args)
         if action == 'add':
@@ -115,8 +137,19 @@ class MirrorCommandsMixin(SessionState):
                                            'canonical lists)',
             'conflict resolve <pkg>':      'retract our claim for <pkg>; clear '
                                            'PUBLISH_HALT',
+            'reseal':                      're-sign config/mirror.conf after an '
+                                           'intentional manual edit (clears the '
+                                           'tamper refusal)',
         }
         return self._group_help('mirror', _table, action)
+
+    def cmd_mirror_reseal(self, *args):
+        """Re-sign config/mirror.conf after an intentional manual edit — only
+        needed when `mirror.conf signature INVALID` is reported."""
+        import mirror as _mirror
+        _ok, _detail = _mirror.reseal_mirror_conf(self.config)
+        console.print(f"mirror reseal: {_detail}",
+                      tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
 
     _MIRROR_ADD_USAGE = (
         "Usage: mirror add <ip|fqdn|local> <ssh-or-file-url> "
