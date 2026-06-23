@@ -337,9 +337,6 @@ class MirrorCommandsMixin(SessionState):
                     "mirror add: probes failed.  Pass `--no-probe` to "
                     "skip them (dev / offline).", tui.COLOR_ERROR)
                 return False
-        elif _parsed['no_probe']:
-            console.print(
-                "  probes skipped (--no-probe)", tui.COLOR_WARNING)
 
         # ── Step 5b: prepared-mirror gate ──────────────────────────
         # A publish target must be PREPARED (prep-mirror.sh: web server +
