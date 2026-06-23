@@ -348,18 +348,14 @@ class ConfigRunCommandsMixin(SessionState):
                    else "pinned behind/ahead of target")
         console.print(
             f"  container rel   {_cfg.container_release}  ({_tracks})")
-        # 3 & 4 — snapshot pin + mirror reachability — are only meaningful once
-        # the box is CONFIGURED.  A fresh community pull has no snapshot pin and
-        # must NOT derive one from the repo (resolving 'latest' would fix a
-        # timestamp and persist it), and there are no mirrors to probe yet.
-        # `configure` establishes the pin (a federation mirror's `current`, or
-        # an explicit prompt) and runs this sanity check itself afterwards.
+        # Snapshot pin + mirror reachability only run once the box is
+        # CONFIGURED.  On a fresh community pull we stop here, after the
+        # distro.conf identity above — there is no snapshot pin (and we must
+        # NOT derive one from the repo by resolving 'latest', which would fix +
+        # persist a timestamp), and no mirrors to probe yet.  `configure` sets
+        # the pin (a federation mirror's `current`, or an explicit prompt) and
+        # runs this check itself once setup completes.
         if not getattr(_cfg, 'setup_complete', False):
-            console.print(
-                "  snapshot        not pinned yet — `configure` sets it")
-            console.print(
-                "mirror reachability  skipped until configured "
-                "(run `configure`)", tui.COLOR_INFO)
             return
         # 3. snapshot
         _ts = None
