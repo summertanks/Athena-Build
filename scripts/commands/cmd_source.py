@@ -1774,6 +1774,14 @@ class SourceCommandsMixin(SessionState):
             _shutil.rmtree(_scratch, ignore_errors=True)
             return
 
+        # Load the asg ledger from the LOCAL signed manifest before normalize,
+        # exactly as cmd_source_build does (see the unconditional load there).
+        # Without it `_normalize_built_artifacts` sees asg_ledger=None, the
+        # lineage-continuation trigger can't fire, and a remote rebuild of a
+        # source whose binaries were previously published at `+asg<R>u<N>`
+        # silently ships pristine — losing the lineage and regressing sibling
+        # metas that pinned the prior version (libreoffice: +asg1u1 → pristine).
+        self.container.asg_ledger = repo_audit.published_ledger(self.config)
         # local post-build pipeline — identical bookkeeping to a local build
         _emitted = self.container._segregate_built_artifacts(_src, _scratch)
         _final = self.container._normalize_built_artifacts(
