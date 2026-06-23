@@ -202,7 +202,12 @@ class State:
     tabs: Dict[str, TabState] = field(default_factory=dict)
     cmd: CmdLine = field(default_factory=CmdLine)
     widgets: List[object] = field(default_factory=list)
-    cmd_prompt: str = '> '
+    # Starts as a BUSY indicator (not the idle '> ') so the input line reads as
+    # disabled during startup — the dispatcher already ignores keystrokes until
+    # the shell's first request_prompt (which runs only AFTER the startup banner
+    # / config check / not-configured notice complete), so the prompt must not
+    # LOOK live before then.  Mirrors _end_prompt's "… running" busy state.
+    cmd_prompt: str = '… starting up (please wait) '
     banner: str = 'Athena Build'
     status_text: str = ''
     dirty: bool = True
