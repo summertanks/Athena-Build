@@ -22303,10 +22303,11 @@ def test_remote_orchestrate_parse_host_stage_and_result():
         assert _bj['image_tag'] == 'tag' and _bj['cmd_str'] == 'CMD'
         assert _bj['build_args']['RELEASE'] == 'bookworm'
         assert _bj['build_cpus'] == 7.0 and _bj['build_memory'] == '28g'
-    _good = (f"noise\n{_ro.RESULT_MARKER} "
-             + json.dumps({'exit_code': 0, 'outputs': ['a.deb']}) + "\ntail")
-    assert _ro._parse_result(_good) == (0, ['a.deb'])
-    assert _ro._parse_result('no marker') == (1, [])
+    _line = (f"{_ro.RESULT_MARKER} "
+             + json.dumps({'exit_code': 0, 'outputs': ['a.deb']}))
+    assert _ro._parse_marker_line(_line) == (0, ['a.deb'])
+    assert _ro._parse_marker_line(None) == (1, [])
+    assert _ro._parse_marker_line('not a marker') == (1, [])
 
 
 def test_remote_orchestrate_run_remote_flow():
@@ -22386,6 +22387,20 @@ def test_remote_container_init_wired():
     assert 'connect=False' in _b
     with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_source.py')) as _f:
         assert 'self.cmd_init_remote_container()' in _f.read()
+
+
+def test_run_remote_decoupled_log_and_incremental_marker():
+    """run_remote writes the build log to a file ON THE REMOTE (so the build
+    can't be backpressured by a slow network) and tails it back; the result
+    marker is scanned incrementally, not by buffering the whole log."""
+    import inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+    _src = inspect.getsource(_ro.run_remote)
+    assert '> build.log 2>&1' in _src              # build → remote file
+    assert 'tail -n +1 --pid=' in _src and '-F build.log' in _src
+    assert '_captured' not in _src                 # no whole-log buffering
+    assert '_parse_marker_line(_marker)' in _src   # incremental marker scan
 
 
 def test_ensure_remote_image_lan_transfer_paths():
@@ -37988,6 +38003,7 @@ def main() -> int:
         test_remote_build_main_emits_result_marker,
         test_remote_orchestrate_parse_host_stage_and_result,
         test_remote_orchestrate_run_remote_flow,
+        test_run_remote_decoupled_log_and_incremental_marker,
         test_ensure_remote_image_lan_transfer_paths,
         test_fetch_source_versions_cached_on_disk,
         test_published_ledger_memoised,
