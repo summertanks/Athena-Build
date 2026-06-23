@@ -156,14 +156,19 @@ def run_onboarding(session) -> None:
 
 def _prompt_machine_settings(session) -> bool:
     """Prompt for the per-machine build settings the config split moved into
-    local.conf — parallel Jobs + signing UID — each with a sensible default
-    (Enter to accept).  Persists to local.conf + reflects into the live config.
+    local.conf.  Only parallel Jobs is asked; the builder NAME and signing UID
+    are DERIVED from identities the role flow already established (asking for
+    them again would be confusing duplicates):
 
-    The builder NAME is NOT asked here: this machine's name IS its builder
-    identity (coord/identity/<id>, the `Builder id` established earlier in the
-    role flow), so [Local] Name simply mirrors that — asking for a second name
-    would be a confusing duplicate.  (`set name` can override it later.)
-    Returns False only on explicit cancel."""
+      - NAME mirrors the builder identity (coord/identity/<id>, the `Builder id`
+        prompted in the role flow).  `set name` can override it later.
+      - signing UID is read from the signing key actually on disk (origin named
+        + generated it in _onboard_first; a federation peer imported the tier-1
+        key under its own UID) — never a free-text value that could mismatch the
+        key and break verify.
+
+    Persists to local.conf + reflects into the live config.  False only on
+    explicit cancel."""
     import os as _os
     config = session.config
     # [Local] Name = the builder identity already established by the role flow
@@ -185,12 +190,13 @@ def _prompt_machine_settings(session) -> bool:
         _jobs = _default_jobs
     _jobs = max(1, min(_jobs, 8))
 
-    _default_uid = (getattr(config, 'signing_key_uid', '')
-                    or 'Athena Build <athena@local>')
-    _uid = _ask(PROMPT_INPUT, f"Repo signing identity [{_default_uid}]")
-    if _uid is None:
-        return False
-    _uid = _uid or _default_uid
+    # Signing UID is NOT prompted here — it must match the key actually on disk.
+    # Adopt the real UID of the signing key established by the role flow: the
+    # origin named + generated it earlier (in _onboard_first), a federation peer
+    # imported the tier-1 key with its own UID.  Fall back to the current/default
+    # value only when no key exists yet (an origin that declined a mirror).
+    _uid = signing.actual_signing_uid(config) or getattr(
+        config, 'signing_key_uid', '') or 'Athena Build <athena@local>'
 
     utils.write_local_conf(config, name=(_name or None),
                            max_parallel_builds=_jobs, signing_key_uid=_uid)
@@ -225,6 +231,17 @@ def _onboard_first(session) -> bool:
 
     _ok, _msg = signing.verify_key(config)
     if not _ok:
+        # Name the key BEFORE generating it: the UID is baked in at gen time and
+        # is how the key is looked up afterwards, so prompting after generation
+        # could not rename it (and a config/key mismatch breaks verify).  Origin
+        # only — a federation peer ADOPTS the imported tier-1 key's UID instead.
+        _uid = _ask(PROMPT_INPUT,
+                    f"Repo signing identity [{config.signing_key_uid}]")
+        if _uid is None:
+            return False
+        if _uid:
+            config.signing_key_uid = _uid
+            utils.write_local_conf(config, signing_key_uid=_uid)
         console.print("Generating tier-1 signing key…", tui.COLOR_INFO)
         if session.cmd_key('generate') is False:
             console.print("✗ key generation failed", tui.COLOR_ERROR)
