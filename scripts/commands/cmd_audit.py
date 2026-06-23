@@ -520,7 +520,7 @@ class AuditCommandsMixin(SessionState):
             _row("content integrity", "skipped (`quick` flag)", ok=True)
         elif not self.flags.build_container_ready:
             _row("content integrity",
-                 "skipped — run `container init`", ok=False)
+                 "skipped — run `container local init`", ok=False)
         else:
             self._report_content_integrity(_state, verbose=_verbose,
                                             refresh=_refresh)

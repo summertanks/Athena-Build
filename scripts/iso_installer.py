@@ -1036,7 +1036,7 @@ def _run_grub_mkrescue(staging: str, iso_path: str,
     if container is None:
         tui.console.print(
             "ERROR: grub-mkrescue requires the build container "
-            "(run `container init` first)"
+            "(run `container local init` first)"
         )
         logger.error("_run_grub_mkrescue: container is None")
         return False

@@ -1879,7 +1879,7 @@ class SourceCommandsMixin(SessionState):
             return
 
         if not self.flags.build_container_ready:
-            console.print("Run 'container init' first")
+            console.print("Run 'container local init' first")
             return
 
         # reset on entry so an interrupted partial build can't

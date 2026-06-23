@@ -447,7 +447,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             container.wait(), but a SIGKILL between wait() and
             remove() can leak)
           - Dockerfile changed and you want to force a fresh image
-            rebuild on the next `container init`
+            rebuild on the next `container local init`
           - Disk pressure from accumulated image layers across builds
 
         Resets build_container_ready and drops self.container.
@@ -645,7 +645,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         self._wipe_dir_contents('buildroot/disk',
             self.config.dir_chroot_disk, sudo=True, password=_password, skip_prompt=True)
         # Docker side: kills running athenalinux containers + removes
-        # images so next `container init` rebuilds from Dockerfile.
+        # images so next `container local init` rebuilds from Dockerfile.
         self.cmd_container_purge('force')
 
         # Drop in-memory state and reset every flag.  cache_ready and
@@ -985,7 +985,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         """
         if not self.flags.cache_ready:
             console.print(
-                "container init: requires `cache build` first — without "
+                "container local init: requires `cache build` first — without "
                 "the cache, in-container apt-installs of virtual "
                 "Build-Depends (libcurl4-dev, libjpeg-dev etc.) fail "
                 "non-interactively on source build"
@@ -1021,19 +1021,19 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         file ops).  Then it ensures the remote's image: confirms if present,
         streams it over the LAN if this host has it cached, else reports that
         the first `source remotebuild` will build it on the remote.  Like
-        `container init`, requires `cache build` first.
+        `container local init`, requires `cache build` first.
         """
         self.flags.build_container_ready = False
         if not self.flags.cache_ready:
             console.print(
-                "container init remote: requires `cache build` first "
+                "container remote init: requires `cache build` first "
                 "(the recipe expands virtual Build-Depends from the cache)")
             return
         _host = getattr(self.config, 'remote_build_host', '') or ''
         if not _host:
             console.print(
-                "container init remote: set `[Build] RemoteBuildHost = "
-                "ssh://user@host` in config first")
+                "container remote init: no remote build host configured — add "
+                "one with `container remote add <name> <ssh://user@host>`")
             return
         try:
             self.container = buildcontainer.BuildContainer(
@@ -1270,19 +1270,206 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         return self._group_help('source', _table, action)
 
     def cmd_container(self, action: str = '', *args):
+        """Two-level: `container local <action>` manages the LOCAL Docker build
+        container; `container remote <action>` manages REMOTE ship-to-host
+        build targets for `source remotebuild`."""
         _table = {
-            'init':  'build the Docker build sandbox image',
-            'init remote': 'recipe-only container for `source remotebuild` — '
-                           'no local Docker / image (build runs on the remote)',
-            'purge': 'stop+remove athenalinux containers + images (force rebuild on next init)',
+            'local':  'LOCAL Docker build container — init | test | purge',
+            'remote': 'REMOTE build hosts for `source remotebuild` — '
+                      'init | add | list | delete | purge | test',
         }
-        if action == 'init':
-            if args and args[0] == 'remote':
-                return self.cmd_init_remote_container()
-            return self.cmd_init_container(*args)
-        if action == 'purge':
-            return self.cmd_container_purge(*args)
+        if action == 'local':
+            return self._cmd_container_local(*args)
+        if action == 'remote':
+            return self._cmd_container_remote(*args)
         return self._group_help('container', _table, action)
+
+    def _cmd_container_local(self, sub: str = '', *args):
+        _table = {
+            'init':  'build the local Docker build sandbox image',
+            'test':  'ping the local Docker daemon + show its version',
+            'purge': 'stop+remove athenalinux containers + images '
+                     '(force rebuild on next init)',
+        }
+        if sub == 'init':
+            return self.cmd_init_container(*args)
+        if sub == 'test':
+            return self.cmd_container_local_test(*args)
+        if sub == 'purge':
+            return self.cmd_container_purge(*args)
+        return self._group_help('container local', _table, sub)
+
+    def _cmd_container_remote(self, sub: str = '', *args):
+        _table = {
+            'init':   'ensure the toolchain image on the configured remote',
+            'add':    'register a remote: add <name> <ssh://user@host> '
+                      '[key=<path>] [jobs=N] [cpus=F] [mem=8g]',
+            'list':   'list configured remote build hosts',
+            'delete': 'remove a remote from the registry: delete <name>',
+            'purge':  'remove athenalinux images/containers ON a remote: '
+                      'purge <name>',
+            'test':   'ssh + docker reachability check: test [<name>]',
+        }
+        if sub == 'init':
+            return self.cmd_init_remote_container()
+        _dispatch = {
+            'add':    self.cmd_container_remote_add,
+            'list':   self.cmd_container_remote_list,
+            'delete': self.cmd_container_remote_delete,
+            'purge':  self.cmd_container_remote_purge,
+            'test':   self.cmd_container_remote_test,
+        }
+        if sub in _dispatch:
+            return _dispatch[sub](*args)
+        return self._group_help('container remote', _table, sub)
+
+    def cmd_container_local_test(self, *args):
+        """Ping the local Docker daemon (honouring [Build] DOCKER_SERVER) and
+        show its version — a quick "is my local build host healthy?" check."""
+        try:
+            import docker
+        except ImportError as e:
+            console.print(f"  local Docker FAIL — docker module not installed: {e}",
+                          tui.COLOR_ERROR)
+            return
+        try:
+            if self.config.docker_server:
+                _client = docker.DockerClient(base_url=self.config.docker_server)
+            else:
+                _client = docker.from_env()
+            _client.ping()
+            _v = _client.version()
+            console.print(
+                f"  local Docker OK — {_v.get('Version', '?')} "
+                f"(API {_v.get('ApiVersion', '?')})"
+                + (f" @ {self.config.docker_server}"
+                   if self.config.docker_server else ''),
+                tui.COLOR_HIGHLIGHT)
+        except (docker.errors.DockerException, OSError) as e:
+            console.print(f"  local Docker FAIL — {e}", tui.COLOR_ERROR)
+
+    def _refresh_remotes(self):
+        """Re-read config/remote.conf into the in-memory config after an
+        add/delete so the same session sees the change."""
+        self.config.remotes = utils.list_remotes(self.config)
+        self.config.remote_build_host = (
+            self.config.remotes[0]['host'] if self.config.remotes else '')
+
+    def cmd_container_remote_add(self, *args):
+        """container remote add <name> <ssh://user@host> [key=<path>] [jobs=N]
+        [cpus=F] [mem=8g] — register a remote ship-to-host build target."""
+        if len(args) < 2:
+            console.print(
+                "Usage: container remote add <name> <ssh://user@host> "
+                "[key=<path>] [jobs=N] [cpus=F] [mem=8g]", tui.COLOR_ERROR)
+            return
+        _name, _host = args[0], args[1]
+        _opts: 'dict[str, str]' = {}
+        for _tok in args[2:]:
+            if '=' in _tok:
+                _k, _v = _tok.split('=', 1)
+                _opts[_k.strip().lower()] = _v.strip()
+        try:
+            _jobs = int(_opts.get('jobs', '1'))
+            _cpus = float(_opts.get('cpus', '0'))
+        except ValueError:
+            console.print("container remote add: jobs must be an integer, "
+                          "cpus a number", tui.COLOR_ERROR)
+            return
+        _ok, _detail = utils.add_remote(
+            self.config, name=_name, host=_host, ssh_key=_opts.get('key', ''),
+            max_parallel_builds=_jobs, build_cpus=_cpus,
+            build_memory=_opts.get('mem', ''))
+        console.print(f"  {_detail}",
+                      tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+        if _ok:
+            self._refresh_remotes()
+
+    def cmd_container_remote_list(self, *args):
+        """List the configured remote build hosts + their per-host tuning."""
+        _rs = utils.list_remotes(self.config)
+        if not _rs:
+            console.print("  no remote build hosts configured — add one with "
+                          "`container remote add <name> <ssh://user@host>`")
+            return
+        for _r in _rs:
+            console.print(
+                f"  {_r['name']:<16} {_r['host']:<34} "
+                f"jobs={_r['max_parallel_builds']} "
+                f"cpus={_r['build_cpus'] or '-'} mem={_r['build_memory'] or '-'} "
+                f"key={_r['ssh_key'] or '-'}")
+
+    def cmd_container_remote_delete(self, *args):
+        """Remove a remote from the registry (config only — use `purge` to
+        also clean its Docker state)."""
+        if not args:
+            console.print("Usage: container remote delete <name>", tui.COLOR_ERROR)
+            return
+        _ok, _detail = utils.delete_remote(self.config, args[0])
+        console.print(f"  {_detail}",
+                      tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+        if _ok:
+            self._refresh_remotes()
+
+    def cmd_container_remote_test(self, *args):
+        """ssh to each remote (or the named one) and confirm Docker answers —
+        the remote-host equivalent of `container local test`."""
+        import subprocess as _sp
+        import remote_orchestrate as _ro
+        _rs = utils.list_remotes(self.config)
+        if args:
+            _rs = [_r for _r in _rs if _r['name'] == args[0]]
+            if not _rs:
+                console.print(f"  no such remote {args[0]!r}", tui.COLOR_ERROR)
+                return
+        if not _rs:
+            console.print("  no remote build hosts configured", tui.COLOR_ERROR)
+            return
+        for _r in _rs:
+            _host = _ro.parse_ssh_host(_r['host'])
+            _res = _sp.run(
+                ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', _host,
+                 'docker version --format "{{.Server.Version}}"'],
+                capture_output=True, text=True)
+            if _res.returncode == 0 and _res.stdout.strip():
+                console.print(
+                    f"  {_r['name']}: OK — {_host} docker {_res.stdout.strip()}",
+                    tui.COLOR_HIGHLIGHT)
+            else:
+                _err = (_res.stderr or _res.stdout or 'unreachable').strip()
+                console.print(f"  {_r['name']}: FAIL — {_host}: {_err[:120]}",
+                              tui.COLOR_ERROR)
+
+    def cmd_container_remote_purge(self, *args):
+        """ssh to a remote and remove its athenalinux images + containers (free
+        space / force a fresh image on the next remote build)."""
+        import subprocess as _sp
+        import remote_orchestrate as _ro
+        if not args:
+            console.print("Usage: container remote purge <name>", tui.COLOR_ERROR)
+            return
+        _rs = [_r for _r in utils.list_remotes(self.config)
+               if _r['name'] == args[0]]
+        if not _rs:
+            console.print(f"  no such remote {args[0]!r}", tui.COLOR_ERROR)
+            return
+        _host = _ro.parse_ssh_host(_rs[0]['host'])
+        # stop+remove athenalinux containers, then their images (xargs -r =
+        # no-op on empty).  reference='athenalinux*' matches our build tags.
+        _remote_cmd = (
+            "docker ps -aq --filter ancestor=athenalinux "
+            "| xargs -r docker rm -f >/dev/null 2>&1; "
+            "docker images --filter reference='athenalinux*' -q "
+            "| sort -u | xargs -r docker rmi -f")
+        _res = _sp.run(['ssh', '-o', 'BatchMode=yes', _host, _remote_cmd],
+                       capture_output=True, text=True)
+        if _res.returncode == 0:
+            console.print(f"  purged athenalinux images/containers on {_host}",
+                          tui.COLOR_HIGHLIGHT)
+        else:
+            _err = (_res.stderr or _res.stdout or '').strip()
+            console.print(f"  remote purge FAIL on {_host}: {_err[:160]}",
+                          tui.COLOR_ERROR)
 
     def cmd_chroot(self, action: str = '', *args):
         _table = {
@@ -1385,6 +1572,13 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
 BuildSession._SETTABLE = {
     'mode':                BuildSession._set_mode,
     'include-recommends':  BuildSession._set_include_recommends,
+    # machine-local (persist to config/local.conf)
+    'name':                BuildSession._set_name,
+    'jobs':                BuildSession._set_jobs,
+    'cpus':                BuildSession._set_cpus,
+    'memory':              BuildSession._set_memory,
+    'docker-server':       BuildSession._set_docker_server,
+    'signing-uid':         BuildSession._set_signing_uid,
 }
 BuildSession._GETTABLE = {
     'mode':                lambda s: getattr(s.config, 'build_mode',
@@ -1401,6 +1595,13 @@ BuildSession._GETTABLE = {
         if getattr(s.config, 'snapshot_enabled', False) else 'disabled'),
     'max-parallel-builds': lambda s: getattr(s.config,
                                               'max_parallel_builds', 1),
+    # machine-local mirrors of the local.conf keys
+    'name':                lambda s: getattr(s.config, 'system_name', '') or '(unset)',
+    'jobs':                lambda s: getattr(s.config, 'max_parallel_builds', 1),
+    'cpus':                lambda s: getattr(s.config, 'build_cpus', 0.0),
+    'memory':              lambda s: getattr(s.config, 'build_memory', '') or '(no cap)',
+    'docker-server':       lambda s: getattr(s.config, 'docker_server', '') or '(local socket)',
+    'signing-uid':         lambda s: getattr(s.config, 'signing_key_uid', '?'),
 }
 
 
@@ -1574,7 +1775,7 @@ def main(banner: str) -> None:
     tui.register_command('source',    session.cmd_source,    'Sources:    \tsource <sync|build|audit|repair|fork>')
     tui.register_command('repo',      session.cmd_repo,      'Repo:       \trepo <audit|repair>')
     tui.register_command('snapshot',  session.cmd_snapshot,  'Snapshot:   \tsnapshot <list|workload|select|advance|history>')
-    tui.register_command('container', session.cmd_container, 'Container:  \tcontainer <init|purge>')
+    tui.register_command('container', session.cmd_container, 'Container:  \tcontainer <local|remote> <action>')
     tui.register_command('chroot',    session.cmd_chroot,    'Chroot:     \tchroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       'ISO:        \tiso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    \tkey <generate|verify>')

@@ -55,9 +55,8 @@ def configured_summary(config) -> str:
     registered)."""
     _role = getattr(config, 'system_role', '') or 'unknown'
     _mode = getattr(config, 'build_mode', 'distribution')
-    _local = utils.read_local_conf(config)
-    _regs = (_local.options('Registration')
-             if _local.has_section('Registration') else [])
+    import mirror as _mirror
+    _regs = sorted(_mirror.get_registration(config).keys())
     if _role == 'federation' and not _regs:
         return ("Configured as a federation peer but NO mirror is registered "
                 "— run `configure` to register.")
@@ -122,6 +121,14 @@ def run_onboarding(session) -> None:
                       tui.COLOR_WARNING)
         return
 
+    # Per-machine settings the config split moved into local.conf — builder
+    # Name, parallel Jobs, signing UID.  Lean: each is a single Enter-to-accept
+    # prompt with a sensible default.  Change any later with `set <key>`.
+    if not _prompt_machine_settings(session):
+        console.print("Not configured. Run `configure` to retry.",
+                      tui.COLOR_WARNING)
+        return
+
     # Snapshot pin (a federation peer already adopted the mirror's pin during
     # register; this only prompts an origin / unadopted box).  Tolerant — the
     # cache-build prompt is the fallback.
@@ -135,6 +142,56 @@ def run_onboarding(session) -> None:
     config.setup_complete = True          # in-memory: opens the command gate
     console.print("✓ setup complete — all commands enabled.",
                   tui.COLOR_HIGHLIGHT)
+
+
+def _prompt_machine_settings(session) -> bool:
+    """Prompt for the per-machine values the config split moved into local.conf
+    — builder Name, parallel Jobs, signing UID — each with a sensible default
+    (Enter to accept).  Persists to local.conf + reflects into the live config.
+    Returns False only on explicit cancel."""
+    import os as _os
+    config = session.config
+    _host = ''
+    try:
+        _host = _os.uname().nodename.split('.')[0]
+    except (AttributeError, OSError):
+        _host = 'host'
+    _default_name = (
+        getattr(config, 'system_name', '')
+        or ('athena-primary'
+            if getattr(config, 'system_role', '') == 'first'
+            else f'athena-{_host}'))
+    _name = _ask(PROMPT_INPUT, f"Builder name [{_default_name}]")
+    if _name is None:
+        return False
+    _name = _name or _default_name
+
+    _default_jobs = min(_os.cpu_count() or 1, 8)
+    _jobs_raw = _ask(PROMPT_INPUT, f"Parallel build jobs [{_default_jobs}]")
+    if _jobs_raw is None:
+        return False
+    try:
+        _jobs = int(_jobs_raw) if _jobs_raw else _default_jobs
+    except ValueError:
+        _jobs = _default_jobs
+    _jobs = max(1, min(_jobs, 8))
+
+    _default_uid = (getattr(config, 'signing_key_uid', '')
+                    or 'Athena Build <athena@local>')
+    _uid = _ask(PROMPT_INPUT, f"Repo signing identity [{_default_uid}]")
+    if _uid is None:
+        return False
+    _uid = _uid or _default_uid
+
+    utils.write_local_conf(config, name=_name, max_parallel_builds=_jobs,
+                           signing_key_uid=_uid)
+    config.system_name = _name
+    config.max_parallel_builds = _jobs
+    config.signing_key_uid = _uid
+    console.print(
+        f"  machine: name={_name}, jobs={_jobs}, signing={_uid}",
+        tui.COLOR_INFO)
+    return True
 
 
 def _onboard_first(session) -> bool:
@@ -273,8 +330,10 @@ def _onboard_federation(session) -> bool:
     console.print(f"✓ registered on {_name}", tui.COLOR_HIGHLIGHT)
     _keys = session._coord_self_keys()
     config.system_role = 'federation'
-    utils.write_local_conf(config, role='federation',
-                           registration={_name: _keys[0] if _keys else ''})
+    utils.write_local_conf(config, role='federation')
+    # Registration marker now lives in the signed mirror.conf, not local.conf.
+    import mirror as _mirror
+    _mirror.set_registration(config, _name, _keys[0] if _keys else '')
 
     # 6. Mode.
     _mode = _ask(PROMPT_OPTIONS, "Build mode",

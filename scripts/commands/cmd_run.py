@@ -33,14 +33,13 @@ class ConfigRunCommandsMixin(SessionState):
         (cmd_mirror first-publish refusal): a FIRST/origin system stays in
         distribution (build mode needs a published baseline it can't itself
         be), and any peer must be federation-registered first — a
-        [Registration] marker in config/local.conf, written once
+        registration marker in the signed config/mirror.conf, written once
         registration succeeds."""
         if getattr(self.config, 'system_role', '') == 'first':
             return ("a FIRST/origin system stays in distribution mode "
                     "(build mode needs a published baseline from an origin)")
-        _local = utils.read_local_conf(self.config)
-        if not (_local.has_section('Registration')
-                and _local.options('Registration')):
+        import mirror as _mirror
+        if not _mirror.get_registration(self.config):
             return ("register to a mirror first (run setup or "
                     "`mirror builders register`) — build mode publishes a "
                     "subset that only an already-bootstrapped mirror accepts")
@@ -139,6 +138,105 @@ class ConfigRunCommandsMixin(SessionState):
             console.print(
                 "  dep_check_ready cleared — run `cache parse`",
                 tui.COLOR_INFO)
+
+    # ── machine-local setters: persist to config/local.conf ──────────
+    # These mutate the per-machine keys that the config split moved OUT of the
+    # tracked config (build.conf/distro.conf) and INTO the untracked
+    # local.conf.  Each validates, updates the live config, and write_local_conf
+    # read-merge-writes the one field (other fields preserved).  build.conf is
+    # never touched.
+
+    def _set_name(self, value: str) -> None:
+        """`set name <builder-id>` — this machine's builder identity."""
+        _v = value.strip()
+        if not (1 <= len(_v) <= 64
+                and all(_c.isalnum() or _c in '-_' for _c in _v)):
+            console.print(
+                f"  invalid name: {value!r} (ascii letters/digits/-/_, 1-64)",
+                tui.COLOR_ERROR)
+            return
+        self.config.system_name = _v
+        utils.write_local_conf(self.config, name=_v)
+        console.print(f"  name  →  {_v}  (saved to local.conf)",
+                      tui.COLOR_HIGHLIGHT)
+
+    def _set_jobs(self, value: str) -> None:
+        """`set jobs <N>` — MaxParallelBuilds (1-8)."""
+        try:
+            _n = int(value)
+        except ValueError:
+            console.print(f"  jobs must be an integer 1-8, got {value!r}",
+                          tui.COLOR_ERROR)
+            return
+        if not (1 <= _n <= 8):
+            console.print(
+                f"  jobs must be 1-8 (docker-py pool limit), got {_n}",
+                tui.COLOR_ERROR)
+            return
+        self.config.max_parallel_builds = _n
+        utils.write_local_conf(self.config, max_parallel_builds=_n)
+        console.print(
+            f"  jobs (MaxParallelBuilds)  →  {_n}  (saved to local.conf)",
+            tui.COLOR_HIGHLIGHT)
+
+    def _set_cpus(self, value: str) -> None:
+        """`set cpus <F>` — per-container CPU quota (0 = no cap)."""
+        try:
+            _f = float(value)
+        except ValueError:
+            console.print(f"  cpus must be a number >= 0, got {value!r}",
+                          tui.COLOR_ERROR)
+            return
+        if _f < 0:
+            console.print(f"  cpus must be >= 0, got {_f}", tui.COLOR_ERROR)
+            return
+        self.config.build_cpus = _f
+        utils.write_local_conf(self.config, build_cpus=_f)
+        console.print(f"  cpus (BuildCpus)  →  {_f}  (saved to local.conf)",
+                      tui.COLOR_HIGHLIGHT)
+
+    def _set_memory(self, value: str) -> None:
+        """`set memory <8g>` — per-container RAM cap ('' / 'none' = no cap)."""
+        _v = value.strip()
+        if _v.lower() in ('none', '0', 'off', ''):
+            _v = ''
+        elif not (_v[:-1].isdigit() and _v[-1] in 'bkmgBKMG') and not _v.isdigit():
+            console.print(
+                f"  memory must be a docker size like 8g/512m (or none), "
+                f"got {value!r}", tui.COLOR_ERROR)
+            return
+        self.config.build_memory = _v
+        utils.write_local_conf(self.config, build_memory=_v)
+        console.print(
+            f"  memory (BuildMemory)  →  {_v or '(no cap)'}  "
+            "(saved to local.conf)", tui.COLOR_HIGHLIGHT)
+
+    def _set_docker_server(self, value: str) -> None:
+        """`set docker-server <url>` — local Docker daemon endpoint
+        ('' / 'local' = default socket).  The exposure guard (refuses an
+        unsafely-reachable bare tcp:// daemon) fires at `container local
+        init`."""
+        _v = value.strip()
+        if _v.lower() in ('local', 'none', ''):
+            _v = ''
+        self.config.docker_server = _v
+        utils.write_local_conf(self.config, docker_server=_v)
+        console.print(
+            f"  docker-server  →  {_v or '(local socket)'}  "
+            "(saved to local.conf)", tui.COLOR_HIGHLIGHT)
+
+    def _set_signing_uid(self, value: str) -> None:
+        """`set signing-uid <'Name <email>'>` — repo signing identity."""
+        _v = value.strip()
+        if not ('<' in _v and _v.endswith('>') and '@' in _v):
+            console.print(
+                f"  signing-uid must be 'Name <email>', got {value!r}",
+                tui.COLOR_ERROR)
+            return
+        self.config.signing_key_uid = _v
+        utils.write_local_conf(self.config, signing_key_uid=_v)
+        console.print(f"  signing-uid  →  {_v}  (saved to local.conf)",
+                      tui.COLOR_HIGHLIGHT)
 
     _SETTABLE: 'dict[str, Callable]' = {}    # populated below
     _GETTABLE: 'dict[str, Callable]' = {}
@@ -338,7 +436,7 @@ class ConfigRunCommandsMixin(SessionState):
             (self.cmd_build_cache,       'cache_ready',           'cache build'),
             (self.cmd_parse_dependency,  'dep_check_ready',       'cache parse'),
             (self.cmd_source_sync,       'download_ready',        'source sync'),
-            (self.cmd_init_container,    'build_container_ready', 'container init'),
+            (self.cmd_init_container,    'build_container_ready', 'container local init'),
             (self.cmd_source_build,                                  # bare = pkg
                                           'source_build_ready',    'source build'),
             (lambda: self.cmd_source_build('live'),                  # live extras
@@ -362,7 +460,7 @@ class ConfigRunCommandsMixin(SessionState):
             (self.cmd_build_cache,       'cache_ready',                'cache build'),
             (self.cmd_parse_dependency,  'dep_check_ready',            'cache parse'),
             (self.cmd_source_sync,       'download_ready',             'source sync'),
-            (self.cmd_init_container,    'build_container_ready',      'container init'),
+            (self.cmd_init_container,    'build_container_ready',      'container local init'),
             (self.cmd_source_build,                                       # bare = pkg
                                           'source_build_ready',         'source build'),
             (lambda: self.cmd_source_build('installer'),                  # udeb closure
@@ -386,7 +484,7 @@ class ConfigRunCommandsMixin(SessionState):
             (self.cmd_build_cache,       'cache_ready',           'cache build'),
             (self.cmd_parse_dependency,  'dep_check_ready',       'cache parse'),
             (self.cmd_source_sync,       'download_ready',        'source sync'),
-            (self.cmd_init_container,    'build_container_ready', 'container init'),
+            (self.cmd_init_container,    'build_container_ready', 'container local init'),
             (self.cmd_source_build,                                  # bare = pkg
                                           'source_build_ready',    'source build'),
             (self.cmd_build_chroot_disk, 'chroot_disk_ready',     'chroot build disk'),
@@ -416,7 +514,7 @@ class ConfigRunCommandsMixin(SessionState):
             (self.cmd_build_cache,       'cache_ready',           'cache build'),
             (self.cmd_parse_dependency,  'dep_check_ready',       'cache parse'),
             (self.cmd_source_sync,       'download_ready',        'source sync'),
-            (self.cmd_init_container,    'build_container_ready', 'container init'),
+            (self.cmd_init_container,    'build_container_ready', 'container local init'),
             # call cmd_source_build BARE.  'build' is not a valid
             # _SOURCE_SUBSETS token, so it was classified as a package NAME
             # → "Unknown package: build" → source_build_ready never set →
