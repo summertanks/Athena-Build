@@ -102,23 +102,24 @@ def ensure_remote_image(host: str, image_tag: str, *, log=print) -> str:
     return 'build'
 
 
-def _parse_result(stdout: str) -> 'tuple[int, list[str]]':
-    """Pull the last `__ATHENA_REMOTE_RESULT__ {json}` line emitted by
-    remote_build.py.  Returns (exit_code, [output basenames])."""
-    for _line in reversed(stdout.splitlines()):
-        if _line.startswith(RESULT_MARKER):
-            try:
-                _d = json.loads(_line[len(RESULT_MARKER):])
-                return (int(_d.get('exit_code', 1)), list(_d.get('outputs', [])))
-            except (ValueError, TypeError):
-                return (1, [])
-    return (1, [])
+def _parse_marker_line(line: 'str | None') -> 'tuple[int, list[str]]':
+    """Parse one `__ATHENA_REMOTE_RESULT__ {json}` line into
+    (exit_code, [output basenames]).  None / malformed → (1, [])."""
+    if not line:
+        return (1, [])
+    try:
+        _d = json.loads(line[len(RESULT_MARKER):])
+        return (int(_d.get('exit_code', 1)), list(_d.get('outputs', [])))
+    except (ValueError, TypeError):
+        return (1, [])
 
 
 def run_remote(host: str, local_bundle: str, remote_dir: str,
                local_out: str, *, log=print) -> 'tuple[int, list[str]]':
-    """scp the bundle up, ssh-run remote_build.py (streaming its output through
-    `log`), then scp the produced .debs back to `local_out`.  The remote temp
+    """scp the bundle up, run remote_build.py on the remote with its output
+    written to a LOG FILE ON THE REMOTE (so the build runs at full speed,
+    decoupled from the network), tail that file back through `log` for live
+    progress, then scp the produced .debs back to `local_out`.  The remote temp
     dir is always cleaned up.  Returns (exit_code, [recovered basenames]).
     """
     _ssh = ['ssh', '-o', 'BatchMode=yes', host]
@@ -132,17 +133,35 @@ def run_remote(host: str, local_bundle: str, remote_dir: str,
                            f'{host}:{remote_dir}/']).returncode != 0:
             log("remote: scp of bundle failed")
             return (11, [])
-        # run the build, streaming logs live while capturing for the result line
+        # Decoupled logging: the build writes to remote_dir/build.log on the
+        # remote's local disk (full speed — never blocked by the network), and a
+        # SEPARATE `tail -F` streams it back through `log` for live progress.  A
+        # slow network / log sink can't backpressure the build (it writes to the
+        # file independently).  `--pid` stops the tail when remote_build.py
+        # exits; a final grep guarantees the result marker reaches us even if
+        # tail missed the last line.  The marker is scanned incrementally
+        # (O(1) memory, not the whole log buffered).
+        # `cd` must apply to BOTH the backgrounded build AND the foreground
+        # tail/grep — wrap in a brace group so the bare `&` doesn't background
+        # the `cd` itself (which would leave tail/grep in the wrong directory).
+        _remote_cmd = (
+            f'cd {remote_dir} && {{ '
+            f'python3 remote_build.py . > build.log 2>&1 & _p=$!; '
+            f'tail -n +1 --pid=$_p -F build.log 2>/dev/null; '
+            f'wait $_p; '
+            f'grep -a {RESULT_MARKER} build.log | tail -1; }}'
+        )
         _proc = subprocess.Popen(
-            _ssh + [f'cd {remote_dir} && python3 remote_build.py .'],
+            _ssh + [_remote_cmd],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        _captured: 'list[str]' = []
+        _marker: 'str | None' = None
         assert _proc.stdout is not None
         for _line in _proc.stdout:
             log(_line.rstrip('\n'))
-            _captured.append(_line)
+            if _line.startswith(RESULT_MARKER):
+                _marker = _line          # keep only the last marker (O(1) mem)
         _proc.wait()
-        _exit, _outputs = _parse_result(''.join(_captured))
+        _exit, _outputs = _parse_marker_line(_marker)
         if _outputs:
             os.makedirs(local_out, exist_ok=True)
             # globs expand on the remote shell; only run when there's output
