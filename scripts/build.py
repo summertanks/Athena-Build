@@ -1823,9 +1823,8 @@ def main(banner: str) -> None:
     # (commands are gated until then), or confirm the configured state.
     if not getattr(config, 'setup_complete', False):
         console.print(
-            "\n⚠  This build system is not configured — run `configure` to "
-            "set it up (role, mirror, mode, snapshot).  Other commands are "
-            "disabled until then.", tui.COLOR_WARNING)
+            "\n[WARNING] This build system is not configured — run "
+            "`configure` to set it up", tui.COLOR_WARNING)
     else:
         console.print(onboarding.configured_summary(config), tui.COLOR_INFO)
 
