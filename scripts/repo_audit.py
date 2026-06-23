@@ -801,9 +801,23 @@ def fetch_source_versions_at(config: 'BuildConfig',
     snapshot.  Metadata-only (no build); powers `snapshot workload`'s
     current→target diff.  Returns None on any fetch failure (caller aborts)."""
     import gzip
+    import json
     import lzma
     import tempfile
     import requests
+    # The Sources index at a pinned snapshot timestamp is immutable, so cache
+    # the parsed {name: version} on disk keyed by the timestamp.  `source audit`
+    # calls this every run via _workload_since_snapshot, and re-downloading the
+    # multi-MB index over a thin link was the audit-startup delay.
+    _cache_file = os.path.join(
+        config.dir_cache, f'source-versions-{target_ts}.json')
+    try:
+        with open(_cache_file) as _cf:
+            _cached = json.load(_cf)
+        if isinstance(_cached, dict):
+            return _cached
+    except (OSError, ValueError):
+        pass
     _out: 'dict[str, str]' = {}
     for _m in config.mirrors:
         _snap = _m.with_snapshot(target_ts, baseurl=config.snapshot_baseurl)
@@ -843,6 +857,13 @@ def fetch_source_versions_at(config: 'BuildConfig',
                 f"fetch_source_versions_at: no Sources for mirror {_m.id} "
                 f"at {target_ts}")
             return None
+    # every mirror fetched OK — persist (immutable per timestamp) so the next
+    # `source audit` reads it from disk instead of re-downloading.
+    try:
+        with open(_cache_file, 'w') as _cf:
+            json.dump(_out, _cf)
+    except OSError:
+        pass
     return _out
 
 

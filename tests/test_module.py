@@ -22419,6 +22419,31 @@ def test_ensure_remote_image_lan_transfer_paths():
         assert _ro.ensure_remote_image('h', 'tag', log=_quiet) == 'transferred'
 
 
+def test_fetch_source_versions_cached_on_disk():
+    """fetch_source_versions_at caches the floor Sources index on disk keyed by
+    the (immutable) snapshot timestamp — re-downloading it every run was the
+    audit-startup delay."""
+    from unittest import mock
+    import json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg = mock.Mock(dir_cache=_tmp, mirrors=[])
+        # a pre-seeded cache file is served WITHOUT touching the network
+        with open(os.path.join(_tmp, 'source-versions-20260101T0Z.json'),
+                  'w') as _f:
+            json.dump({'foo': '1.0'}, _f)
+        with mock.patch.object(repo_audit.utils, '_http_session') as _hs:
+            _r = repo_audit.fetch_source_versions_at(_cfg, '20260101T0Z')
+        assert _r == {'foo': '1.0'}
+        _hs.assert_not_called()                 # served from disk
+        # a fresh timestamp (no mirrors) → empty result, written to cache
+        _r2 = repo_audit.fetch_source_versions_at(_cfg, '20260202T0Z')
+        assert _r2 == {}
+        assert os.path.isfile(
+            os.path.join(_tmp, 'source-versions-20260202T0Z.json'))
+
+
 def test_published_ledger_memoised():
     """published_ledger memoises on the manifest's (path, mtime, size) so
     `source audit`'s repeated calls don't re-read/re-verify/re-parse it — the
@@ -37954,6 +37979,7 @@ def main() -> int:
         test_remote_orchestrate_parse_host_stage_and_result,
         test_remote_orchestrate_run_remote_flow,
         test_ensure_remote_image_lan_transfer_paths,
+        test_fetch_source_versions_cached_on_disk,
         test_published_ledger_memoised,
         test_container_init_remote_ensures_image,
         test_remotebuild_command_wired,
