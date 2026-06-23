@@ -2077,13 +2077,22 @@ def write_local_conf(config: 'BuildConfig', *,
                      mode: 'Optional[str]' = None,
                      role: 'Optional[str]' = None,
                      setup_complete: 'Optional[bool]' = None,
-                     registration: 'Optional[dict[str, str]]' = None) -> None:
+                     name: 'Optional[str]' = None,
+                     signing_key_uid: 'Optional[str]' = None,
+                     max_parallel_builds: 'Optional[int]' = None,
+                     build_cpus: 'Optional[float]' = None,
+                     build_memory: 'Optional[str]' = None,
+                     docker_server: 'Optional[str]' = None) -> None:
     """Read-merge-write config/local.conf (mirrors write_snapshot_state's
     shape: read existing, set only the provided fields, atomic write).
 
-    `registration` is a {mirror-name: builder-id} map merged into the
-    [Registration] section — the sidecar that lets onboarding skip a
-    re-register on a box that's already joined a mirror."""
+    Sections written: [Local] (Mode/Role/SetupComplete/Name), [Build] (host
+    tuning: MaxParallelBuilds/BuildCpus/BuildMemory/DOCKER_SERVER), [Repo]
+    (SigningKeyUid).  Every field is optional — only the provided ones are
+    touched, the rest preserved.
+
+    Per-mirror builder registration lives in the signed mirror.conf now
+    (mirror.set_registration / get_registration), NOT here."""
     import io
     _path = local_conf_path(config)
     _parser = read_local_conf(config)
@@ -2096,11 +2105,25 @@ def write_local_conf(config: 'BuildConfig', *,
     if setup_complete is not None:
         _parser.set('Local', 'SetupComplete',
                     'true' if setup_complete else 'false')
-    if registration:
-        if not _parser.has_section('Registration'):
-            _parser.add_section('Registration')
-        for _mirror, _bid in registration.items():
-            _parser.set('Registration', _mirror, _bid)
+    if name is not None:
+        _parser.set('Local', 'Name', name)
+    # [Build] host tuning — machine-specific, never tracked.
+    if (max_parallel_builds is not None or build_cpus is not None
+            or build_memory is not None or docker_server is not None):
+        if not _parser.has_section('Build'):
+            _parser.add_section('Build')
+        if max_parallel_builds is not None:
+            _parser.set('Build', 'MaxParallelBuilds', str(max_parallel_builds))
+        if build_cpus is not None:
+            _parser.set('Build', 'BuildCpus', str(build_cpus))
+        if build_memory is not None:
+            _parser.set('Build', 'BuildMemory', build_memory)
+        if docker_server is not None:
+            _parser.set('Build', 'DOCKER_SERVER', docker_server)
+    if signing_key_uid is not None:
+        if not _parser.has_section('Repo'):
+            _parser.add_section('Repo')
+        _parser.set('Repo', 'SigningKeyUid', signing_key_uid)
     _buf = io.StringIO()
     _parser.write(_buf)
     os.makedirs(os.path.dirname(_path), exist_ok=True)
@@ -2108,6 +2131,112 @@ def write_local_conf(config: 'BuildConfig', *,
         _path, _buf.getvalue().encode('utf-8'),
         mode=_existing_mode(_path),
     )
+
+
+# ── remote.conf — UNTRACKED registry of remote build hosts ────────────────
+# Each [Remote.<name>] holds an SSH ship-to-host for `source remotebuild`
+# (the build runs THERE, Docker local on the remote) plus that host's build
+# tuning, so `source remotebuild all` can fan packages out per remote.  Path/
+# read/write/CRUD mirror the local.conf helpers; managed via `container
+# remote add|list|delete`.
+
+_REMOTE_SECTION_PREFIX = 'Remote.'
+
+
+def remote_conf_path(config: 'BuildConfig') -> str:
+    """Path to config/remote.conf — the UNTRACKED machine-local registry of
+    remote build hosts (created by `container remote add`)."""
+    return os.path.join(os.path.dirname(config.config_path), 'remote.conf')
+
+
+def read_remote_conf(config: 'BuildConfig') -> 'configparser.ConfigParser':
+    """Read config/remote.conf → ConfigParser; empty parser if absent.  A
+    malformed file is swallowed here (write-side callers merge into a freshly
+    read parser); BuildConfig.__init__ reads it strictly."""
+    _parser = configparser.ConfigParser()
+    try:
+        _parser.read(remote_conf_path(config))
+    except configparser.Error:
+        pass
+    return _parser
+
+
+def _write_remote_conf(config: 'BuildConfig',
+                       parser: 'configparser.ConfigParser') -> None:
+    """Atomic-write a ConfigParser to config/remote.conf."""
+    import io
+    _path = remote_conf_path(config)
+    _buf = io.StringIO()
+    parser.write(_buf)
+    os.makedirs(os.path.dirname(_path), exist_ok=True)
+    _atomic_write_bytes(
+        _path, _buf.getvalue().encode('utf-8'),
+        mode=_existing_mode(_path),
+    )
+
+
+def list_remotes(config: 'BuildConfig') -> 'list[dict]':
+    """Every configured remote as a dict: {name, host, type, ssh_key,
+    max_parallel_builds, build_cpus, build_memory}.  Declaration order."""
+    _parser = read_remote_conf(config)
+    _out: 'list[dict]' = []
+    for _section in _parser.sections():
+        if not _section.startswith(_REMOTE_SECTION_PREFIX):
+            continue
+        _name = _section[len(_REMOTE_SECTION_PREFIX):]
+        _out.append({
+            'name':                _name,
+            'host':                _parser.get(_section, 'Host', fallback=''),
+            'type':                _parser.get(_section, 'Type', fallback='ssh'),
+            'ssh_key':             _parser.get(_section, 'SshKey', fallback=''),
+            'max_parallel_builds': _parser.getint(
+                _section, 'MaxParallelBuilds', fallback=1),
+            'build_cpus':          _parser.getfloat(
+                _section, 'BuildCpus', fallback=0.0),
+            'build_memory':        _parser.get(
+                _section, 'BuildMemory', fallback=''),
+        })
+    return _out
+
+
+def add_remote(config: 'BuildConfig', *, name: str, host: str,
+               type: str = 'ssh', ssh_key: str = '',
+               max_parallel_builds: int = 1, build_cpus: float = 0.0,
+               build_memory: str = '') -> 'tuple[bool, str]':
+    """Add/replace a [Remote.<name>] entry in config/remote.conf.  Returns
+    (ok, detail)."""
+    # Name becomes a config section + (optionally) a key filename component:
+    # ASCII alphanumerics + '-'/'_', 1-64 chars.
+    if not (isinstance(name, str) and 1 <= len(name) <= 64
+            and all(_c.isalnum() or _c in '-_' for _c in name)):
+        return (False, f"invalid remote name {name!r}")
+    if not host.strip():
+        return (False, "remote host is required")
+    _parser = read_remote_conf(config)
+    _section = f"{_REMOTE_SECTION_PREFIX}{name}"
+    _replaced = _parser.has_section(_section)
+    if not _replaced:
+        _parser.add_section(_section)
+    _parser.set(_section, 'Host', host.strip())
+    _parser.set(_section, 'Type', type)
+    _parser.set(_section, 'SshKey', ssh_key)
+    _parser.set(_section, 'MaxParallelBuilds', str(max_parallel_builds))
+    _parser.set(_section, 'BuildCpus', str(build_cpus))
+    _parser.set(_section, 'BuildMemory', build_memory)
+    _write_remote_conf(config, _parser)
+    return (True, f"{'updated' if _replaced else 'added'} remote {name!r} → {host}")
+
+
+def delete_remote(config: 'BuildConfig', name: str) -> 'tuple[bool, str]':
+    """Remove a [Remote.<name>] entry from config/remote.conf (config only —
+    does not touch the remote host's Docker state; that's `purge`)."""
+    _parser = read_remote_conf(config)
+    _section = f"{_REMOTE_SECTION_PREFIX}{name}"
+    if not _parser.has_section(_section):
+        return (False, f"no such remote {name!r}")
+    _parser.remove_section(_section)
+    _write_remote_conf(config, _parser)
+    return (True, f"deleted remote {name!r}")
 
 
 def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
@@ -2315,9 +2444,20 @@ class BuildConfig:
             self.error_str = f"Failed to parse arguments: {e}"
             return
 
-        # read config file
+        # read config file(s).  The TRACKED config is split across two files:
+        #   distro.conf — the upstream we build FROM + output identity
+        #                 ([Build] identity, [Base], [Mirror.*], [Security],
+        #                  [Audit], [Snapshot] service, [Directories])
+        #   build.conf  — the build RECIPE ([Live], [Disk], [Packages],
+        #                  [Source]) — the template an end user edits
+        # configparser.read() merges a file list and silently skips absent
+        # ones, so an older combined build.conf (or a test fixture that writes
+        # every section into one file) keeps working unchanged.  --config-file
+        # points at build.conf; distro.conf is its sibling.
         try:
-            config_parser.read(self.config_path)
+            _distro_path = os.path.join(
+                os.path.dirname(self.config_path), 'distro.conf')
+            config_parser.read([_distro_path, self.config_path])
             self.arch = config_parser.get('Build', 'ARCH')
 
             # [Base] defaults — per-mirror sections may override BASEURL/BASEID
@@ -2348,7 +2488,31 @@ class BuildConfig:
             # Snapshot pinning — opt-in.  Default off keeps the existing
             # live-mirror behaviour for users who haven't migrated yet.
             self.snapshot_enabled = config_parser.getboolean('Snapshot', 'Enabled', fallback=False)
-            self.snapshot_timestamp_config = config_parser.get('Snapshot', 'Timestamp', fallback='latest').strip()
+            # The snapshot PIN is no longer tracked in config — it lives in the
+            # UNTRACKED config/snapshot.state sidecar (set by `snapshot
+            # select`).  Surface the durable pin here as the effective
+            # timestamp so consumers (selection lockfile, displays,
+            # resolve_snapshot_timestamp's caller) see the real frozen point,
+            # not the 'latest' placeholder.  Read the sidecar by path (dir_config
+            # isn't set yet); fall back to any legacy [Snapshot] Timestamp, then
+            # 'latest'.  resolve_snapshot_timestamp applies the same precedence
+            # at fetch time (with HEAD validation) — this keeps the cached
+            # attribute consistent with it.
+            _snap_cfg_ts = config_parser.get(
+                'Snapshot', 'Timestamp', fallback='latest').strip()
+            _snap_state_path = os.path.join(
+                os.path.dirname(self.config_path), 'snapshot.state')
+            _snap_state_cur = ''
+            try:
+                with open(_snap_state_path, encoding='utf-8') as _sfh:
+                    _snap_state_cur = (json.load(_sfh) or {}).get('current', '')
+            except (OSError, ValueError):
+                _snap_state_cur = ''
+            self.snapshot_timestamp_config = (
+                _snap_state_cur
+                if isinstance(_snap_state_cur, str)
+                and _SNAPSHOT_TS_RE.match(_snap_state_cur)
+                else _snap_cfg_ts)
             # Snapshot endpoints — defaults preserve current Debian
             # behaviour; overridable for forks / derivative distros
             # running their own snapshot mirror.
@@ -2394,13 +2558,43 @@ class BuildConfig:
             # RELEASE is rebased.
             self.container_release = config_parser.get(
                 'Base', 'CONTAINER_RELEASE', fallback=self.release)
-            self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
-            # Remote host for `source remotebuild` — ssh://user@host (or
-            # user@host).  Empty = remote builds disabled.  The build runs THERE
-            # (Docker is local on the remote), distinct from DOCKER_SERVER which
-            # would drive a remote daemon's API.
-            self.remote_build_host = config_parser.get(
-                'Build', 'RemoteBuildHost', fallback='')
+            # Machine-local sidecar (config/local.conf, UNTRACKED): holds build
+            # Mode, system Role, SetupComplete, builder Name, host build tuning
+            # ([Build] MaxParallelBuilds/BuildCpus/BuildMemory/DOCKER_SERVER) and
+            # the signing identity ([Repo] SigningKeyUid).  Read STRICTLY — a
+            # malformed file is the operator's broken machine state and must
+            # fail loudly.  Absent = fresh/un-onboarded checkout.  Read here
+            # (before the machine-specific keys below) so those keys can take
+            # local.conf with precedence over the tracked fallback.
+            _local_conf = configparser.ConfigParser()
+            _local_conf_path = os.path.join(
+                os.path.dirname(self.config_path), 'local.conf')
+            if os.path.isfile(_local_conf_path):
+                try:
+                    _local_conf.read(_local_conf_path)
+                except configparser.Error as _e:
+                    self.error_str = f"config/local.conf is malformed: {_e}"
+                    return
+            # DOCKER_SERVER (local Docker daemon endpoint) is machine-specific →
+            # local.conf [Build]; the config_parser read is a back-compat
+            # fallback for older combined build.conf checkouts.
+            self.docker_server = _local_conf.get(
+                'Build', 'DOCKER_SERVER',
+                fallback=config_parser.get('Build', 'DOCKER_SERVER', fallback=''))
+            # Remote build hosts (config/remote.conf, UNTRACKED): the registry
+            # of ssh ship-to-host targets for `source remotebuild` (the build
+            # runs THERE — Docker is local on the remote — distinct from
+            # DOCKER_SERVER which would drive a remote daemon's API).  Each
+            # remote carries its own build tuning so `source remotebuild all`
+            # can fan packages out per host.  Managed via `container remote
+            # add|list|delete`.  remote_build_host = the first configured
+            # remote's host (single-remote convenience); [Build] RemoteBuildHost
+            # is a legacy fallback for an un-migrated checkout.  Empty = remote
+            # builds disabled.
+            self.remotes = list_remotes(self)
+            self.remote_build_host = (
+                self.remotes[0]['host'] if self.remotes
+                else config_parser.get('Build', 'RemoteBuildHost', fallback=''))
             # When true, depth-1 Recommends of selected packages are
             # pulled into selected_pkgs / selected_srcs (downloaded but not
             # built by default; not installed in chroot).  See build.conf for
@@ -2413,20 +2607,6 @@ class BuildConfig:
             # via keep-polling regardless — see buildcontainer._wait_for_exit).
             self.docker_timeout = config_parser.getint(
                 'Build', 'DockerTimeout', fallback=1800)
-            # Machine-local sidecar (config/local.conf, UNTRACKED): holds
-            # build Mode, system Role, the SetupComplete flag and per-mirror
-            # registration markers.  Read STRICTLY here — a malformed file is
-            # the operator's broken machine state and must fail loudly, not
-            # silently fall back.  Absent file = fresh/un-onboarded checkout.
-            _local_conf = configparser.ConfigParser()
-            _local_conf_path = os.path.join(
-                os.path.dirname(self.config_path), 'local.conf')
-            if os.path.isfile(_local_conf_path):
-                try:
-                    _local_conf.read(_local_conf_path)
-                except configparser.Error as _e:
-                    self.error_str = f"config/local.conf is malformed: {_e}"
-                    return
             # Build-mode switch.  `distribution` (default) drives the
             # full corpus through pkg.list/live.list/installer.list/pool.list
             # with runtime dep closure.  `build` works against just
@@ -2457,6 +2637,11 @@ class BuildConfig:
                 _local_conf.get('Local', 'Role', fallback='') or '').strip().lower()
             self.setup_complete = _local_conf.getboolean(
                 'Local', 'SetupComplete', fallback=False)
+            # Build-system name — this machine's builder identity (e.g.
+            # athena-primary), set at `configure`.  Machine-local only; empty on
+            # a fresh/un-onboarded checkout.
+            self.system_name = (
+                _local_conf.get('Local', 'Name', fallback='') or '').strip()
             # default size for `iso build disk` output.  Sparse
             # qcow2 — actual on-disk footprint is much smaller (~chroot
             # size + metadata).  Operator overrides via `iso build disk
@@ -2485,10 +2670,14 @@ class BuildConfig:
                 working_dir, 'config/installer-defaults.list')
             # identity for the project's signing key — used by
             # generate_signing_key / verify_signing_key / print signing.
-            # Format 'Name <email>'.  See [Repo] section in build.conf.
-            self.signing_key_uid = config_parser.get(
+            # Format 'Name <email>'.  Machine-specific (each builder signs with
+            # its own key) → local.conf [Repo]; config_parser is the back-compat
+            # fallback, then a generic default for a fresh checkout.
+            self.signing_key_uid = _local_conf.get(
                 'Repo', 'SigningKeyUid',
-                fallback='Athena Build <athena@local>'
+                fallback=config_parser.get(
+                    'Repo', 'SigningKeyUid',
+                    fallback='Athena Build <athena@local>')
             ).strip()
             # optional network apt source for the INSTALLED system.
             # When set, build_chroot writes /etc/apt/sources.list.d/athena.list
@@ -2561,8 +2750,12 @@ class BuildConfig:
             # workers can exhaust the pool and stall on streaming logs.
             # Set MaxParallelBuilds = 1 (the default) to disable
             # parallelism entirely and take the existing serial path.
-            self.max_parallel_builds = config_parser.getint(
-                'Build', 'MaxParallelBuilds', fallback=1)
+            # Host tuning → local.conf [Build]; config_parser is the
+            # back-compat fallback for older combined build.conf checkouts.
+            self.max_parallel_builds = _local_conf.getint(
+                'Build', 'MaxParallelBuilds',
+                fallback=config_parser.getint(
+                    'Build', 'MaxParallelBuilds', fallback=1))
             if self.max_parallel_builds < 1:
                 self.error_str = (
                     f"[Build] MaxParallelBuilds must be >= 1, got "
@@ -2584,24 +2777,32 @@ class BuildConfig:
             # a host with H cpus a sane starting point is BuildCpus =
             # (H // MaxParallelBuilds) * 0.8 — but the right value is
             # workload-dependent so we don't compute a default.
-            self.build_cpus = config_parser.getfloat(
-                'Build', 'BuildCpus', fallback=0.0)
+            self.build_cpus = _local_conf.getfloat(
+                'Build', 'BuildCpus',
+                fallback=config_parser.getfloat(
+                    'Build', 'BuildCpus', fallback=0.0))
             if self.build_cpus < 0:
                 self.error_str = (
                     f"[Build] BuildCpus must be >= 0.0, got "
                     f"{self.build_cpus}"
                 )
                 return
-            self.build_memory = config_parser.get(
-                'Build', 'BuildMemory', fallback='').strip()
+            self.build_memory = _local_conf.get(
+                'Build', 'BuildMemory',
+                fallback=config_parser.get(
+                    'Build', 'BuildMemory', fallback='')).strip()
 
             # HeavyPackages: comma-separated source names treated as
             # "build alone" by the parallel scheduler — when the next
             # ready job is in this set, all in-flight builds drain
             # first; while it runs, no new builds start.  Empty = no
-            # heavy-package serialization.
-            _heavy = config_parser.get(
-                'Build', 'HeavyPackages', fallback='').strip()
+            # heavy-package serialization.  Lives in build.conf [Source]
+            # (a build-recipe property); the [Build] read is a back-compat
+            # fallback for older combined configs.
+            _heavy = (
+                config_parser.get('Source', 'HeavyPackages', fallback='')
+                or config_parser.get('Build', 'HeavyPackages', fallback='')
+            ).strip()
             self.heavy_packages = frozenset(
                 p.strip() for p in _heavy.split(',') if p.strip())
 
@@ -2725,6 +2926,28 @@ class BuildConfig:
                 self.dir_repo, 'dists', _codename, 'non-free-firmware',
                 f'binary-{self.arch}')
             self.dir_config = os.path.join(self.working_dir, config_parser.get('Directories', 'Config'))
+            # [Packages] (build.conf) formalises the package-list filenames that
+            # used to be hardcoded.  Apply them now that dir_config is known —
+            # but ONLY when the CLI used the default path (an explicit
+            # --pkg-list/--pool-list/… still wins).  A list named in [Packages]
+            # is resolved relative to config/.  Absent section / key → the
+            # hardcoded default filename, so nothing changes for old configs.
+            if config_parser.has_section('Packages'):
+                _pkg_list_map = (
+                    ('pkglist_path',        'Pkg_List',       'pkg.list'),
+                    ('livelist_path',       'Live_List',      'live.list'),
+                    ('installerlist_path',  'Installer_List', 'installer.list'),
+                    ('poollist_path',       'Pool_List',      'pool.list'),
+                    ('build_pkg_list_path', 'Build_Pkg_List', 'build_pkg.list'),
+                )
+                for _attr, _key, _default_fn in _pkg_list_map:
+                    _default_path = os.path.join(
+                        working_dir, 'config', _default_fn)
+                    if getattr(self, _attr) == _default_path:   # not CLI-overridden
+                        setattr(self, _attr, os.path.join(
+                            self.dir_config,
+                            config_parser.get('Packages', _key,
+                                              fallback=_default_fn)))
             self.dir_image = os.path.join(self.working_dir, config_parser.get('Directories', 'Image'))
             # The [Directories] Chroot value is the PARENT directory holding
             # both chroots.  Live lands

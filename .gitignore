@@ -36,13 +36,23 @@ config/*.key
 config/snapshot.state
 
 # Machine-local onboarding sidecar — build Mode, system Role, SetupComplete,
-# and per-mirror registration markers.  Per-machine, never shared; a fresh
-# `git pull` must not inherit another box's mode or registration state.
+# builder Name, host build tuning ([Build] MaxParallelBuilds/BuildCpus/
+# BuildMemory/DOCKER_SERVER), signing identity ([Repo] SigningKeyUid) and
+# per-mirror registration markers.  Per-machine, never shared; a fresh
+# `git pull` must not inherit another box's mode, tuning, or identity.
 config/local.conf
 
-# Per-machine federation mirror endpoints (url, ssh-key name, public_url,
-# snapshot pins).  Created by `mirror add` / onboarding.  Tracking these would
-# leak one machine's mirror identity into the repo for everyone who pulls it.
+# Machine-local registry of remote build hosts ([Remote.<name>]: ssh ship-to
+# target + that host's build tuning).  Created by `container remote add`.
+# Per-machine endpoints + access — never shared.
+config/remote.conf
+
+# Per-machine federation mirror state — ALL mirrors in one HMAC-signed
+# config/mirror.conf (url, ssh-key name, public_url, snapshot pins; tamper-
+# evident).  config/mirror.<name>.state is the legacy per-mirror layout,
+# auto-migrated into mirror.conf on first read.  Untracked: tracking these
+# would leak one machine's mirror identity into the repo for everyone.
+config/mirror.conf
 config/mirror.*.state
 
 # Per-checkout signed published-manifest (mirror of what's published; the
