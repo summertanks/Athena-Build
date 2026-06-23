@@ -415,7 +415,9 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 
         printf "   %-20s : %s\n" "$key" "$value"
     fi
-done < "$CONFIG_FILE"
+# Tracked config is split: [Build]/[Base] live in the sibling distro.conf,
+# [Source] in build.conf.  Read both so the summary shows every section.
+done < <(cat "$(dirname "$CONFIG_FILE")/distro.conf" "$CONFIG_FILE" 2>/dev/null)
 
 
 # Check required Python packages
