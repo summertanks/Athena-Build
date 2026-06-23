@@ -155,26 +155,25 @@ def run_onboarding(session) -> None:
 
 
 def _prompt_machine_settings(session) -> bool:
-    """Prompt for the per-machine values the config split moved into local.conf
-    — builder Name, parallel Jobs, signing UID — each with a sensible default
+    """Prompt for the per-machine build settings the config split moved into
+    local.conf — parallel Jobs + signing UID — each with a sensible default
     (Enter to accept).  Persists to local.conf + reflects into the live config.
+
+    The builder NAME is NOT asked here: this machine's name IS its builder
+    identity (coord/identity/<id>, the `Builder id` established earlier in the
+    role flow), so [Local] Name simply mirrors that — asking for a second name
+    would be a confusing duplicate.  (`set name` can override it later.)
     Returns False only on explicit cancel."""
     import os as _os
     config = session.config
-    _host = ''
+    # [Local] Name = the builder identity already established by the role flow
+    # (federation prompts `Builder id`; origin runs _ensure_builder_identity).
+    _name = ''
     try:
-        _host = _os.uname().nodename.split('.')[0]
-    except (AttributeError, OSError):
-        _host = 'host'
-    _default_name = (
-        getattr(config, 'system_name', '')
-        or ('athena-primary'
-            if getattr(config, 'system_role', '') == 'first'
-            else f'athena-{_host}'))
-    _name = _ask(PROMPT_INPUT, f"Builder name [{_default_name}]")
-    if _name is None:
-        return False
-    _name = _name or _default_name
+        _name = session._coord_builder_id() or ''
+    except Exception:                     # noqa: BLE001 — best-effort
+        _name = ''
+    _name = _name or getattr(config, 'system_name', '')
 
     _default_jobs = min(_os.cpu_count() or 1, 8)
     _jobs_raw = _ask(PROMPT_INPUT, f"Parallel build jobs [{_default_jobs}]")
@@ -193,14 +192,15 @@ def _prompt_machine_settings(session) -> bool:
         return False
     _uid = _uid or _default_uid
 
-    utils.write_local_conf(config, name=_name, max_parallel_builds=_jobs,
-                           signing_key_uid=_uid)
-    config.system_name = _name
+    utils.write_local_conf(config, name=(_name or None),
+                           max_parallel_builds=_jobs, signing_key_uid=_uid)
+    if _name:
+        config.system_name = _name
     config.max_parallel_builds = _jobs
     config.signing_key_uid = _uid
     console.print(
-        f"  machine: name={_name}, jobs={_jobs}, signing={_uid}",
-        tui.COLOR_INFO)
+        f"  machine: name={_name or '(builder id)'}, jobs={_jobs}, "
+        f"signing={_uid}", tui.COLOR_INFO)
     return True
 
 
