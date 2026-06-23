@@ -143,6 +143,16 @@ def run_onboarding(session) -> None:
     console.print("✓ setup complete — all commands enabled.",
                   tui.COLOR_HIGHLIGHT)
 
+    # Post-setup sanity check: now that the snapshot is pinned and any mirror is
+    # registered, validate the config + probe mirror reachability (setup_complete
+    # is True, so `config check` runs the full snapshot + reachability pass).
+    console.print("")
+    try:
+        session.cmd_config('check')
+    except Exception as _e:               # noqa: BLE001 — best-effort
+        console.print(f"(post-setup config check skipped: {_e})",
+                      tui.COLOR_INFO)
+
 
 def _prompt_machine_settings(session) -> bool:
     """Prompt for the per-machine values the config split moved into local.conf
