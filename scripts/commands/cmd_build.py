@@ -447,7 +447,7 @@ class BuildCommandsMixin(SessionState):
         # (same late-failure trap as iso build installer, 2026-06-11).
         if self.container is None:
             console.print(
-                "Run 'container init' first — grub-mkrescue (the final "
+                "Run 'container local init' first — grub-mkrescue (the final "
                 "ISO mastering step) runs inside the build container")
             return
 
@@ -542,7 +542,7 @@ class BuildCommandsMixin(SessionState):
         # 2026-06-11).
         if self.container is None:
             console.print(
-                "Run 'container init' first — grub-mkrescue (the final "
+                "Run 'container local init' first — grub-mkrescue (the final "
                 "ISO mastering step) runs inside the build container")
             return
 

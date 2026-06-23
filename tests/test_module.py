@@ -454,28 +454,112 @@ def test_local_conf_malformed_invalidates_config():
 
 
 def test_write_local_conf_round_trips():
-    """LOCAL-CONF: write_local_conf merges fields (incl. the [Registration]
-    sidecar) and read_local_conf reads them back; a second write preserves
-    prior fields."""
+    """LOCAL-CONF: write_local_conf merges fields and read_local_conf reads
+    them back; a second partial write preserves prior fields.  (Registration
+    moved to mirror.conf — see test_mirror_conf_registration_*.)"""
     import utils
     with tempfile.TemporaryDirectory() as tmp:
         cfg_path = _write_test_config(
             tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
         cfg = _build_config_from(tmp, cfg_path)
         utils.write_local_conf(cfg, mode='build', role='federation',
-                               setup_complete=True,
-                               registration={'alpha': 'builder-x'})
+                               setup_complete=True)
         _p = utils.read_local_conf(cfg)
         assert _p.get('Local', 'Mode') == 'build'
         assert _p.get('Local', 'Role') == 'federation'
         assert _p.getboolean('Local', 'SetupComplete') is True
-        assert _p.get('Registration', 'alpha') == 'builder-x'
-        # Merge: a second partial write keeps prior fields, adds a mirror.
-        utils.write_local_conf(cfg, registration={'beta': 'builder-y'})
+        # Merge: a second partial write keeps prior fields.
+        utils.write_local_conf(cfg, name='athena-x')
         _p2 = utils.read_local_conf(cfg)
         assert _p2.get('Local', 'Mode') == 'build'          # preserved
-        assert _p2.get('Registration', 'alpha') == 'builder-x'
-        assert _p2.get('Registration', 'beta') == 'builder-y'
+        assert _p2.get('Local', 'Name') == 'athena-x'
+
+
+def test_mirror_conf_registration_round_trips_and_migrates():
+    """Registration markers live in the signed mirror.conf: set/get round-trip,
+    and a legacy local.conf [Registration] migrates into mirror.conf."""
+    import utils
+    import mirror as _m
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert _m.get_registration(cfg) == {}
+        assert _m.set_registration(cfg, 'alpha', 'builder-x') is True
+        assert _m.get_registration(cfg) == {'alpha': 'builder-x'}
+        # write_local_conf no longer accepts a registration kwarg
+        import inspect
+        assert 'registration' not in inspect.signature(
+            utils.write_local_conf).parameters
+    # legacy local.conf [Registration] → migrates on first mirror.conf load
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        _lc = utils.local_conf_path(cfg)
+        with open(_lc, 'w') as _fh:
+            _fh.write('[Registration]\nbeta = builder-y\n')
+        assert _m.get_registration(cfg) == {'beta': 'builder-y'}
+
+
+def test_write_local_conf_writes_relocated_machine_keys():
+    """CONFIG-SPLIT: write_local_conf persists the keys relocated out of the
+    tracked config — builder Name, [Build] host tuning, [Repo] SigningKeyUid —
+    and BuildConfig reads them back with local.conf precedence."""
+    import utils
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        utils.write_local_conf(
+            cfg, name='athena-primary', max_parallel_builds=3,
+            build_cpus=4.0, build_memory='8g', docker_server='',
+            signing_key_uid='Athena Build <athena@local>')
+        _p = utils.read_local_conf(cfg)
+        assert _p.get('Local', 'Name') == 'athena-primary'
+        assert _p.getint('Build', 'MaxParallelBuilds') == 3
+        assert _p.get('Build', 'BuildMemory') == '8g'
+        assert _p.get('Repo', 'SigningKeyUid') == 'Athena Build <athena@local>'
+        # BuildConfig now reads these from local.conf (precedence over tracked).
+        cfg2 = _build_config_from(tmp, cfg_path)
+        assert cfg2.system_name == 'athena-primary'
+        assert cfg2.max_parallel_builds == 3
+        assert cfg2.build_memory == '8g'
+        assert cfg2.signing_key_uid == 'Athena Build <athena@local>'
+
+
+def test_remote_conf_helpers_round_trip():
+    """REMOTE-CONF: add_remote / list_remotes / delete_remote round-trip
+    through config/remote.conf, validate names, and BuildConfig derives
+    remote_build_host from the first configured remote."""
+    import utils
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.remotes == []
+        assert cfg.remote_build_host == ''
+        ok, _ = utils.add_remote(
+            cfg, name='athena', host='ssh://u@10.0.0.7',
+            ssh_key='config/remote_athena.key', max_parallel_builds=4,
+            build_memory='24g')
+        assert ok
+        # invalid names rejected (becomes a section/filename component)
+        assert utils.add_remote(cfg, name='bad/name', host='x')[0] is False
+        assert utils.add_remote(cfg, name='ok', host='')[0] is False
+        _rs = utils.list_remotes(cfg)
+        assert len(_rs) == 1 and _rs[0]['name'] == 'athena'
+        assert _rs[0]['host'] == 'ssh://u@10.0.0.7'
+        assert _rs[0]['max_parallel_builds'] == 4
+        assert _rs[0]['build_memory'] == '24g'
+        # BuildConfig picks up the first remote as remote_build_host.
+        cfg2 = _build_config_from(tmp, cfg_path)
+        assert cfg2.remote_build_host == 'ssh://u@10.0.0.7'
+        assert len(cfg2.remotes) == 1
+        # delete: gone from the registry, missing-name reported.
+        assert utils.delete_remote(cfg, 'athena')[0] is True
+        assert utils.delete_remote(cfg, 'athena')[0] is False
+        assert utils.list_remotes(cfg) == []
 
 
 class _FakeOnbSession:
@@ -590,11 +674,12 @@ def test_configured_summary_reports_state_and_warns_unregistered():
         # Federation peer, registered → summary names the mirror.
         cfg.system_role = 'federation'
         cfg.build_mode = 'build'
-        utils.write_local_conf(cfg, registration={'origin': 'bid-1'})
+        import mirror as _mreg
+        _mreg.set_registration(cfg, 'origin', 'bid-1')
         _s = onboarding.configured_summary(cfg)
         assert 'federation' in _s and 'build' in _s and 'origin' in _s
         # Federation peer, NO registration → warning.
-        os.remove(os.path.join(_tmp, 'config', 'local.conf'))
+        os.remove(_mreg.mirror_conf_path(cfg))   # drop the registration marker
         _s2 = onboarding.configured_summary(cfg)
         assert 'NO mirror is registered' in _s2
 
@@ -667,7 +752,9 @@ def test_onboarding_federation_happy_path_registers_and_records():
         assert _p.get('Local', 'Role') == 'federation'
         assert _p.get('Local', 'Mode') == 'build'
         assert _p.getboolean('Local', 'SetupComplete') is True
-        assert _p.get('Registration', 'h-example') == 'wsl-peer-1'
+        # Registration now recorded in the signed mirror.conf, not local.conf.
+        import mirror as _mreg
+        assert _mreg.get_registration(_sess.config).get('h-example') == 'wsl-peer-1'
 
 
 def test_onboarding_federation_cancel_at_url_leaves_unconfigured():
@@ -1242,7 +1329,7 @@ def test_iso_builds_gate_on_container_up_front():
         finally:
             build.console.print = _orig
         _joined = '\n'.join(_lines)
-        assert 'container init' in _joined, (_method_name, _joined)
+        assert 'container local init' in _joined, (_method_name, _joined)
         assert 'grub-mkrescue' in _joined, (_method_name, _joined)
         # None / False both signal "did not proceed"
         assert _r in (None, False), (_method_name, _r)
@@ -3785,7 +3872,10 @@ def test_build_conf_ingests_nonfree_components_and_tunnels_firmware():
     they ship in the pool + publish under non-free-firmware."""
     import configparser
     _cp = configparser.ConfigParser(interpolation=None)
-    _cp.read(os.path.join(_ROOT, 'config', 'build.conf'))
+    # [Mirror.*] now lives in distro.conf, [Source] Tunneled in build.conf —
+    # read both (configparser merges the list) to exercise the shipped pair.
+    _cp.read([os.path.join(_ROOT, 'config', 'distro.conf'),
+              os.path.join(_ROOT, 'config', 'build.conf')])
     _comps = {
         _cp.get(_s, 'Component', fallback='main')
         for _s in _cp.sections() if _s.startswith('Mirror.')
@@ -3972,8 +4062,9 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         # cmd_repo 'index' is now multi-token ('index full' / 'index
         # minimal'), and 'publish' takes 'git minimal' — covered by their
         # own routing tests below, not this verb-only matrix.
-        ('cmd_container', 'init',     'cmd_init_container'),
-        ('cmd_container', 'purge',    'cmd_container_purge'),
+        # cmd_container is now two-level ('container local <action>' /
+        # 'container remote <action>') — covered by
+        # test_container_two_level_command_surface_wired.
         # cmd_chroot 'build' is now multi-token ('build live' / 'build
         # installer') with default-to-live; covered by its own tests below.
         # 'verify' takes NO args (guarded) — covered by
@@ -7819,6 +7910,8 @@ def test_buildconfig_chroot_paths_under_shared_buildroot_parent():
         # is exercised against in production.
         shutil.copy(os.path.join(_ROOT, 'config', 'build.conf'),
                     os.path.join(_cfg_dir, 'build.conf'))
+        shutil.copy(os.path.join(_ROOT, 'config', 'distro.conf'),
+                    os.path.join(_cfg_dir, 'distro.conf'))
         for _name in ('pkg.list', 'live.list', 'installer.list'):
             with open(os.path.join(_cfg_dir, _name), 'w') as f: f.write('')
         _saved_argv = sys.argv
@@ -7856,6 +7949,8 @@ def test_buildconfig_creates_fork_source_dir():
         os.makedirs(_cfg_dir, exist_ok=True)
         shutil.copy(os.path.join(_ROOT, 'config', 'build.conf'),
                     os.path.join(_cfg_dir, 'build.conf'))
+        shutil.copy(os.path.join(_ROOT, 'config', 'distro.conf'),
+                    os.path.join(_cfg_dir, 'distro.conf'))
         for _name in ('pkg.list', 'live.list', 'installer.list'):
             with open(os.path.join(_cfg_dir, _name), 'w') as f: f.write('')
         _saved_argv = sys.argv
@@ -8797,12 +8892,13 @@ def test_shipped_build_conf_has_snapshot_enabled():
     source build.  Lock-in test — fails if anyone flips Enabled back to false."""
     import configparser
     p = configparser.ConfigParser()
-    cfg_path = os.path.join(_ROOT, 'config', 'build.conf')
-    assert os.path.isfile(cfg_path), f"shipped build.conf missing at {cfg_path}"
+    # [Snapshot] now lives in the upstream-definition file distro.conf.
+    cfg_path = os.path.join(_ROOT, 'config', 'distro.conf')
+    assert os.path.isfile(cfg_path), f"shipped distro.conf missing at {cfg_path}"
     p.read(cfg_path)
-    assert p.has_section('Snapshot'), "shipped build.conf is missing [Snapshot]"
+    assert p.has_section('Snapshot'), "shipped distro.conf is missing [Snapshot]"
     assert p.getboolean('Snapshot', 'Enabled') is True, (
-        "regression: shipped build.conf must default Snapshot.Enabled = true"
+        "regression: shipped distro.conf must default Snapshot.Enabled = true"
     )
 
 
@@ -22377,16 +22473,36 @@ def test_recipe_only_container_skips_local_docker():
 
 
 def test_remote_container_init_wired():
-    """`container init remote` builds a recipe-only (connect=False) container;
+    """`container remote init` builds a recipe-only (connect=False) container;
     remotebuild auto-inits it so it needs no local image."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _f:
         _b = _f.read()
     assert 'def cmd_init_remote_container' in _b
-    assert "args[0] == 'remote'" in _b and 'cmd_init_remote_container()' in _b
+    # two-level dispatch: `container remote init` → cmd_init_remote_container
+    assert "action == 'remote'" in _b
+    assert 'def _cmd_container_remote' in _b and 'cmd_init_remote_container()' in _b
     assert 'connect=False' in _b
     with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_source.py')) as _f:
         assert 'self.cmd_init_remote_container()' in _f.read()
+
+
+def test_container_two_level_command_surface_wired():
+    """CONFIG-SPLIT Chunk 4: `container` dispatches local/remote groups, and
+    the remote group routes add/list/delete/purge/test to handlers backed by
+    the remote.conf helpers."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _f:
+        _b = _f.read()
+    assert "action == 'local'" in _b and "action == 'remote'" in _b
+    for _m in ('def _cmd_container_local', 'def _cmd_container_remote',
+               'def cmd_container_local_test', 'def cmd_container_remote_add',
+               'def cmd_container_remote_list', 'def cmd_container_remote_delete',
+               'def cmd_container_remote_purge', 'def cmd_container_remote_test'):
+        assert _m in _b, _m
+    # the add/delete handlers go through the utils remote.conf helpers
+    assert 'utils.add_remote(' in _b and 'utils.delete_remote(' in _b
+    assert 'utils.list_remotes(' in _b
 
 
 def test_run_remote_decoupled_log_and_incremental_marker():
@@ -22497,7 +22613,7 @@ def test_container_init_remote_ensures_image():
     _e = _b.index('\n    def ', _s + 1)
     _body = _b[_s:_e]
     assert 'ensure_remote_image(' in _body
-    assert 'RemoteBuildHost' in _body
+    assert 'remote_build_host' in _body          # gated on a configured remote
     assert 'connect=False' in _body
 
 
@@ -28503,14 +28619,16 @@ def _build_session_for_setget(_tmp):
         # _set_mode persists to config/local.conf alongside build.conf;
         # point config_path into the tmp dir so the write lands there.
         config_path = os.path.join(_tmp, 'build.conf')
+        dir_config = _tmp                       # mirror.conf / local.conf live here
+        dir_log = os.path.join(_tmp, 'log')     # HMAC key dir
         # Registered federation peer — the default context so `set mode build`
         # passes the Phase-3 gate (first-system / unregistered refusals have
         # their own dedicated tests).
         system_role = 'federation'
     _sess.config = _Cfg()
     _sess.flags = MagicMock(dep_check_ready=True)
-    import utils as _utils
-    _utils.write_local_conf(_sess.config, registration={'origin': 'bid-1'})
+    import mirror as _mreg
+    _mreg.set_registration(_sess.config, 'origin', 'bid-1')
     return _sess, _build_mod
 
 
@@ -28627,7 +28745,7 @@ def test_cmd_set_mode_build_refused_when_unregistered():
         _sess, _build_mod = _build_session_for_setget(_tmp)
         _sess.config.system_role = ''               # un-onboarded
         # Drop the registration marker the helper wrote.
-        os.remove(os.path.join(_tmp, 'local.conf'))
+        os.remove(os.path.join(_tmp, 'mirror.conf'))   # registration now here
         _printed: 'list[str]' = []
         _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
         _sess.cmd_set('mode', 'build')
@@ -33744,6 +33862,58 @@ def test_mirror_update_state_merges_fields():
         assert _m.update_mirror_state(_cfg, 'ghost', current='T') is False
 
 
+def test_mirror_conf_signed_tamper_detected_and_reseal():
+    """CONFIG-SPLIT: mirror state lives in ONE HMAC-signed config/mirror.conf.
+    A manual edit fails verification → reads refuse (None/[]) and writes are
+    blocked until `mirror reseal` re-signs the acknowledged content."""
+    import json as _json
+    import os as _os
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='alpha', url='ssh://h/a',
+                      seed_pin='20260101T000000Z')
+        # one signed document, no per-name .state file
+        _conf = _m.mirror_conf_path(_cfg)
+        assert _os.path.isfile(_conf)
+        assert 'sig' in _json.load(open(_conf))
+        assert _m.mirror_conf_status(_cfg) == 'ok'
+        # TAMPER: hand-edit a value → signature no longer matches
+        _doc = _json.load(open(_conf))
+        _doc['mirrors']['alpha']['url'] = 'ssh://EVIL/x'
+        open(_conf, 'w').write(_json.dumps(_doc))
+        assert _m.mirror_conf_status(_cfg) == 'badsig'
+        assert _m.read_mirror_state(_cfg, 'alpha') is None   # refuse
+        assert _m.list_mirrors(_cfg) == []                   # refuse
+        assert _m.write_mirror_state(_cfg, 'beta', {'name': 'beta'}) is False
+        # RESEAL: operator acknowledges the edit → usable again
+        _ok, _ = _m.reseal_mirror_conf(_cfg)
+        assert _ok is True
+        assert _m.mirror_conf_status(_cfg) == 'ok'
+        assert _m.read_mirror_state(_cfg, 'alpha')['url'] == 'ssh://EVIL/x'
+
+
+def test_mirror_conf_migrates_legacy_state_files():
+    """A checkout with legacy config/mirror.<name>.state files auto-migrates
+    them into the signed mirror.conf on first read."""
+    import json as _json
+    import os as _os
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        for _n in ('one', 'two'):
+            open(_os.path.join(_td, f'mirror.{_n}.state'), 'w').write(
+                _json.dumps({'name': _n, 'url': f'ssh://h/{_n}'}))
+        assert _m.list_mirrors(_cfg) == ['one', 'two']
+        assert _os.path.isfile(_m.mirror_conf_path(_cfg))
+        assert _m.mirror_conf_status(_cfg) == 'ok'
+        assert _m.read_mirror_state(_cfg, 'one')['url'] == 'ssh://h/one'
+
+
 def test_cmd_mirror_dispatch_routes_subcommands():
     """`cmd_mirror` routes add/remove/list/summary/status/reconcile-neighbours."""
     import re
@@ -38008,12 +38178,16 @@ def main() -> int:
         test_fetch_source_versions_cached_on_disk,
         test_published_ledger_memoised,
         test_container_init_remote_ensures_image,
+        test_container_two_level_command_surface_wired,
         test_remotebuild_command_wired,
         test_recipe_only_container_skips_local_docker,
         test_remote_container_init_wired,
         test_local_conf_mode_overrides_build_conf,
         test_local_conf_absent_falls_back_to_build_conf,
         test_local_conf_malformed_invalidates_config,
+        test_write_local_conf_writes_relocated_machine_keys,
+        test_mirror_conf_registration_round_trips_and_migrates,
+        test_remote_conf_helpers_round_trip,
         test_write_local_conf_round_trips,
         test_command_allowed_gates_until_configured,
         test_configured_summary_reports_state_and_warns_unregistered,
@@ -39165,6 +39339,8 @@ def main() -> int:
         test_cmd_mirror_add_uses_peer_meta_over_operator_proto,
         test_cmd_mirror_add_signing_key_gate_blocks,
         test_mirror_add_remove_round_trip,
+        test_mirror_conf_signed_tamper_detected_and_reseal,
+        test_mirror_conf_migrates_legacy_state_files,
         test_mirror_add_rejects_duplicate_name_and_url,
         test_mirror_add_rejects_invalid_name_and_url,
         test_mirror_url_normalisation_and_lookup,
