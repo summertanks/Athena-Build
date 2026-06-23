@@ -191,6 +191,28 @@ def get_key_info(config) -> Optional[Dict[str, str]]:
     return keys[0] if keys else None
 
 
+def actual_signing_uid(config) -> Optional[str]:
+    """The primary UID of whatever signing key is ACTUALLY present in
+    signing_home — listed WITHOUT a UID filter, so it reports the truth even
+    when config.signing_key_uid is stale or wrong.  None if no key / no gpg.
+
+    Onboarding uses this so a federation peer adopts the IMPORTED tier-1 key's
+    real UID instead of trusting a (possibly mismatched) configured value."""
+    try:
+        home = signing_home(config)
+    except AttributeError:                # config without a signing homedir
+        return None
+    if not home or not os.path.isdir(home) or shutil.which('gpg') is None:
+        return None
+    proc = subprocess.run(
+        ['gpg', '--homedir', home, '--list-secret-keys', '--with-colons'],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
+    keys = parse_secret_keys_colons(proc.stdout)
+    return keys[0]['uid'] if keys and keys[0].get('uid') else None
+
+
 def import_key(homedir: str, key_path: str) -> 'Tuple[bool, str]':
     """Import a GPG key file (public or secret) into the gnupg ``homedir``
     via ``gpg --import``.  Returns ``(ok, detail)``.
