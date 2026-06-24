@@ -419,6 +419,87 @@ def probe_remote_writable(
     return True, f"{_pool} + {_coord} both mkdir-able + writable"
 
 
+def probe_remote_build_host(
+    host: str, user: str, key_path: Optional[str], timeout_s: int = 15,
+) -> 'tuple[bool, dict]':
+    """Single-round-trip readiness probe for a `source remotebuild` host.
+
+    Confirms the remote can actually run the ship-to-host build: the Docker
+    daemon is reachable by the ssh user (``docker version`` returns a server
+    version — which only works if the user is in the docker group or otherwise
+    privileged), python3 is present (``remote_build.py`` runs under it), and
+    reports the host's CPU/RAM so the caller can offer per-host build caps.
+
+    Returns ``(ok, info)`` where ``info`` always carries the parsed fields
+    ``{docker, in_docker_group, python3, cores, mem_gib}`` (best-effort
+    defaults) plus ``error`` when the ssh call itself failed.  ``ok`` is True
+    only when Docker is reachable AND python3 is present — the two hard
+    requirements; group membership/CPU/RAM are advisory.
+    """
+    import subprocess
+    _info = {'docker': '', 'in_docker_group': False, 'python3': '',
+             'cores': 0, 'mem_gib': 0.0, 'error': ''}
+    # One resilient remote script — every probe is guarded so a missing tool
+    # yields an empty value rather than aborting the whole round-trip.  Output
+    # is KEY=VALUE lines for robust parsing.
+    _remote_cmd = (
+        "echo \"DOCKER=$(docker version --format '{{.Server.Version}}' "
+        "2>/dev/null)\"; "
+        "echo \"GROUPS=$(id -nG 2>/dev/null)\"; "
+        "echo \"PYTHON3=$(python3 --version 2>&1)\"; "
+        "echo \"NPROC=$(nproc 2>/dev/null)\"; "
+        "echo \"MEMKB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo "
+        "2>/dev/null)\""
+    )
+    _argv = [
+        'ssh', '-o', 'BatchMode=yes',
+        '-o', f'ConnectTimeout={timeout_s}',
+        '-o', 'StrictHostKeyChecking=accept-new',
+    ]
+    if key_path:
+        _argv += ['-i', key_path]
+    _target = f"{user}@{host}" if user else host
+    _argv += [_target, _remote_cmd]
+    try:
+        _r = subprocess.run(
+            _argv, capture_output=True, text=True, timeout=timeout_s + 5)
+    except subprocess.TimeoutExpired:
+        _info['error'] = f"ssh timed out after {timeout_s}s"
+        return False, _info
+    except OSError as _e:
+        _info['error'] = f"ssh spawn failed: {_e}"
+        return False, _info
+    if _r.returncode != 0:
+        _info['error'] = (
+            f"ssh exit={_r.returncode}: {_r.stderr.strip()[:200] or 'no stderr'}")
+        return False, _info
+    for _line in (_r.stdout or '').splitlines():
+        if '=' not in _line:
+            continue
+        _k, _v = _line.split('=', 1)
+        _v = _v.strip()
+        if _k == 'DOCKER':
+            _info['docker'] = _v
+        elif _k == 'GROUPS':
+            _info['in_docker_group'] = 'docker' in _v.split()
+        elif _k == 'PYTHON3':
+            _info['python3'] = _v if _v.lower().startswith('python') else ''
+        elif _k == 'NPROC':
+            _info['cores'] = int(_v) if _v.isdigit() else 0
+        elif _k == 'MEMKB':
+            _info['mem_gib'] = (
+                round(int(_v) / (1024 * 1024), 1) if _v.isdigit() else 0.0)
+    _ok = bool(_info['docker']) and bool(_info['python3'])
+    if not _ok:
+        _missing = []
+        if not _info['docker']:
+            _missing.append("docker daemon unreachable by the ssh user")
+        if not _info['python3']:
+            _missing.append("python3 not found")
+        _info['error'] = "; ".join(_missing)
+    return _ok, _info
+
+
 def probe_http_inrelease(
     public_url: str, codename: str, timeout_s: int = 10,
 ) -> 'tuple[bool, str]':
