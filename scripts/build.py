@@ -1062,8 +1062,14 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 "container remote init: requires `cache build` first "
                 "(the recipe expands virtual Build-Depends from the cache)")
             return
-        _host = getattr(self.config, 'remote_build_host', '') or ''
-        if not _host:
+        # Every configured remote (fan-out targets); fall back to the legacy
+        # single remote_build_host when the registry is empty.
+        _remotes = list(getattr(self.config, 'remotes', []) or [])
+        if not _remotes:
+            _legacy = getattr(self.config, 'remote_build_host', '') or ''
+            if _legacy:
+                _remotes = [{'name': 'remote', 'host': _legacy, 'ssh_key': ''}]
+        if not _remotes:
             console.print(
                 "container remote init: no remote build host configured — add "
                 "one with `container remote add <name> <ssh://user@host>`")
@@ -1078,20 +1084,22 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             logger.error(f"BuildContainer(connect=False) raised: {e}")
             return
         self.flags.build_container_ready = True
-        # Ensure the build image for the selected snapshot is on the remote:
-        # confirm if present, LAN-transfer if this host has it cached, else
-        # note it builds on the first `source remotebuild`.
+        # Eagerly stage the build image for the selected snapshot on EACH
+        # remote: confirm if present, LAN-transfer if this host has it cached,
+        # else note it builds on the first `source remotebuild`.
         import remote_orchestrate as _ro
         _tag = self.container._image_tag
-        _state = _ro.ensure_remote_image(
-            _ro.parse_ssh_host(_host), _tag, log=console.print)
         _how = {'present':     'present on remote',
                 'transferred': 'transferred over the LAN',
-                'build':       'absent — builds on first remotebuild'}.get(
-                    _state, _state)
-        console.print(
-            f"  Remote build container ready — image {_tag}: {_how}",
-            tui.COLOR_HIGHLIGHT)
+                'build':       'absent — builds on first remotebuild'}
+        console.print(f"  Staging image {_tag} on {len(_remotes)} remote(s):",
+                      tui.COLOR_HIGHLIGHT)
+        for _r in _remotes:
+            _state = _ro.ensure_remote_image(
+                _ro.parse_ssh_host(_r['host']), _tag,
+                ssh_key=_r.get('ssh_key') or None, log=console.print)
+            console.print(f"    {_r['name']}: {_how.get(_state, _state)}",
+                          tui.COLOR_HIGHLIGHT)
 
 
     # ------------------------------------Command: build_bootable------------
@@ -1369,14 +1377,16 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
 
     def _cmd_container_remote(self, sub: str = '', *args):
         _table = {
-            'init':   'ensure the toolchain image on the configured remote',
-            'add':    'register a remote: add <name> <ssh://user@host> '
+            'init':   'eager-stage the toolchain image on EVERY configured remote',
+            'add':    'register a remote (guided: probes ssh/docker/cpu/ram, '
+                      'prompts caps): add [<name> <ssh://user@host>] '
                       '[key=<path>] [jobs=N] [cpus=F] [mem=8g]',
             'list':   'list configured remote build hosts',
-            'delete': 'remove a remote from the registry: delete <name>',
+            'delete': 'remove a remote + its copied key: delete <name>',
             'purge':  'remove athenalinux images/containers ON a remote: '
                       'purge <name>',
-            'test':   'ssh + docker reachability check: test [<name>]',
+            'test':   'sanity-check a remote (ssh/docker/python3/cpu/ram/image): '
+                      'test [<name>]',
         }
         if sub == 'init':
             return self.cmd_init_remote_container()
@@ -1423,35 +1433,141 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         self.config.remote_build_host = (
             self.config.remotes[0]['host'] if self.config.remotes else '')
 
+    @staticmethod
+    def _valid_remote_name(name: str) -> bool:
+        """Mirror utils.add_remote's name rule (ASCII alnum + '-'/'_', 1-64) so
+        we can validate BEFORE copying the key to config/<name>.key."""
+        return (isinstance(name, str) and 1 <= len(name) <= 64
+                and all(_c.isalnum() or _c in '-_' for _c in name))
+
     def cmd_container_remote_add(self, *args):
-        """container remote add <name> <ssh://user@host> [key=<path>] [jobs=N]
-        [cpus=F] [mem=8g] — register a remote ship-to-host build target."""
-        if len(args) < 2:
-            console.print(
-                "Usage: container remote add <name> <ssh://user@host> "
-                "[key=<path>] [jobs=N] [cpus=F] [mem=8g]", tui.COLOR_ERROR)
-            return
-        _name, _host = args[0], args[1]
+        """container remote add [<name> <ssh://user@host>] [key=<path>] [jobs=N]
+        [cpus=F] [mem=8g] — register a remote ship-to-host build target.
+
+        With name + host + key= all on the command line, runs non-interactively
+        (still probes + prints a summary).  Otherwise runs a guided
+        walk-through: prompts for whatever's missing (name, host, SSH key),
+        probes ssh + the remote's Docker/python3/CPU/RAM, then prompts for
+        per-host build caps (blank = no limit).  In both paths the key is copied
+        into config/<name>.key and that copied path is what's persisted + used
+        for `-i`.
+        """
+        import mirror as _m
+        import remote_orchestrate as _ro
+        _pos = [_a for _a in args if '=' not in _a]
         _opts: 'dict[str, str]' = {}
-        for _tok in args[2:]:
+        for _tok in args:
             if '=' in _tok:
                 _k, _v = _tok.split('=', 1)
                 _opts[_k.strip().lower()] = _v.strip()
-        try:
-            _jobs = int(_opts.get('jobs', '1'))
-            _cpus = float(_opts.get('cpus', '0'))
-        except ValueError:
-            console.print("container remote add: jobs must be an integer, "
-                          "cpus a number", tui.COLOR_ERROR)
+        # Non-interactive iff name+host positionals AND an explicit key= are all
+        # present; otherwise prompt for the missing pieces (and the caps).
+        _guided = not (len(_pos) >= 2 and _opts.get('key'))
+
+        # 1. name
+        _name = _pos[0] if _pos else ''
+        if not _name and _guided:
+            _name = Prompt(PROMPT_INPUT, "Remote name:").get_response().strip()
+        if not self._valid_remote_name(_name):
+            console.print(f"container remote add: invalid/missing remote name "
+                          f"{_name!r}", tui.COLOR_ERROR)
             return
-        _ok, _detail = utils.add_remote(
-            self.config, name=_name, host=_host, ssh_key=_opts.get('key', ''),
-            max_parallel_builds=_jobs, build_cpus=_cpus,
-            build_memory=_opts.get('mem', ''))
-        console.print(f"  {_detail}",
-                      tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+        # 2. host (ssh://user@host or user@host)
+        _host = _pos[1] if len(_pos) >= 2 else ''
+        if not _host and _guided:
+            _host = Prompt(PROMPT_INPUT,
+                           "SSH target (ssh://user@host):").get_response().strip()
+        if not _host:
+            console.print("container remote add: an ssh://user@host target is "
+                          "required", tui.COLOR_ERROR)
+            return
+        _uh = _ro.parse_ssh_host(_host)
+        _user, _sshhost = (_uh.split('@', 1) if '@' in _uh else ('', _uh))
+        # 3. SSH key → copy into config/<name>.key
+        _keysrc = _opts.get('key', '')
+        if not _keysrc and _guided:
+            _keysrc = Prompt(PROMPT_INPUT,
+                             "SSH key path:").get_response().strip()
+        if not _keysrc:
+            console.print("container remote add: an SSH key (key=<path>) is "
+                          "required", tui.COLOR_ERROR)
+            return
+        _keydst = os.path.join(self.config.dir_config, f"{_name}.key")
+        if not utils.copy_ssh_key(_keysrc, _keydst):
+            console.print(f"container remote add: cannot read SSH key {_keysrc}",
+                          tui.COLOR_ERROR)
+            return
+
+        # 4. Probe: TCP/22 → ssh auth → Docker/python3/CPU/RAM service check.
+        _ok, _det = _m.probe_dns_and_tcp(_sshhost, 22)
         if _ok:
-            self._refresh_remotes()
+            _ok, _det = _m.probe_ssh_auth(_sshhost, _user, _keydst)
+        if not _ok:
+            console.print(f"container remote add: ssh check failed — {_det}",
+                          tui.COLOR_ERROR)
+            return
+        _svc_ok, _info = _m.probe_remote_build_host(_sshhost, _user, _keydst)
+        if not _svc_ok:
+            console.print(
+                f"container remote add: remote not build-ready — {_info['error']}"
+                "\n  (need: Docker reachable by the ssh user + python3; check the "
+                "user is in the docker group and the daemon is running)",
+                tui.COLOR_ERROR)
+            return
+        if not _info['in_docker_group']:
+            console.print("  note: ssh user is not in the 'docker' group "
+                          "(daemon answered anyway — proceeding)",
+                          tui.COLOR_WARNING)
+
+        # 5. Per-host build caps.  Guided: prompt (blank = no limit / 1 job);
+        # non-interactive: take jobs=/cpus=/mem= (defaults 1/0/'').
+        if _guided:
+            _jobs_s = Prompt(
+                PROMPT_INPUT,
+                f"Max parallel builds [{_info['cores']} cores avail, default 1]:"
+            ).get_response().strip()
+            _cpus_s = Prompt(
+                PROMPT_INPUT,
+                "CPU limit per build in cores (blank = no limit):"
+            ).get_response().strip()
+            _mem_s = Prompt(
+                PROMPT_INPUT,
+                f"Memory limit per build, e.g. 8g [{_info['mem_gib']} GiB avail, "
+                "blank = no limit]:").get_response().strip()
+        else:
+            _jobs_s = _opts.get('jobs', '')
+            _cpus_s = _opts.get('cpus', '')
+            _mem_s = _opts.get('mem', '')
+        try:
+            _jobs = int(_jobs_s) if _jobs_s else 1
+            _cpus = float(_cpus_s) if _cpus_s else 0.0
+        except ValueError:
+            console.print("container remote add: jobs must be an integer, cpus a "
+                          "number", tui.COLOR_ERROR)
+            return
+        _mem = _mem_s
+
+        # 6. Persist + summary.
+        _ok, _detail = utils.add_remote(
+            self.config, name=_name, host=_host, ssh_key=_keydst,
+            max_parallel_builds=_jobs, build_cpus=_cpus, build_memory=_mem)
+        if not _ok:
+            console.print(f"  {_detail}", tui.COLOR_ERROR)
+            return
+        self._refresh_remotes()
+        console.print(f"  {_detail}", tui.COLOR_HIGHLIGHT)
+        console.print("  Remote build host ready:", tui.COLOR_HIGHLIGHT)
+        console.print(f"    host     : {_user + '@' if _user else ''}{_sshhost}")
+        console.print(f"    docker   : {_info['docker']}  "
+                      f"(group: {'yes' if _info['in_docker_group'] else 'no'})")
+        console.print(f"    python3  : {_info['python3']}")
+        console.print(f"    capacity : {_info['cores']} cores / "
+                      f"{_info['mem_gib']} GiB")
+        console.print(f"    limits   : jobs={_jobs} "
+                      f"cpus={_cpus or 'none'} mem={_mem or 'none'}")
+        console.print(f"    key      : {_keydst}")
+        console.print("    image    : run `container remote init` to stage the "
+                      "build image")
 
     def cmd_container_remote_list(self, *args):
         """List the configured remote build hosts + their per-host tuning."""
@@ -1469,20 +1585,34 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
 
     def cmd_container_remote_delete(self, *args):
         """Remove a remote from the registry (config only — use `purge` to
-        also clean its Docker state)."""
+        also clean its Docker state).  Also removes the copied config/<name>.key
+        so a re-add starts clean."""
         if not args:
             console.print("Usage: container remote delete <name>", tui.COLOR_ERROR)
             return
-        _ok, _detail = utils.delete_remote(self.config, args[0])
+        _name = args[0]
+        _ok, _detail = utils.delete_remote(self.config, _name)
         console.print(f"  {_detail}",
                       tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
         if _ok:
+            # Best-effort removal of the key we copied in at `add` time.
+            _keydst = os.path.join(self.config.dir_config, f"{_name}.key")
+            try:
+                os.remove(_keydst)
+                console.print(f"  removed {_keydst}", tui.COLOR_INFO)
+            except FileNotFoundError:
+                pass
+            except OSError as _e:
+                console.print(f"  could not remove {_keydst}: {_e}",
+                              tui.COLOR_WARNING)
             self._refresh_remotes()
 
     def cmd_container_remote_test(self, *args):
-        """ssh to each remote (or the named one) and confirm Docker answers —
-        the remote-host equivalent of `container local test`."""
-        import subprocess as _sp
+        """Sanity-check each remote (or the named one): ssh + Docker reachable
+        by the ssh user, python3 present, report CPU/RAM, and — if the build
+        container is initialised — whether the toolchain image is staged on the
+        remote.  The remote-host equivalent of `container local test`."""
+        import mirror as _m
         import remote_orchestrate as _ro
         _rs = utils.list_remotes(self.config)
         if args:
@@ -1493,20 +1623,27 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         if not _rs:
             console.print("  no remote build hosts configured", tui.COLOR_ERROR)
             return
+        # Image tag is known only once the (recipe-only) build container exists.
+        _tag = getattr(getattr(self, 'container', None), '_image_tag', '')
         for _r in _rs:
-            _host = _ro.parse_ssh_host(_r['host'])
-            _res = _sp.run(
-                ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', _host,
-                 'docker version --format "{{.Server.Version}}"'],
-                capture_output=True, text=True)
-            if _res.returncode == 0 and _res.stdout.strip():
-                console.print(
-                    f"  {_r['name']}: OK — {_host} docker {_res.stdout.strip()}",
-                    tui.COLOR_HIGHLIGHT)
-            else:
-                _err = (_res.stderr or _res.stdout or 'unreachable').strip()
-                console.print(f"  {_r['name']}: FAIL — {_host}: {_err[:120]}",
+            _uh = _ro.parse_ssh_host(_r['host'])
+            _user, _sshhost = (_uh.split('@', 1) if '@' in _uh else ('', _uh))
+            _ok, _info = _m.probe_remote_build_host(_sshhost, _user,
+                                                    _r['ssh_key'] or None)
+            if not _ok:
+                console.print(f"  {_r['name']}: FAIL — {_uh}: {_info['error']}",
                               tui.COLOR_ERROR)
+                continue
+            _img = ''
+            if _tag:
+                _present = _ro._has_image(_tag, ssh_host=_uh,
+                                          ssh_key=_r['ssh_key'] or None)
+                _img = f", image {'present' if _present else 'absent'}"
+            console.print(
+                f"  {_r['name']}: OK — {_uh} docker {_info['docker']} "
+                f"(group: {'yes' if _info['in_docker_group'] else 'no'}), "
+                f"python3 {_info['python3']}, {_info['cores']} cores / "
+                f"{_info['mem_gib']} GiB{_img}", tui.COLOR_HIGHLIGHT)
 
     def cmd_container_remote_purge(self, *args):
         """ssh to a remote and remove its athenalinux images + containers (free

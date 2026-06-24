@@ -1662,54 +1662,89 @@ class SourceCommandsMixin(SessionState):
         return ('failed', 0)
 
     def cmd_source_remotebuild(self, *args):
-        """source remotebuild <pkg> — build ONE source package on a remote
-        Docker host over SSH and recover the .debs locally.
+        """source remotebuild [force] [pkg|live|installer|recommended|all|<pkg> ...] [[profile,...]]
+        — build source packages on the configured remote Docker host(s) over
+        SSH, FANNING OUT across all remotes, and recover the .debs locally.
 
-        Ships the recipe (compose_recipe) + source + patches + Dockerfile +
-        remote_build.py to [Build] RemoteBuildHost, runs the build THERE (Docker
-        is local on the remote, so the container's bind mounts work), scps the
-        .debs back, then runs the SAME local post-build pipeline (segregate →
-        normalize → record) so the repo + build.json are identical to a local
-        build.  The local `source build` path is untouched.
+        Same command surface as `source build` (see its help): subset selectors,
+        named packages, `force`, and the `[profile]` override all apply.  Per
+        package the recipe (compose_recipe) + source + patches + Dockerfile +
+        remote_build.py are shipped to a remote; the build runs THERE (Docker is
+        local on the remote, so bind mounts work), the .debs are scp'd back, and
+        the SAME local post-build pipeline (segregate → normalize → record) runs
+        so the repo + build.json are identical to a local build.
+
+        Packages are distributed across remotes concurrently, each honoring its
+        own MaxParallelBuilds/BuildCpus/BuildMemory.  Tunneled packages are
+        acquired LOCALLY (network-bound, repo-locked) — they never ship to a
+        remote.  The local `source build` path is untouched.
         """
-        import shutil as _shutil
-        import tempfile as _tempfile
-        import uuid as _uuid
-        import remote_orchestrate as _ro
-
         if self.cache is None or self.dep_tree is None:
             console.print("remotebuild: run `cache build` + `cache parse` first",
                           tui.COLOR_ERROR)
             return
         if self.container is None:
-            # recipe-only container — no local Docker / image (the build runs
-            # on the remote).  Auto-init so remotebuild "just works" after
-            # `cache parse`, even on a host with no local build image.
+            # recipe-only container — no local Docker / image (the build runs on
+            # the remote).  Auto-init so remotebuild "just works" after `cache
+            # parse` (also eager-stages the image on every configured remote).
             self.cmd_init_remote_container()
         if self.container is None:
             return                       # init failed — message already printed
-        _host = getattr(self.config, 'remote_build_host', '') or ''
-        if not _host:
+
+        # Fan-out targets: every configured remote, falling back to the legacy
+        # single [Build] RemoteBuildHost when the registry is empty.
+        _remotes = list(getattr(self.config, 'remotes', []) or [])
+        if not _remotes:
+            _legacy = getattr(self.config, 'remote_build_host', '') or ''
+            if _legacy:
+                _remotes = [{'name': 'remote', 'host': _legacy, 'ssh_key': '',
+                             'max_parallel_builds': 1, 'build_cpus': 0.0,
+                             'build_memory': ''}]
+        if not _remotes:
             console.print(
-                "remotebuild: set `[Build] RemoteBuildHost = ssh://user@host` "
-                "in config (or config/local.conf) first", tui.COLOR_ERROR)
+                "remotebuild: no remote build host configured — add one with "
+                "`container remote add <name> <ssh://user@host>`",
+                tui.COLOR_ERROR)
             return
-        if not args:
-            console.print("Usage: source remotebuild <pkg>", tui.COLOR_ERROR)
+
+        # Shared front-half with `source build` (remote=True → update-mode off).
+        _status, _wl = self._resolve_build_workload(args, remote=True)
+        if _status == 'error':
             return
-        _name = args[0]
-        _src = (self.dep_tree.selected_srcs.get(_name)
-                or (self.udeb_dep_tree.selected_srcs.get(_name)
-                    if self.udeb_dep_tree is not None else None))
-        if _src is None:
-            console.print(f"Unknown package: {_name}", tui.COLOR_ERROR)
-            return
+        assert _wl is not None
+        self._remotebuild_fanout(
+            _wl['packages'], _remotes, _wl['profile_override'], _wl['force'])
+
+    def _remotebuild_one_source(self, _src, _slot, _profile_override, _force,
+                                register_proc=None) -> 'tuple[str, int]':
+        """Build ONE source on the remote `_slot` (a dict with ssh_host/ssh_key/
+        build_cpus/build_memory) and run the local post-build pipeline.  Returns
+        ('built'|'skipped'|'failed'|'transport', 0).
+
+        Thread-safety: per-call scratch + bundle dirs; build records are
+        per-package atomic writes; repo dest writes are serialized by
+        buildcontainer._REPO_DEST_LOCK; asg_ledger is loaded ONCE by the caller
+        (_resolve_build_workload) before the pool, never reloaded here.
+        'transport' signals an ssh/scp failure so the scheduler can re-queue this
+        package on another remote.
+        """
+        import shutil as _shutil
+        import tempfile as _tempfile
+        import uuid as _uuid
+        import remote_orchestrate as _ro
+        assert self.container is not None
+
+        # Skip-if-built (unless force) — mirror _build_one_source's gate so
+        # `remotebuild all` doesn't rebuild the whole corpus every run.
+        _expected = self._predicted_files_for_source(_src.package)
+        if not _force and self.container.check_build(_src, _expected):
+            logger.info(f"Package {_src.package} already built [SKIPPED]")
+            return ('skipped', 0)
 
         _recipe = self.container.compose_recipe(_src)
         if _recipe is None:
-            console.print(f"remotebuild: {_name} has no .dsc — skipped",
-                          tui.COLOR_ERROR)
-            return
+            logger.warning(f"remotebuild: {_src.package} has no .dsc — skipped")
+            return ('skipped', 0)
 
         # phase=entry record (same as a local build) — a crash mid-remote-build
         # classifies as 'interrupted'.
@@ -1721,19 +1756,15 @@ class SourceCommandsMixin(SessionState):
 
         _source_files = [os.path.join(self.config.dir_source, _f)
                          for _f in _src.files]
-        _ssh_host = _ro.parse_ssh_host(_host)
         _scratch = os.path.join(self.config.dir_build_stage, _uuid.uuid4().hex)
         _remote_dir = (f"/tmp/athena-remotebuild-{_src.package}-"
                        f"{_uuid.uuid4().hex[:8]}")
+        os.makedirs(self.container.buildlog_path, exist_ok=True)
+        # Remote build output streams to the per-package log file
+        # (log/build/<pkg>) — same as a local build's container log — NOT the
+        # console (N workers would interleave).
+        _logpath = os.path.join(self.container.buildlog_path, _src.package)
 
-        console.print(f"remotebuild {_src.package} on {_ssh_host} …",
-                      tui.COLOR_INFO)
-        # Fast-path the toolchain image: if the remote lacks it but this host
-        # has it cached, stream it over the LAN instead of letting the remote
-        # rebuild from the internet (minutes vs tens of minutes on a thin link).
-        _img = _ro.ensure_remote_image(
-            _ssh_host, _recipe['image_tag'], log=console.print)
-        console.print(f"  remote image: {_img}", tui.COLOR_INFO)
         with _tempfile.TemporaryDirectory() as _bundle:
             _ro.stage_bundle(
                 _bundle,
@@ -1741,30 +1772,36 @@ class SourceCommandsMixin(SessionState):
                 source_files=_source_files,
                 patch_dir=_recipe['patch_dir'],
                 recipe=_recipe,
-                build_cpus=getattr(self.config, 'build_cpus', 0) or None,
-                build_memory=getattr(self.config, 'build_memory', '') or None,
+                build_cpus=_slot.get('build_cpus') or None,
+                build_memory=_slot.get('build_memory') or None,
                 remote_build_py=os.path.join(
                     self.config.working_dir, 'scripts', 'remote_build.py'),
             )
-            # Remote build output goes to the per-package log file
-            # (log/build/<pkg>) — same as a local build's container log — NOT
-            # the console.  A spinner gives liveness since the stream is silent.
-            os.makedirs(self.container.buildlog_path, exist_ok=True)
-            _logpath = os.path.join(self.container.buildlog_path, _src.package)
-            console.print(
-                f"  building remotely — streaming to {_logpath} "
-                "(tail it to watch)", tui.COLOR_INFO)
-            _spin = Spinner(f"remotebuild {_src.package} on {_ssh_host}")
             try:
                 with open(_logpath, 'w') as _lf:
                     def _to_log(_m):
                         _lf.write(str(_m) + '\n')
                         _lf.flush()
                     _exit, _outputs = _ro.run_remote(
-                        _ssh_host, _bundle, _remote_dir, _scratch, log=_to_log)
-            finally:
-                _spin.done()
+                        _slot['ssh_host'], _bundle, _remote_dir, _scratch,
+                        ssh_key=_slot.get('ssh_key') or None,
+                        register_proc=register_proc, log=_to_log)
+            except OSError as _e:
+                logger.error(f"remotebuild {_src.package}: {_e}")
+                self.container._record_phase(
+                    _src.package, phase='failed', exit_code=1)
+                _shutil.rmtree(_scratch, ignore_errors=True)
+                return ('failed', 0)
 
+        if _exit in (10, 11):
+            # mkdir / scp failure → host transport problem; let the scheduler
+            # re-queue this package on another remote (no failed record — the
+            # build never ran).
+            logger.warning(
+                f"remotebuild {_src.package}: transport failure (exit {_exit}) "
+                f"on {_slot['ssh_host']}")
+            _shutil.rmtree(_scratch, ignore_errors=True)
+            return ('transport', 0)
         if _exit != 0 or not _outputs:
             console.print(
                 f"  remotebuild {_src.package} [FAIL] — remote exit {_exit}, "
@@ -1772,17 +1809,10 @@ class SourceCommandsMixin(SessionState):
             self.container._record_phase(
                 _src.package, phase='failed', exit_code=_exit)
             _shutil.rmtree(_scratch, ignore_errors=True)
-            return
+            return ('failed', 0)
 
-        # Load the asg ledger from the LOCAL signed manifest before normalize,
-        # exactly as cmd_source_build does (see the unconditional load there).
-        # Without it `_normalize_built_artifacts` sees asg_ledger=None, the
-        # lineage-continuation trigger can't fire, and a remote rebuild of a
-        # source whose binaries were previously published at `+asg<R>u<N>`
-        # silently ships pristine — losing the lineage and regressing sibling
-        # metas that pinned the prior version (libreoffice: +asg1u1 → pristine).
-        self.container.asg_ledger = repo_audit.published_ledger(self.config)
         # local post-build pipeline — identical bookkeeping to a local build
+        # (asg_ledger already loaded once by _resolve_build_workload).
         _emitted = self.container._segregate_built_artifacts(_src, _scratch)
         _final = self.container._normalize_built_artifacts(
             _src, _emitted, bool(_recipe['patch_list']))
@@ -1800,9 +1830,376 @@ class SourceCommandsMixin(SessionState):
             outputs=sorted(os.path.basename(_p) for _p in _final),
             output_hashes=_hashes)
         _shutil.rmtree(_scratch, ignore_errors=True)
+        logger.info(
+            f"remotebuild {_src.package} [PASS] — {len(_final)} artifact(s)")
+        return ('built', 0)
+
+    def _remotebuild_fanout(self, packages, remotes, profile_override, force):
+        """Distribute `packages` across `remotes` concurrently — each remote
+        runs up to its own MaxParallelBuilds — via _remotebuild_one_source.
+        Tunneled packages are acquired locally + serial.  A global
+        ThreadPoolExecutor sized to the sum of per-remote slots drives the
+        fan-out; the heavy-package drain + FIRST_COMPLETED loop generalize
+        cmd_source_build's single-host scheduler (degenerates to it for one
+        remote)."""
+        import concurrent.futures as _cf
+        import remote_orchestrate as _ro
+        import signal as _signal
+        import threading as _threading
+        assert self.container is not None
+
+        _built = _tunneled = _failed = _skipped = 0
+        _tunnel_pkgs = [_p for _p in packages
+                        if _p.package in self.config.tunnel_packages]
+        _build_pkgs = [_p for _p in packages
+                       if _p.package not in self.config.tunnel_packages]
+
+        _total = len(_tunnel_pkgs) + len(_build_pkgs)
+        if not _total:
+            console.print("No source packages to build")
+            return
+
+        # Stage the toolchain image on EACH remote once (a per-worker
+        # ensure_remote_image would race N concurrent docker-loads per host).
+        _tag = self.container._image_tag
+        for _r in remotes:
+            _st = _ro.ensure_remote_image(
+                _ro.parse_ssh_host(_r['host']), _tag,
+                ssh_key=_r.get('ssh_key') or None, log=console.print)
+            console.print(f"  image on {_r['name']}: {_st}", tui.COLOR_INFO)
+
+        progress_bar = ProgressBar(
+            label='Remote Build', label_width=24, maxvalue=_total,
+            show_rate=False)
+
+        # Tunnels: local + serial (network I/O + apt repo lock) — the SAME path
+        # `source build` uses.
+        for _p in _tunnel_pkgs:
+            progress_bar.label(_p.package)
+            _res, _ = self._build_one_source(_p, force, False, None,
+                                             profile_override)
+            if _res == 'tunneled':
+                _tunneled += 1
+            elif _res == 'failed':
+                _failed += 1
+            else:
+                _skipped += 1
+            progress_bar.step(1)
+
+        # Build packages: ONE global pool, per-remote slot budgets.
+        _slots = [{
+            'name':         _r['name'],
+            'ssh_host':     _ro.parse_ssh_host(_r['host']),
+            'ssh_key':      _r.get('ssh_key') or '',
+            'build_cpus':   _r.get('build_cpus') or 0.0,
+            'build_memory': _r.get('build_memory') or '',
+            'free':         max(1, int(_r.get('max_parallel_builds', 1) or 1)),
+            'alive':        True,
+        } for _r in remotes]
+        _total_slots = sum(_s['free'] for _s in _slots) or 1
+        if _build_pkgs:
+            progress_bar.label(f'Remote Build ({_total_slots} slots)')
+
+        _heavy = self.config.heavy_packages
+        _pending = list(_build_pkgs)
+        _in_flight: 'dict' = {}              # Future -> (src, slot)
+        _live_procs: 'list' = []             # ssh Popens (SIGINT abort)
+        _procs_lock = _threading.Lock()
+        _shutdown = _threading.Event()
+
+        def _register_proc(_pr):
+            with _procs_lock:
+                _live_procs.append(_pr)
+
+        def _worker(_src, _slot):
+            return self._remotebuild_one_source(
+                _src, _slot, profile_override, force,
+                register_proc=_register_proc)
+
+        def _heavy_active():
+            return any(_s.package in _heavy for _s, _ in _in_flight.values())
+
+        def _free_slot():
+            for _s in _slots:
+                if _s['alive'] and _s['free'] > 0:
+                    return _s
+            return None
+
+        def _can_submit():
+            if not _pending or _shutdown.is_set():
+                return False
+            if _heavy_active():
+                return False        # a heavy build blocks every new submission
+            _nxt = _pending[0]
+            if _nxt.package in _heavy and _in_flight:
+                return False        # heavy waits for a full fleet drain
+            return _free_slot() is not None
+
+        def _on_sigint(_sig, _frame):
+            logger.warning(
+                "SIGINT during remote fan-out — terminating live ssh builds; "
+                "remote containers may linger (`container remote purge`)")
+            _shutdown.set()
+            with _procs_lock:
+                for _pr in _live_procs:
+                    try:
+                        _pr.terminate()
+                    except Exception:    # noqa: BLE001
+                        pass
+
+        _old_sigint = None
+        try:
+            _old_sigint = _signal.signal(_signal.SIGINT, _on_sigint)
+        except ValueError:
+            logger.warning(
+                "remotebuild: not on the main thread — SIGINT abort of "
+                "in-flight remote builds unavailable")
+
+        _executor = _cf.ThreadPoolExecutor(max_workers=_total_slots)
+        try:
+            _break = False
+            while (_pending or _in_flight) and not _break:
+                while _can_submit():
+                    _slot = _free_slot()
+                    _nxt = _pending.pop(0)
+                    _slot['free'] -= 1               # type: ignore[index]
+                    _fut = _executor.submit(_worker, _nxt, _slot)
+                    _in_flight[_fut] = (_nxt, _slot)
+                if not _in_flight:
+                    break            # nothing in flight + can't submit → done
+                _done, _ = _cf.wait(list(_in_flight.keys()),
+                                    return_when=_cf.FIRST_COMPLETED)
+                for _fut in _done:
+                    _src, _slot = _in_flight.pop(_fut)
+                    _slot['free'] += 1
+                    try:
+                        _res, _ = _fut.result()
+                    except Exception as _e:    # noqa: BLE001
+                        logger.error(
+                            f"remote worker {_src.package} raised: {_e}")
+                        _res = 'failed'
+                    if _res == 'transport':
+                        # host down — mark it dead + re-queue elsewhere (bundles
+                        # are host-agnostic); NOT a terminal result → no step.
+                        _slot['alive'] = False
+                        if any(_s['alive'] for _s in _slots):
+                            logger.warning(
+                                f"remote {_slot['name']} down — re-queueing "
+                                f"{_src.package}")
+                            _pending.append(_src)
+                        else:
+                            console.print("  all remotes down — aborting",
+                                          tui.COLOR_ERROR)
+                            _failed += 1
+                            progress_bar.step(1)
+                            _break = True
+                        continue
+                    if _res == 'built':
+                        _built += 1
+                    elif _res == 'failed':
+                        _failed += 1
+                    else:
+                        _skipped += 1
+                    progress_bar.step(1)
+                    if _shutdown.is_set():
+                        _break = True
+                        break
+        finally:
+            _executor.shutdown(wait=True, cancel_futures=True)
+            if _old_sigint is not None:
+                _signal.signal(_signal.SIGINT, _old_sigint)
+
+        progress_bar.close(persist=True)
+        self.last_source_build_counts = {
+            'built':    _built,
+            'tunneled': _tunneled,
+            'failed':   _failed,
+            'skipped':  _skipped,
+        }
         console.print(
-            f"  remotebuild {_src.package} [PASS] — {len(_final)} artifact(s) "
-            "into repo/", tui.COLOR_HIGHLIGHT)
+            f"Remote build complete: {_built} built, {_tunneled} tunneled, "
+            f"{_skipped} skipped, {_failed} failed",
+            tui.COLOR_ERROR if _failed else tui.COLOR_HIGHLIGHT)
+
+    def _resolve_build_workload(self, args, *, remote: bool = False):
+        """Shared front-half of `source build` / `source remotebuild`: parse
+        args, load the asg ledger, (local only) auto-detect update mode, resolve
+        the subset/named-packages into a `packages` list, and derive the bump
+        flags.  Prints the same subset/profile banners `source build` always
+        has.
+
+        Returns one of:
+          ('error', None)   — a message was printed; the caller should return.
+          ('update', None)  — the caller should `return self._do_update_build()`
+                              (never returned when ``remote=True``).
+          ('ok', workload)  — ``workload`` is a dict with keys ``packages``,
+                              ``force``, ``bump_active``, ``bump_release``,
+                              ``profile_override``, ``subset``.
+        """
+        # Eager mode-validation for the 'indl' subset — reject outside build
+        # mode with a clear "wrong mode" message.
+        if ('indl' in (_a.strip().lower() for _a in args)
+                and self.config.build_mode != 'build'):
+            console.print(
+                "source build indl: only valid under "
+                "`[Build] Mode = build`.  Did you mean `source "
+                "build all`?",
+                tui.COLOR_ERROR)
+            return ('error', None)
+
+        # Parse args via the static helper for testability.
+        _err, _force, _subset, _names, _profile_override = \
+            self._parse_source_build_args(args)
+        if _err:
+            console.print(_err)
+            return ('error', None)
+
+        # Load the asg ledger from the LOCAL signed manifest BEFORE any build
+        # path branches (lineage continuation; see the long note this replaces).
+        # Loading it here ALSO satisfies the fan-out's "load once before the
+        # worker pool" requirement — a per-worker reload would race N ways.
+        if self.container is not None:
+            self.container.asg_ledger = repo_audit.published_ledger(
+                self.config)
+
+        # A subset/all/bare invocation AUTO-DETECTS update mode (LOCAL builds
+        # only — remote update builds are out of scope in v1).  Explicit names
+        # or a [profile] override opt out.
+        if (not remote and not _names and _profile_override is None
+                and self._update_build_pending()):
+            return ('update', None)
+
+        # Profile override implies force (the .result cache wouldn't reflect it).
+        if _profile_override is not None and not _force:
+            console.print(
+                f"Profile override [{','.join(_profile_override) or 'empty'}] "
+                f"implies force (cache key wouldn't reflect override)",
+                tui.COLOR_INFO,
+            )
+            _force = True
+
+        # In build mode, bare 'pkg' default → 'indl' (operator-visible label).
+        if (self.config.build_mode == 'build'
+                and _subset == 'pkg'
+                and not _names):
+            _subset = 'indl'
+        if _force:
+            console.print("Force mode: skipping build cache checks")
+        if _subset == 'pkg':
+            console.print("Pkg mode: building pkg.list closure only "
+                          "(no live, installer, or extras)")
+        elif _subset == 'live':
+            console.print("Live mode: building live-exclusive sources only")
+        elif _subset == 'installer':
+            console.print("Installer mode: building udeb closure + "
+                          "installer-exclusive deb sources")
+        elif _subset == 'recommended':
+            console.print("Recommended mode: building extras-only sources")
+        elif _subset == 'all':
+            console.print("All mode: building every selected source "
+                          "(pkg + live + installer + recommended union)")
+        elif _subset == 'indl':
+            console.print(
+                "Indl subset: building every source in "
+                "config/build_pkg.list")
+        if _profile_override is not None:
+            console.print(
+                f"Profile override active: DEB_BUILD_PROFILES + "
+                f"DEB_BUILD_OPTIONS = '{' '.join(_profile_override)}' "
+                f"(was: profiles='{' '.join(sorted(self.config.build_profiles))}', "
+                f"options='{' '.join(sorted(self.config.build_options))}')",
+                tui.COLOR_INFO,
+            )
+
+        # Pick the package set per the mode resolved above.  Lookups via
+        # dep_tree first then udeb_dep_tree return the same shared Source either
+        # way (source_hashtable), so an overlapping name dedupes naturally.
+        assert self.dep_tree is not None
+        if _names:
+            packages = []
+            for name in _names:
+                src = (self.dep_tree.selected_srcs.get(name)
+                       or (self.udeb_dep_tree.selected_srcs.get(name)
+                           if self.udeb_dep_tree is not None else None))
+                if src is None:
+                    console.print(f"Unknown package: {name}")
+                    return ('error', None)
+                packages.append(src)
+        elif _subset == 'recommended':
+            packages = [
+                self.dep_tree.selected_srcs[n]
+                for n in sorted(self.dep_tree.extras_src_names)
+                if n in self.dep_tree.selected_srcs
+            ]
+        elif _subset == 'live':
+            packages = [
+                self.dep_tree.selected_srcs[n]
+                for n in sorted(self.dep_tree.live_exclusive_src_names)
+                if n in self.dep_tree.selected_srcs
+            ]
+        elif _subset == 'installer':
+            _src_names_set = set(self.dep_tree.installer_exclusive_src_names)
+            if self.udeb_dep_tree is not None:
+                _src_names_set |= set(self.udeb_dep_tree.selected_srcs.keys())
+            packages = []
+            for _name in sorted(_src_names_set):
+                _s = (self.dep_tree.selected_srcs.get(_name)
+                      or (self.udeb_dep_tree.selected_srcs.get(_name)
+                          if self.udeb_dep_tree is not None else None))
+                if _s:
+                    packages.append(_s)
+        elif _subset == 'all':
+            _src_names_set = set(self.dep_tree.selected_srcs.keys())
+            if self.udeb_dep_tree is not None:
+                _src_names_set |= set(self.udeb_dep_tree.selected_srcs.keys())
+            packages = []
+            for _name in sorted(_src_names_set):
+                _s = (self.dep_tree.selected_srcs.get(_name)
+                      or (self.udeb_dep_tree.selected_srcs.get(_name)
+                          if self.udeb_dep_tree is not None else None))
+                if _s:
+                    packages.append(_s)
+        elif _subset == 'indl':
+            packages = [
+                _s for _name, _s in sorted(
+                    self.dep_tree.selected_srcs.items())
+            ]
+        else:
+            # subset == 'pkg' (bare `source build` default): pkg.list closure
+            # only — selected_srcs minus live/installer/extras.
+            _exclude = (self.dep_tree.live_exclusive_src_names |
+                        self.dep_tree.installer_exclusive_src_names |
+                        self.dep_tree.extras_src_names)
+            packages = [
+                _s for _name, _s in self.dep_tree.selected_srcs.items()
+                if _name not in _exclude
+            ]
+
+        if not packages:
+            console.print("No source packages to build")
+            return ('error', None)
+
+        # bump-aware build: only meaningful inside _do_update_build's
+        # snapshot-delta workflow (gated on _in_update_build).
+        _bump_active = (self.container is not None
+                        and getattr(self.container, 'asg_ledger', None) is not None
+                        and self._in_update_build)
+        _bump_release = None
+        if _bump_active:
+            try:
+                _bump_release = int(
+                    str(self.config.build_version).strip('"').strip("'"))
+            except (TypeError, ValueError):
+                _bump_active = False   # can't derive N → stamper skips too
+
+        return ('ok', {
+            'packages':         packages,
+            'force':            _force,
+            'bump_active':      _bump_active,
+            'bump_release':     _bump_release,
+            'profile_override': _profile_override,
+            'subset':           _subset,
+        })
 
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
@@ -1866,14 +2263,6 @@ class SourceCommandsMixin(SessionState):
         # build mode BEFORE any flag-prereq checks so the operator gets
         # a clear "wrong mode" message instead of a stale "Run 'source
         # sync' first" hint.
-        if ('indl' in (_a.strip().lower() for _a in args)
-                and self.config.build_mode != 'build'):
-            console.print(
-                "source build indl: only valid under "
-                "`[Build] Mode = build`.  Did you mean `source "
-                "build all`?",
-                tui.COLOR_ERROR)
-            return
         if not self.flags.download_ready:
             console.print("Run 'source sync' first")
             return
@@ -1887,187 +2276,19 @@ class SourceCommandsMixin(SessionState):
         # True on the success-tail (~L7115).
         self.flags.source_build_ready = False
 
-        # Parse args via the static helper for testability.
-        _err, _force, _subset, _names, _profile_override = \
-            self._parse_source_build_args(args)
-        if _err:
-            console.print(_err)
+        # Shared front-half: parse + ledger load + update-detect + subset
+        # resolution + bump derivation (see _resolve_build_workload).
+        _status, _wl = self._resolve_build_workload(args, remote=False)
+        if _status == 'error':
             return
-
-        # Load the asg ledger from the LOCAL signed manifest BEFORE any
-        # build path branches.  Previously the ledger was only loaded in
-        # UPDATE mode (via _do_update_build), so a NORMAL-mode rebuild of
-        # a source whose binaries had previously been published at
-        # `+asg<R>u<N>` would silently ship pristine — losing the
-        # lineage and breaking dep pins in sibling-source metas that
-        # captured the previous version.  Loading unconditionally lets
-        # `_normalize_built_artifacts` see the lineage and bump
-        # monotonically against the manifest.  No mirrors needed — the
-        # manifest is local.
-        if self.container is not None:
-            self.container.asg_ledger = repo_audit.published_ledger(
-                self.config)
-
-        # A subset/all/bare invocation AUTO-DETECTS update mode — when a
-        # published base exists and current is ahead of it, rebuild the
-        # published→current SOURCE delta (stamped `+asg<R>u<N>`) instead
-        # of a plain subset build.  Explicit package names or a [profile]
-        # override opt out (manual builds).  The operator runs the same
-        # `source build [all|live|installer]`; we tell them which we ran.
-        if (not _names and _profile_override is None
-                and self._update_build_pending()):
+        if _status == 'update':
             return self._do_update_build()
-
-        # Profile override implies force, because the .result cache from a
-        # prior build under different profiles would otherwise short-circuit
-        # our rebuild.  Surface this to the operator before silently flipping.
-        if _profile_override is not None and not _force:
-            console.print(
-                f"Profile override [{','.join(_profile_override) or 'empty'}] "
-                f"implies force (cache key wouldn't reflect override)",
-                tui.COLOR_INFO,
-            )
-            _force = True
-
-        # In build mode, the bare 'pkg' default gets rewritten to
-        # 'indl' so the operator-visible label matches their mode.
-        # Functionally identical (pkg's excludes are empty in build
-        # mode), this just removes ambiguity from the printed progress.
-        if (self.config.build_mode == 'build'
-                and _subset == 'pkg'
-                and not _names):
-            _subset = 'indl'
-        # Mode-validation for 'indl' subset already ran at the top of
-        # cmd_source_build (eager-fail before flag gates).
-        if _force:
-            console.print("Force mode: skipping build cache checks")
-        if _subset == 'pkg':
-            console.print("Pkg mode: building pkg.list closure only "
-                          "(no live, installer, or extras)")
-        elif _subset == 'live':
-            console.print("Live mode: building live-exclusive sources only")
-        elif _subset == 'installer':
-            console.print("Installer mode: building udeb closure + "
-                          "installer-exclusive deb sources")
-        elif _subset == 'recommended':
-            console.print("Recommended mode: building extras-only sources")
-        elif _subset == 'all':
-            console.print("All mode: building every selected source "
-                          "(pkg + live + installer + recommended union)")
-        elif _subset == 'indl':
-            console.print(
-                "Indl subset: building every source in "
-                "config/build_pkg.list")
-        if _profile_override is not None:
-            console.print(
-                f"Profile override active: DEB_BUILD_PROFILES + "
-                f"DEB_BUILD_OPTIONS = '{' '.join(_profile_override)}' "
-                f"(was: profiles='{' '.join(sorted(self.config.build_profiles))}', "
-                f"options='{' '.join(sorted(self.config.build_options))}')",
-                tui.COLOR_INFO,
-            )
-
-        # Pick the package set per the mode resolved above.
-        # Each subset is a tightly-scoped slice of the unified source
-        # corpus; chroot build live needs source build + source build
-        # live; chroot build installer needs source build + source build
-        # installer.  Sources frequently overlap between deb and udeb worlds
-        # (e.g. cdebconf produces both .deb and .udeb outputs from one
-        # dpkg-buildpackage run) — looking up via dep_tree first then udeb
-        # tree returns the same Source instance either way (shared via
-        # source_hashtable), so building once produces both kinds of
-        # artefacts at the same time.
-        if _names:
-            packages = []
-            for name in _names:
-                src = (self.dep_tree.selected_srcs.get(name)
-                       or (self.udeb_dep_tree.selected_srcs.get(name)
-                           if self.udeb_dep_tree is not None else None))
-                if src is None:
-                    console.print(f"Unknown package: {name}")
-                    return
-                packages.append(src)
-        elif _subset == 'recommended':
-            # `recommended` mode: sources whose every binary is in
-            # extras_pkg_names (Recommends-only).  Unchanged from Phase 1.
-            packages = [
-                self.dep_tree.selected_srcs[n]
-                for n in sorted(self.dep_tree.extras_src_names)
-                if n in self.dep_tree.selected_srcs
-            ]
-        elif _subset == 'live':
-            # 'live' mode: live-exclusive sources only (sources whose every
-            # binary is in live_exclusive_pkg_names — i.e. sources that
-            # exist in the closure SOLELY because of live.list).  Mixed
-            # sources are NOT here — they get built under 'pkg'.
-            packages = [
-                self.dep_tree.selected_srcs[n]
-                for n in sorted(self.dep_tree.live_exclusive_src_names)
-                if n in self.dep_tree.selected_srcs
-            ]
-        elif _subset == 'installer':
-            # 'installer' mode: union of (a) the udeb closure's source set
-            # (cdebconf, partman-base, hw-detect, etc. — produce udebs that
-            # land in the installer ramdisk) and (b) installer-exclusive
-            # deb sources (the deb-arm of installer.list — efibootmgr,
-            # grub-pc-bin — needed in repo/ for grub-installer to apt-pull
-            # onto the target at install time).
-            _src_names_set = set(self.dep_tree.installer_exclusive_src_names)
-            if self.udeb_dep_tree is not None:
-                _src_names_set |= set(self.udeb_dep_tree.selected_srcs.keys())
-            packages = []
-            for _name in sorted(_src_names_set):
-                _s = (self.dep_tree.selected_srcs.get(_name)
-                      or (self.udeb_dep_tree.selected_srcs.get(_name)
-                          if self.udeb_dep_tree is not None else None))
-                if _s:
-                    packages.append(_s)
-        elif _subset == 'all':
-            # 'all' mode: every selected source across both trees, no
-            # exclusions — pkg + live + installer + recommended in one
-            # pass.  Per-source check_build still gates skip-if-built so
-            # re-running is cheap; the saving over running the four
-            # subset modes back-to-back is operator convenience, not
-            # work avoidance.  Shared source_hashtable means looking up
-            # an overlapping name in dep_tree first dedupes naturally.
-            _src_names_set = set(self.dep_tree.selected_srcs.keys())
-            if self.udeb_dep_tree is not None:
-                _src_names_set |= set(self.udeb_dep_tree.selected_srcs.keys())
-            packages = []
-            for _name in sorted(_src_names_set):
-                _s = (self.dep_tree.selected_srcs.get(_name)
-                      or (self.udeb_dep_tree.selected_srcs.get(_name)
-                          if self.udeb_dep_tree is not None else None))
-                if _s:
-                    packages.append(_s)
-        elif _subset == 'indl':
-            # 'indl' subset: every source in selected_srcs.  In build
-            # mode, selected_srcs IS the build_pkg.list contents, so this is
-            # "build all of build_pkg.list".  udeb_dep_tree is None in build
-            # mode, so no udeb branch.  Same shape as 'all' but with the
-            # operator-visible "indl" label.
-            packages = [
-                _s for _name, _s in sorted(
-                    self.dep_tree.selected_srcs.items())
-            ]
-        else:
-            # subset == 'pkg' (the new bare-`source build` default).
-            # Build the pkg.list closure ONLY: selected_srcs minus
-            # everything credited to live/installer/extras.  Result is a
-            # source set whose binaries are exactly what pkg.list pulls in
-            # (with required+important folded in) — the "user choices"
-            # layer.
-            _exclude = (self.dep_tree.live_exclusive_src_names |
-                        self.dep_tree.installer_exclusive_src_names |
-                        self.dep_tree.extras_src_names)
-            packages = [
-                _s for _name, _s in self.dep_tree.selected_srcs.items()
-                if _name not in _exclude
-            ]
-
-        if not packages:
-            console.print("No source packages to build")
-            return
+        assert _wl is not None
+        packages = _wl['packages']
+        _force = _wl['force']
+        _profile_override = _wl['profile_override']
+        _bump_active = _wl['bump_active']
+        _bump_release = _wl['bump_release']
 
         # Tunneled and locally-built successes are tracked separately so the
         # autorun summary can report them as distinct categories.
@@ -2084,32 +2305,6 @@ class SourceCommandsMixin(SessionState):
             maxvalue=_total,
             show_rate=False,
         )
-
-        # bump-aware build: when a ledger is loaded (only
-        # `_do_update_build` does so), un-forced builds additionally rebuild a
-        # same-base security/NMU re-spin whose THIS-generation +asg<R>u<N>
-        # artifact is missing — the one case the filename-based skip gate can't
-        # see (the rebuilt pristine name collides with the prior build).  N is
-        # per-file; the post-build stamp (buildcontainer) applies it.
-        # _bump_active forces same-base re-spin rebuilds (the predicate
-        # at _needs_bump_build checks if THIS-generation `+asg<R>u<N>`
-        # artifacts are on disk for NMU-suffixed sources).  Gated on
-        # _in_update_build so it ONLY fires inside _do_update_build's
-        # snapshot-delta workflow.  Outside update mode, the ledger may
-        # be loaded for post-build stamping (lineage continuation), but
-        # bump-target detection must stay off — otherwise every NMU-
-        # versioned upstream source (3/4 of the corpus) gets flagged on
-        # every cmd_source_build call.
-        _bump_active = (self.container is not None
-                        and getattr(self.container, 'asg_ledger', None) is not None
-                        and self._in_update_build)
-        _bump_release = None
-        if _bump_active:
-            try:
-                _bump_release = int(
-                    str(self.config.build_version).strip('"').strip("'"))
-            except (TypeError, ValueError):
-                _bump_active = False   # can't derive N → stamper skips too
 
         # split the work into tunneled (serial — network-
         # bound, dest-dir-locked) and to-build (parallelisable).  The
