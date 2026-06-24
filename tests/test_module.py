@@ -34690,7 +34690,8 @@ def test_remote_publish_bootstrap_uploads_pubkey_when_no_head():
 
         # Capture push_jsonl calls + the head dict passed to write_coord_head
         _pushed: 'list[dict]' = []
-        def _fake_push(*, local_path, remote_spec, ssh_key=None, overwrite=False):
+        def _fake_push(*, local_path, remote_spec, ssh_key=None, overwrite=False,
+                       on_bytes=None):
             _pushed.append({'local': local_path, 'remote': remote_spec})
             return True, ''
         _written_head: 'list[dict]' = []
@@ -35112,7 +35113,8 @@ def test_remote_publish_pushes_debs_per_file_and_calls_progress():
         # Track push calls + progress callback observations
         _pushed: 'list[str]' = []
         _progress_events: 'list[tuple]' = []
-        def _fake_push(*, local_path, remote_spec, ssh_key=None, overwrite=False):
+        def _fake_push(*, local_path, remote_spec, ssh_key=None, overwrite=False,
+                       on_bytes=None):
             _pushed.append(remote_spec)
             return True, ''
         def _fake_write_head(coord_dir, head, signing_home):
@@ -36338,7 +36340,8 @@ def test_remote_publish_drops_claim_when_push_fails():
              'claim_state': 'pending', 'seq': 0, 'v': 1}
             for _n in _names
         ]
-        def _fake_push(*, local_path, remote_spec, ssh_key=None, overwrite=False):
+        def _fake_push(*, local_path, remote_spec, ssh_key=None, overwrite=False,
+                       on_bytes=None):
             if 'bad' in remote_spec:
                 return False, 'simulated rsync failure'
             return True, ''
