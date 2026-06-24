@@ -8,6 +8,7 @@ import time
 import uuid
 from urllib.parse import urlparse
 from typing import TYPE_CHECKING, Optional, Tuple
+import local_mirror
 import utils
 from utils import BuildConfig, version_no_epoch
 from buildlog import BuildLog, human_size, safe_size
@@ -192,6 +193,14 @@ class BuildContainer:
             m.with_snapshot(self.snapshot_ts, baseurl=config.snapshot_baseurl)
             for m in config.mirrors
         ]
+        # Local build mirror: active only when enabled AND a valid mirror exists
+        # for THIS snapshot.  When active, per-build containers add it as their
+        # first apt source (bind-mounted at /localmirror) so build-deps come
+        # from local disk instead of snapshot.debian.org.
+        self._localmirror_active = bool(
+            getattr(config, 'create_local_mirror', False)
+            and local_mirror.is_valid_for(
+                config.dir_localmirror, self.snapshot_ts))
 
         # image tag is config-derived — set unconditionally so a recipe-only
         # container (connect=False) can compose the recipe without a local
@@ -853,7 +862,22 @@ class BuildContainer:
              At 1001 apt picks snapshot as Candidate and dist-upgrade
              downgrades the installed set.
         """
-        _apt_sources = ''.join(
+        # Local build mirror FIRST (when active): identical snapshot versions
+        # served from a bind-mounted file:// repo, pinned ABOVE the snapshot
+        # origin (1002 > 1001) via its Release `Origin: AthenaLocalMirror` so
+        # apt fetches build-deps from local disk; snapshot.debian.org stays the
+        # fallback for anything the mirror missed.  [trusted=yes] skips the GPG
+        # check (the repo is host-owned and bind-mounted read-only).
+        _local_src = ''
+        _local_pin = ''
+        if getattr(self, '_localmirror_active', False):
+            _local_src = 'deb [trusted=yes] file:///localmirror ./\n'
+            _local_pin = (
+                "Package: *\n"
+                f"Pin: release o={local_mirror.LOCAL_ORIGIN}\n"
+                "Pin-Priority: 1002\n\n"
+            )
+        _apt_sources = _local_src + ''.join(
             f'deb [check-valid-until=no] {_m.url} {_m.suite} {_m.component}\n'
             for _m in self.mirrors
         )
@@ -869,7 +893,7 @@ class BuildContainer:
             urlparse(self.config.snapshot_baseurl).hostname
             or 'snapshot.debian.org'
         )
-        _apt_pin = (
+        _apt_pin = _local_pin + (
             "Package: *\n"
             f"Pin: origin {_snap_host}\n"
             "Pin-Priority: 1001\n"
@@ -1181,15 +1205,22 @@ class BuildContainer:
             # Client is non-None by the time build() is called — __init__
             # raises if both the configured and local daemon paths fail.
             assert self.client is not None
+            _volumes = {
+                self.src_path:    {'bind': '/source', 'mode': 'rw'},
+                _scratch_dir:     {'bind': '/repo',   'mode': 'rw'},
+                src_patch_path:   {'bind': '/patch',  'mode': 'rw'},
+            }
+            # The local build mirror is consumed (read-only) by apt inside the
+            # container — matches the `file:///localmirror` source written by
+            # _write_snapshot_sources_cmd.
+            if self._localmirror_active:
+                _volumes[self.config.dir_localmirror] = {
+                    'bind': '/localmirror', 'mode': 'ro'}
             container = self.client.containers.run(
                 self._image_tag, command=["/bin/bash", "-c", cmd_str],
                 detach=True, auto_remove=False,
                 labels=self._container_labels,
-                volumes={
-                    self.src_path:    {'bind': '/source', 'mode': 'rw'},
-                    _scratch_dir:     {'bind': '/repo',   'mode': 'rw'},
-                    src_patch_path:   {'bind': '/patch',  'mode': 'rw'},
-                },
+                volumes=_volumes,
                 **self._resource_kwargs(),
             )
             self._register_live(container)

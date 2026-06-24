@@ -16,6 +16,7 @@ from typing import Optional
 import build_closure
 import buildcontainer
 import dependencytree
+import local_mirror
 import selection_lock
 import tui
 import utils
@@ -992,6 +993,73 @@ class CacheCommandsMixin(SessionState):
             _lc_touch()
 
         self.flags.dep_check_ready = True
+
+        # Local build mirror — when enabled, keep it current with the selected
+        # snapshot so build containers serve build-deps from local disk.
+        if getattr(self.config, 'create_local_mirror', False):
+            self._ensure_local_mirror()
+
+    def _ensure_local_mirror(self, force: bool = False) -> None:
+        """Build/refresh the snapshot-pinned local build mirror (the build
+        closure of all shipped sources).  Prompts with size + free space;
+        rebuilds when the snapshot advanced (stale `.snapshot` marker).
+        Requires the cache + dep_tree (the build closure needs both)."""
+        if self.cache is None or self.dep_tree is None:
+            console.print(
+                "local mirror: run `cache build` + `cache parse` first",
+                tui.COLOR_WARNING)
+            return
+        _ts = utils.resolve_snapshot_timestamp(self.config) or ''
+        if not _ts:
+            console.print(
+                "local mirror: snapshot pinning disabled — skipped",
+                tui.COLOR_WARNING)
+            return
+        _dir = self.config.dir_localmirror
+        if not force and local_mirror.is_valid_for(_dir, _ts):
+            console.print(
+                f"Local build mirror: current for snapshot {_ts}",
+                tui.COLOR_INFO)
+            return
+        _existing = local_mirror.status(_dir)
+        _stale = bool(_existing['snapshot'] and _existing['snapshot'] != _ts)
+        _hs = local_mirror.human_size
+        console.print("Computing local build mirror (build closure)…",
+                      tui.COLOR_INFO)
+        _pl = local_mirror.plan(self.cache, self.dep_tree, self.config)
+        _ok, _free, _need = local_mirror.disk_check(_pl['total_size'], _dir)
+        console.print(
+            f"Local build mirror: {len(_pl['entries'])} package(s), "
+            f"{_hs(_pl['total_size'])} for snapshot {_ts}"
+            + (f"  (replaces stale snapshot {_existing['snapshot']})"
+               if _stale else ""))
+        console.print(f"  disk: free {_hs(_free)}, need ~{_hs(_need)}")
+        if not _ok:
+            console.print("  insufficient disk space — skipping local mirror",
+                          tui.COLOR_WARNING)
+            return
+        _resp = Prompt(
+            PROMPT_YESNO,
+            "Download / refresh the local build mirror now?",
+            informational=True,
+        ).get_response()
+        if _resp.lower() not in ('y', 'yes'):
+            console.print("  skipped — containers use snapshot.debian.org",
+                          tui.COLOR_INFO)
+            return
+        if _stale:
+            local_mirror.purge(_dir)
+        _dl, _fail = local_mirror.download(_pl, _dir, _ts)
+        if _fail:
+            console.print(
+                f"  {len(_fail)} file(s) failed — apt falls back to snapshot "
+                "for those", tui.COLOR_WARNING)
+        if local_mirror.index(_dir):
+            console.print(f"  local build mirror ready ({_hs(_dl)} indexed)",
+                          tui.COLOR_INFO)
+        else:
+            console.print("  local mirror index failed — see logs",
+                          tui.COLOR_WARNING)
 
     def cmd_cache_select(self, *args):
         """Interactive package-set selector (`cache select`).
