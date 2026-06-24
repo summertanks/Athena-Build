@@ -31053,6 +31053,57 @@ def test_generate_pending_claims_skips_pulled_from_peer():
         assert _pending == [], _pending
 
 
+def test_generate_pending_claims_reclaims_rebuilt_pulled_from():
+    """Ownership-divergence fix: a pulled_from record whose adopted outputs are
+    GONE from the pool — superseded by a local rebuild at a new version — gets
+    the REBUILT pool file claimed (filename + recomputed hash + version derived
+    from the filename).  If the adopted output is still present, it stays
+    skipped (genuinely adopted)."""
+    import hashlib
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+
+    def _fake_read(_dir, _pkg):
+        return {
+            'package': 'foo', 'intended_version': '1.0',
+            'built_version': '1.0', 'phase': 'done',
+            'outputs': ['foo_1.0_all.deb'],               # the ADOPTED version
+            'output_hashes': {'foo_1.0_all.deb': 'd' * 64},
+            'pulled_from': {'mirror': 'm1', 'builder': 'bob'},
+            'finished': '2026-06-04T12:00:00Z',
+        }
+    with tempfile.TemporaryDirectory() as _td:
+        _log = os.path.join(_td, 'log')
+        os.makedirs(_log)
+        with open(os.path.join(_log, 'foo.build.json'), 'w') as _fh:
+            _fh.write('{}')
+        _claims = os.path.join(_td, 'claims')
+        os.makedirs(_claims)
+        _reb = os.path.join(_td, 'foo_1.0+asg1u3_all.deb')
+        with open(_reb, 'wb') as _fh:
+            _fh.write(b'rebuilt-deb-bytes')
+        _want_sha = hashlib.sha256(b'rebuilt-deb-bytes').hexdigest()
+        # adopted output GONE from pool, rebuilt present → claim the rebuilt file
+        _p = _publish.generate_pending_claims(
+            builder_id='alice', buildlog_dir=_log, claims_dir=_claims,
+            public_key_path='/nonexistent.pub', snapshot_pin='S',
+            read_build_record=_fake_read,
+            pool={'foo_1.0+asg1u3_all.deb': _reb})
+        assert len(_p) == 1, _p
+        assert _p[0]['filename'] == 'foo_1.0+asg1u3_all.deb'
+        assert _p[0]['built_version'] == '1.0+asg1u3'      # derived from filename
+        assert _p[0]['sha256'] == _want_sha                # recomputed, not stale
+        # adopted output IS the latest in the pool (no rebuild) → genuinely
+        # adopted → skip
+        _p2 = _publish.generate_pending_claims(
+            builder_id='alice', buildlog_dir=_log, claims_dir=_claims,
+            public_key_path='/nonexistent.pub', snapshot_pin='S',
+            read_build_record=_fake_read,
+            pool={'foo_1.0_all.deb': _reb})
+        assert _p2 == [], _p2
+
+
 def test_build_mode_publish_implies_no_iso():
     """Mode = build implies --no-iso (build peers don't build ISOs; the
     mirror snapshot may lead any ISO snapshot)."""
@@ -39544,6 +39595,7 @@ def main() -> int:
         test_generate_pending_claims_threads_republished_from_per_output,
         test_generate_pending_claims_non_tunneled_record_carries_none,
         test_generate_pending_claims_skips_pulled_from_peer,
+        test_generate_pending_claims_reclaims_rebuilt_pulled_from,
         test_generate_pending_claims_skips_adopted_tunnel_but_keeps_self_tunnel,
         test_build_mode_publish_implies_no_iso,
         test_mirror_builders_register_gates_and_uploads,
