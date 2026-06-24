@@ -1109,6 +1109,56 @@ def remote_publish(
                     f"pool push: {_pushed_count} sent, "
                     f"{_push_fail_count} failed")
 
+            # Step 5b.2 — POOL COMPLETENESS guard.  Step 5b pushed only the
+            # new-claim delta; the dist tree pushed next (5c) indexes EVERY .deb
+            # in the local repo.  A prior per-file push that failed DROPS its
+            # claim (above) but leaves the .deb in the local index — so the
+            # published index promises files that 404 (observed: 329 missing on
+            # the mirror after push gaps over a slow link).  List the remote
+            # pool once, diff against the local repo, and push anything missing
+            # (we own it — it's in our index but never landed).
+            # --ignore-existing keeps a complete pool a cheap no-op.
+            if pool_remote_spec is not None:
+                _remote_debs = _transport.list_remote_debs(
+                    pool_remote_spec, ssh_key)
+                if _remote_debs is None:
+                    _status("warning: could not list remote pool — "
+                            "skipping completeness check")
+                else:
+                    _local_debs: dict = {}
+                    for _wr, _, _wfs in os.walk(config.dir_repo):
+                        for _wf in _wfs:
+                            if _wf.endswith(('.deb', '.udeb')):
+                                _wp = os.path.join(_wr, _wf)
+                                _local_debs[os.path.relpath(
+                                    _wp, config.dir_repo)] = _wp
+                    _missing = sorted(set(_local_debs) - _remote_debs)
+                    if _missing:
+                        _status(f"pool completeness: {len(_missing)} .deb(s) "
+                                "indexed but absent on the mirror — pushing")
+                        _comp_fail = 0
+                        for _ci, _crel in enumerate(_missing, start=1):
+                            _ok_c, _det_c = _transport.push_single_deb(
+                                local_path=_local_debs[_crel],
+                                remote_spec=(pool_remote_spec.rstrip('/')
+                                             + '/' + _crel),
+                                ssh_key=ssh_key, overwrite=False)
+                            if on_progress is not None:
+                                on_progress(_ci, len(_missing), _crel, _ok_c)
+                            if not _ok_c:
+                                _comp_fail += 1
+                                logger.error(
+                                    f"coord.publish: completeness push "
+                                    f"{_crel} failed: {_det_c}")
+                        _status(
+                            f"pool completeness: {len(_missing) - _comp_fail} "
+                            f"sent, {_comp_fail} failed")
+                        if _comp_fail:
+                            return False, (
+                                f"pool completeness: {_comp_fail} .deb(s) "
+                                "still missing on the mirror after push — "
+                                "refusing to publish an index that 404s")
+
             # Step 5c — push the apt-trust path (dists/<codename>/ tree:
             # InRelease, Release, Release.gpg, per-component Packages +
             # variants).  Without this the remote pool is unusable by
