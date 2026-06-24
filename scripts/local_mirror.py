@@ -189,16 +189,22 @@ def index(directory: str) -> bool:
     dpkg-scanpackages, then a Release carrying ``Origin: AthenaLocalMirror`` so
     the container can pin it.  Returns True on success."""
     _pkgs = os.path.join(directory, 'Packages')
+    # Capture scan output in memory and write Packages only on success — a
+    # failed scan must NOT leave an empty Packages behind (is_valid_for would
+    # then falsely treat the mirror as ready).
     try:
-        with open(_pkgs, 'w') as _fh:
-            subprocess.run(['dpkg-scanpackages', '-m', '.'],
-                           cwd=directory, stdout=_fh,
-                           stderr=subprocess.DEVNULL, check=True)
+        _data = subprocess.run(
+            ['dpkg-scanpackages', '-m', '.'], cwd=directory,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            check=True).stdout
     except (subprocess.CalledProcessError, OSError) as e:
         logger.error(f"local_mirror.index dpkg-scanpackages: {e}")
         return False
-    with open(_pkgs, 'rb') as _f:
-        _data = _f.read()
+    if not _data:
+        logger.error("local_mirror.index: dpkg-scanpackages produced no output")
+        return False
+    with open(_pkgs, 'wb') as _f:
+        _f.write(_data)
     with gzip.open(_pkgs + '.gz', 'wb') as _g:
         _g.write(_data)
     with lzma.open(_pkgs + '.xz', 'wb') as _x:
@@ -256,7 +262,11 @@ def is_valid_for(directory: 'Any', snapshot_ts: 'Optional[str]') -> bool:
     constructed without a real working dir) — returns False rather than raising."""
     if not snapshot_ts or not isinstance(directory, str):
         return False
-    if not os.path.isfile(os.path.join(directory, 'Packages')):
+    _pkgs = os.path.join(directory, 'Packages')
+    try:
+        if not (os.path.isfile(_pkgs) and os.path.getsize(_pkgs) > 0):
+            return False
+    except OSError:
         return False
     return mirror_snapshot(directory) == snapshot_ts
 
