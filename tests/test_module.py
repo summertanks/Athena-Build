@@ -20189,6 +20189,39 @@ def test_push_dist_tree_excludes_pool_artifacts():
     assert '--filter=P *.udeb' not in _argv, _argv
 
 
+def test_transport_remote_sha256_parses_digest_and_guards():
+    """remote_sha256 runs `ssh … sha256sum <path>`, returns the 64-hex digest
+    on success, and None for an unparseable spec / non-zero rc / short output —
+    so the release-asset verify can distinguish mismatch from unverifiable."""
+    import types as _types
+
+    import coord.transport as _tr
+    _digest = 'a' * 64
+    _orig = _tr.subprocess
+
+    def _run_factory(rc, out):
+        def _run(argv, **k):
+            _run.argv = argv
+            return _types.SimpleNamespace(returncode=rc, stdout=out, stderr='')
+        return _run
+    try:
+        # success → digest; the path lands as a single ssh arg
+        _tr.subprocess = _types.SimpleNamespace(
+            run=_run_factory(0, f'{_digest}  asgard/iso/x.iso\n'),
+            SubprocessError=Exception)
+        assert _tr.remote_sha256('user@host:asgard/iso/x.iso', 'k.key') == _digest
+        # no colon → can't form host:path → None (no ssh attempted)
+        assert _tr.remote_sha256('not-a-spec') is None
+        # non-zero rc (missing file) → None
+        _tr.subprocess.run = _run_factory(1, '')
+        assert _tr.remote_sha256('user@host:nope') is None
+        # short/garbage output → None (the 64-char guard)
+        _tr.subprocess.run = _run_factory(0, 'deadbeef  x\n')
+        assert _tr.remote_sha256('user@host:x') is None
+    finally:
+        _tr.subprocess = _orig
+
+
 def test_mirror_audit_disk_vs_claims_folds_superseded_claims():
     """_mirror_audit_disk_vs_claims must fold marker claims (retracted/
     deprecated/obsolete) AND the published claims their *_seq back-refs
@@ -38991,6 +39024,7 @@ def main() -> int:
         test_preflight_repo_audit_blocks_on_stale_artifacts,
         test_mirror_publish_reindexes_stale_local_index,
         test_push_dist_tree_excludes_pool_artifacts,
+        test_transport_remote_sha256_parses_digest_and_guards,
         test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
         test_cmd_source_fork_enable_removes_marker,

@@ -184,6 +184,37 @@ def push_single_deb(
     return True, ''
 
 
+def remote_sha256(
+    remote_spec: str, ssh_key: 'Optional[str]' = None,
+) -> 'Optional[str]':
+    """sha256 hex of a remote file via ``ssh <host> sha256sum <path>``.
+
+    ``remote_spec`` is the rsync-style ``user@host:path``.  Returns the digest,
+    or None on any failure (unparseable spec, missing file, ssh/timeout error)
+    so callers can distinguish "verified mismatch" (a real digest that differs)
+    from "could not verify" (None).  Used by the release-asset push to confirm
+    the bytes that landed on the mirror match what releases.json advertises —
+    catching a stale same-name file skipped by --ignore-existing (the qcow2) or
+    a transfer truncated mid-flight over a slow link."""
+    if ':' not in remote_spec:
+        return None
+    _hostpart, _path = remote_spec.split(':', 1)
+    _argv = ['ssh']
+    if ssh_key:
+        _argv += ['-i', ssh_key]
+    _argv += ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'BatchMode=yes',
+              _hostpart, 'sha256sum', '--', _path]
+    try:
+        _r = subprocess.run(_argv, capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError) as _e:
+        logger.error(f"coord.transport.remote_sha256({remote_spec}): {_e}")
+        return None
+    if _r.returncode != 0:
+        return None
+    _parts = (_r.stdout or '').strip().split()
+    return _parts[0] if _parts and len(_parts[0]) == 64 else None
+
+
 def pull_single_file(
     *, remote_spec: str, local_path: str,
     ssh_key: 'Optional[str]' = None,

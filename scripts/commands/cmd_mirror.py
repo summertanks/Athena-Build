@@ -976,6 +976,49 @@ class MirrorCommandsMixin(SessionState):
                     if _k not in _found_kinds]
         return _found, _missing
 
+    def _verify_pushed_iso(self, iso: dict, remote_spec: str,
+                           ssh_key: 'Optional[str]', transport) -> bool:
+        """Confirm the pushed image's REMOTE sha256 matches what releases.json
+        advertises (iso['sha256']).  On a verified mismatch — a stale same-name
+        file --ignore-existing skipped (the qcow2) or a truncated transfer —
+        force-overwrite and re-verify.  Returns False only when the bytes are
+        CONFIRMED wrong after the re-push (→ publish fails); True when verified
+        good OR unverifiable (warn, don't block the publish)."""
+        _expect = (iso.get('sha256') or '').strip()
+        if not _expect:
+            return True
+        _got = transport.remote_sha256(remote_spec, ssh_key)
+        if _got == _expect:
+            return True
+        if _got is None:
+            console.print(
+                f"  warning: could not verify {iso['file']} on the mirror "
+                "(sha256 check skipped)", tui.COLOR_WARNING)
+            logger.warning(f"release push: {iso['file']} sha256 unverifiable")
+            return True
+        console.print(
+            f"  {iso['file']}: remote bytes stale/truncated — re-pushing",
+            tui.COLOR_WARNING)
+        logger.warning(
+            f"release push: {iso['file']} remote sha {_got} != {_expect}; "
+            "re-pushing with overwrite")
+        _r, _det = transport.push_single_deb(
+            local_path=iso['path'], remote_spec=remote_spec,
+            ssh_key=ssh_key, overwrite=True)
+        if not _r:
+            console.print(f"  ERROR: {iso['file']} re-push failed ({_det})",
+                          tui.COLOR_ERROR)
+            return False
+        if transport.remote_sha256(remote_spec, ssh_key) == _expect:
+            console.print(f"  {iso['file']}: re-push verified", tui.COLOR_INFO)
+            return True
+        console.print(
+            f"  ERROR: {iso['file']} still mismatched after re-push",
+            tui.COLOR_ERROR)
+        logger.error(
+            f"release push: {iso['file']} still wrong after overwrite re-push")
+        return False
+
     def _push_release_assets(
         self, public_url: str, pool_spec: str,
         ssh_key: 'Optional[str]', isos: 'list[dict]',
@@ -1022,9 +1065,10 @@ class MirrorCommandsMixin(SessionState):
                 _target = _base + _cum
                 if _target > _bar.value:
                     _bar.step(_target - _bar.value)
+            _remote_spec = f"{_root}/iso/{_d['file']}"
             _r, _detail = _transport.push_single_deb(
                 local_path=_d['path'],
-                remote_spec=f"{_root}/iso/{_d['file']}",
+                remote_spec=_remote_spec,
                 ssh_key=ssh_key, overwrite=False, on_bytes=_on_bytes)
             # top up to the full file size: a skipped (already-present) file
             # emits no progress line, so advance the bar by its whole size.
@@ -1033,6 +1077,17 @@ class MirrorCommandsMixin(SessionState):
                 _bar.step(_sent - _bar.value)
             if not _r:
                 logger.error(f"release push: ISO {_d['file']}: {_detail}")
+                _ok = False
+                continue
+            # Verify the bytes that LANDED match what releases.json advertises.
+            # --ignore-existing SKIPS a same-name file whose content changed
+            # (the qcow2 keeps one filename across publishes), and a transfer
+            # can truncate over a slow link — both leave the wrong bytes on the
+            # mirror while the index promises a sha256 nobody can satisfy.  On a
+            # verified mismatch, force-overwrite and re-verify; fail the publish
+            # if it still doesn't match.  None = couldn't verify (warn only).
+            if not self._verify_pushed_iso(_d, _remote_spec, ssh_key,
+                                           _transport):
                 _ok = False
         _bar.close()
         # Then the index pair (overwrite — they reflect the current state).
