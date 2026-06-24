@@ -1329,18 +1329,40 @@ class MirrorCommandsMixin(SessionState):
             # ProgressBar wired through on_progress.  Total updates
             # dynamically as we learn the count after step 5; until
             # then the bar shows 0/0.
-            _bar = ProgressBar(
+            # Two-bar pool push (mirrors the download bars): a CUMULATIVE bar
+            # of transferred/total BYTES with the file COUNT in its label and
+            # NO rate (a cumulative B/s is misleading), plus a PER-FILE bar of
+            # the current .deb's size WITH the live transfer rate.
+            _cum_bar = ProgressBar(
                 label=f"publish .debs → {_n}", itr_label='',
                 maxvalue=1, show_rate=False, label_width=34)
+            _file_bar = ProgressBar(
+                label='', itr_label='B/s', maxvalue=1,
+                show_rate=True, label_width=20)
+            _push_st = {'base': 0, 'cur': 0}
+            def _on_file_start(current, total, filename, size, total_bytes, *,
+                               _c=_cum_bar, _f=_file_bar, _s=_push_st, _nm=_n):
+                if total_bytes:
+                    _c.set_max(max(1, int(total_bytes)))
+                _c.label(f"({current}/{total}) {_nm}")
+                _s['cur'] = int(size or 0)
+                _f.set_max(max(1, int(size or 0)))
+                _f.reset()
+                _f.label(os.path.basename(str(filename))[:20])
+            def _on_bytes(cum, *, _c=_cum_bar, _f=_file_bar, _s=_push_st):
+                if cum > _f.value:
+                    _f.step(cum - _f.value)
+                _t = _s['base'] + cum
+                if _t > _c.value:
+                    _c.step(_t - _c.value)
             def _progress(current, total, _filename, _ok, *,
-                          _bar_ref=_bar):
-                # Lazy-update max once we see the true total.  set_max
-                # is the public setter; ProgressBar has no `.maxvalue`
-                # attribute (stored as self._max).  set_max is
-                # idempotent so unconditional-call is fine.
-                if total:
-                    _bar_ref.set_max(total)
-                _bar_ref.step(1)
+                          _c=_cum_bar, _s=_push_st):
+                # file done — advance the cumulative bar by its FULL size so
+                # --ignore-existing skips (which stream no bytes) still count.
+                _s['base'] += _s['cur']
+                _s['cur'] = 0
+                if _c.value < _s['base']:
+                    _c.step(_s['base'] - _c.value)
             def _on_status(_msg, *, _name_ref=_n):
                 # Each publish step gets a visible line so the
                 # operator sees forward progress instead of silence
@@ -1389,6 +1411,8 @@ class MirrorCommandsMixin(SessionState):
                     ssh_key=_ssh_key,
                     pool_remote_spec=_pool_spec,
                     on_progress=_progress,
+                    on_file_start=_on_file_start,
+                    on_bytes=_on_bytes,
                     on_status=_on_status,
                     install_corpus=_install_corpus or None,
                     on_published=_stamp_published,
@@ -1396,7 +1420,8 @@ class MirrorCommandsMixin(SessionState):
                     local_ahead_fn=_mirror.local_ahead_candidates,
                 )
             finally:
-                _bar.close()
+                _file_bar.close(persist=False)
+                _cum_bar.close(persist=True)
             console.print(
                 f"  {_detail}",
                 tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)

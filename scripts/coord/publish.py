@@ -733,6 +733,8 @@ def remote_publish(
     ssh_key: 'Optional[str]' = None,
     pool_remote_spec: 'Optional[str]' = None,
     on_progress: 'Optional[Callable]' = None,
+    on_file_start: 'Optional[Callable]' = None,
+    on_bytes: 'Optional[Callable[[int], None]]' = None,
     on_status: 'Optional[Callable[[str], None]]' = None,
     install_corpus: 'Optional[frozenset[str]]' = None,
     on_published: 'Optional[Callable[[set], None]]' = None,
@@ -1145,10 +1147,18 @@ def remote_publish(
                 f"(progress bar follows)")
         if pool_remote_spec is not None:
             _total_to_push = len(_pending)
+            # Total bytes of the push so the caller's CUMULATIVE bar can show
+            # transferred/total size; per-file size + the on_bytes stream drive
+            # the PER-FILE bar (with rate).
+            _total_push_bytes = sum(int(_c.get('size') or 0) for _c in _pending)
             _kept_pending: list = []
             for _i, _claim in enumerate(_pending, start=1):
                 _fn = _claim.get('filename')
+                _sz = int(_claim.get('size') or 0)
                 _local_path = _pool.get(_fn) if isinstance(_fn, str) else None
+                if on_file_start is not None:
+                    on_file_start(_i, _total_to_push, _fn or '?', _sz,
+                                  _total_push_bytes)
                 if _local_path is None:
                     # File listed in build.json's outputs but absent from
                     # the local pool — almost certainly an audit gap; we
@@ -1168,6 +1178,7 @@ def remote_publish(
                     # the transfer and publish a claim whose bytes never
                     # shipped.  Overwrite for reclaim claims only.
                     overwrite=isinstance(_claim.get('reclaims_seq'), int),
+                    on_bytes=on_bytes,
                 )
                 if on_progress is not None:
                     on_progress(_i, _total_to_push, _fn, _ok_push)
