@@ -2147,6 +2147,22 @@ def write_local_conf(config: 'BuildConfig', *,
 _REMOTE_SECTION_PREFIX = 'Remote.'
 
 
+def copy_ssh_key(src: str, dst: str) -> bool:
+    """Copy an SSH private key from ``src`` to ``dst`` with 0600 perms.
+    Returns False if ``src`` is unreadable or the copy fails.  Shared by
+    `mirror`/federation onboarding and `container remote add` so a remote's
+    key is stored in config/ (vs relying on the operator's ambient ~/.ssh)."""
+    import shutil
+    if not os.path.isfile(src):
+        return False
+    try:
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o600)
+        return True
+    except OSError:
+        return False
+
+
 def remote_conf_path(config: 'BuildConfig') -> str:
     """Path to config/remote.conf — the UNTRACKED machine-local registry of
     remote build hosts (created by `container remote add`)."""

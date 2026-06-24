@@ -500,16 +500,10 @@ def _derive_name(host):
 
 
 def _copy_key(src, dst):
-    """Copy an SSH key file to dst with 0600.  False if src unreadable."""
-    import shutil
-    if not os.path.isfile(src):
-        return False
-    try:
-        shutil.copyfile(src, dst)
-        os.chmod(dst, 0o600)
-        return True
-    except OSError:
-        return False
+    """Copy an SSH key file to dst with 0600.  False if src unreadable.
+    Thin wrapper over utils.copy_ssh_key (the shared implementation)."""
+    import utils
+    return utils.copy_ssh_key(src, dst)
 
 
 def _is_ip(host):

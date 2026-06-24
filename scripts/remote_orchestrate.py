@@ -27,6 +27,25 @@ def parse_ssh_host(remote: str) -> str:
     return _r.rstrip('/')
 
 
+def _ssh_base(host: str, ssh_key: 'str | None' = None) -> 'list[str]':
+    """`ssh -o BatchMode=yes [-i <key>] <host>` — the argv prefix for a remote
+    command.  Centralises `-i` insertion so every ssh call site honours the
+    per-remote key copied into config/ (vs the operator's ambient ~/.ssh)."""
+    _argv = ['ssh', '-o', 'BatchMode=yes']
+    if ssh_key:
+        _argv += ['-i', ssh_key]
+    _argv.append(host)
+    return _argv
+
+
+def _scp_base(ssh_key: 'str | None' = None) -> 'list[str]':
+    """`scp -q [-i <key>]` — the argv prefix for a bundle/output transfer."""
+    _argv = ['scp', '-q']
+    if ssh_key:
+        _argv += ['-i', ssh_key]
+    return _argv
+
+
 def stage_bundle(bundle: str, *, dockerfile: str, source_files: 'list[str]',
                  patch_dir: str, recipe: dict, build_cpus, build_memory,
                  remote_build_py: str) -> None:
@@ -58,18 +77,20 @@ def stage_bundle(bundle: str, *, dockerfile: str, source_files: 'list[str]',
         json.dump(_params, _fh, indent=2)
 
 
-def _has_image(image_tag: str, ssh_host: 'str | None' = None) -> bool:
+def _has_image(image_tag: str, ssh_host: 'str | None' = None,
+               ssh_key: 'str | None' = None) -> bool:
     """True if `image_tag` exists — on the remote (ssh_host set) or locally."""
     if ssh_host:
-        _cmd = ['ssh', '-o', 'BatchMode=yes', ssh_host,
-                f'docker image inspect {image_tag}']
+        _cmd = _ssh_base(ssh_host, ssh_key) + [
+            f'docker image inspect {image_tag}']
     else:
         _cmd = ['docker', 'image', 'inspect', image_tag]
     return subprocess.run(_cmd, stdout=subprocess.DEVNULL,
                           stderr=subprocess.DEVNULL).returncode == 0
 
 
-def ensure_remote_image(host: str, image_tag: str, *, log=print) -> str:
+def ensure_remote_image(host: str, image_tag: str, *,
+                        ssh_key: 'str | None' = None, log=print) -> str:
     """Make sure `image_tag` is available on the remote, the FAST way.
 
     The remote rebuilding the toolchain image from the internet is the slow
@@ -82,7 +103,7 @@ def ensure_remote_image(host: str, image_tag: str, *, log=print) -> str:
       'transferred'  — copied from this host over the LAN
       'build'        — neither has it; remote_build.py will build it remotely
     """
-    if _has_image(image_tag, ssh_host=host):
+    if _has_image(image_tag, ssh_host=host, ssh_key=ssh_key):
         return 'present'
     if not _has_image(image_tag):
         return 'build'                       # remote_build.py builds it remotely
@@ -90,7 +111,7 @@ def ensure_remote_image(host: str, image_tag: str, *, log=print) -> str:
         "(docker save | ssh docker load) …")
     _save = subprocess.Popen(['docker', 'save', image_tag],
                              stdout=subprocess.PIPE)
-    _load = subprocess.Popen(['ssh', '-o', 'BatchMode=yes', host, 'docker load'],
+    _load = subprocess.Popen(_ssh_base(host, ssh_key) + ['docker load'],
                              stdin=_save.stdout)
     if _save.stdout is not None:
         _save.stdout.close()               # let _load receive SIGPIPE on exit
@@ -115,21 +136,25 @@ def _parse_marker_line(line: 'str | None') -> 'tuple[int, list[str]]':
 
 
 def run_remote(host: str, local_bundle: str, remote_dir: str,
-               local_out: str, *, log=print) -> 'tuple[int, list[str]]':
+               local_out: str, *, ssh_key: 'str | None' = None,
+               register_proc=None, log=print) -> 'tuple[int, list[str]]':
     """scp the bundle up, run remote_build.py on the remote with its output
     written to a LOG FILE ON THE REMOTE (so the build runs at full speed,
     decoupled from the network), tail that file back through `log` for live
     progress, then scp the produced .debs back to `local_out`.  The remote temp
     dir is always cleaned up.  Returns (exit_code, [recovered basenames]).
+
+    `register_proc`, if given, is called with the live `ssh` Popen running the
+    build so a caller (the fan-out scheduler) can `terminate()` it on Ctrl+C.
     """
-    _ssh = ['ssh', '-o', 'BatchMode=yes', host]
+    _ssh = _ssh_base(host, ssh_key)
     try:
         if subprocess.run(_ssh + [f'mkdir -p {remote_dir}']).returncode != 0:
             log(f"remote: cannot create {remote_dir} on {host}")
             return (10, [])
         _items = [os.path.join(local_bundle, _e)
                   for _e in sorted(os.listdir(local_bundle))]
-        if subprocess.run(['scp', '-q', '-r', *_items,
+        if subprocess.run(_scp_base(ssh_key) + ['-r', *_items,
                            f'{host}:{remote_dir}/']).returncode != 0:
             log("remote: scp of bundle failed")
             return (11, [])
@@ -154,6 +179,8 @@ def run_remote(host: str, local_bundle: str, remote_dir: str,
         _proc = subprocess.Popen(
             _ssh + [_remote_cmd],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if register_proc is not None:
+            register_proc(_proc)
         _marker: 'str | None' = None
         assert _proc.stdout is not None
         for _line in _proc.stdout:
@@ -165,11 +192,11 @@ def run_remote(host: str, local_bundle: str, remote_dir: str,
         if _outputs:
             os.makedirs(local_out, exist_ok=True)
             # globs expand on the remote shell; only run when there's output
-            subprocess.run(['scp', '-q', f'{host}:{remote_dir}/out/*.deb',
-                            f'{local_out}/'],
+            subprocess.run(_scp_base(ssh_key) + [
+                f'{host}:{remote_dir}/out/*.deb', f'{local_out}/'],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(['scp', '-q', f'{host}:{remote_dir}/out/*.udeb',
-                            f'{local_out}/'],
+            subprocess.run(_scp_base(ssh_key) + [
+                f'{host}:{remote_dir}/out/*.udeb', f'{local_out}/'],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return (_exit, _outputs)
     finally:
