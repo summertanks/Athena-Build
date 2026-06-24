@@ -46,6 +46,19 @@ logger = logging.getLogger('athena')
 # ───────────────────────── pending-claim discovery ─────────────────────────
 
 
+def _sha256_file(path: str) -> str:
+    """sha256 hex of a file, '' on read error (caller skips empty digests)."""
+    import hashlib
+    _h = hashlib.sha256()
+    try:
+        with open(path, 'rb') as _f:
+            for _chunk in iter(lambda: _f.read(1 << 20), b''):
+                _h.update(_chunk)
+    except OSError:
+        return ''
+    return _h.hexdigest()
+
+
 def generate_pending_claims(
     *,
     builder_id: str,
@@ -55,6 +68,7 @@ def generate_pending_claims(
     snapshot_pin: str,
     read_build_record: Callable[[str, str], 'Optional[dict]'],
     build_arch: 'Optional[str]' = None,
+    pool: 'Optional[Dict[str, str]]' = None,
 ) -> List[dict]:
     """Walk build.json records; for each phase=done / phase=tunneled
     output whose filename isn't already in this builder's live jsonl,
@@ -79,6 +93,33 @@ def generate_pending_claims(
         if isinstance(_c.get('filename'), str)
         and _c.get('claim_state') not in _schema.INACTIVE_CLAIM_STATES
     }
+    # Precompute the LATEST version per binary name in the pool (matching what
+    # dpkg-scanpackages indexes), for the drift reconciliation below.  apt_pkg
+    # gives a proper Debian version compare; fall back to a lexical compare if
+    # it's unavailable/uninitialised (tests).  coord/ keeps `utils` out of its
+    # dep graph, but apt_pkg is a plain system lib.
+    _vcmp = None
+    _pool_latest: 'Dict[str, str]' = {}
+    if pool is not None:
+        try:
+            import apt_pkg
+            apt_pkg.init_system()
+            _vcmp = apt_pkg.version_compare
+        except Exception:
+            _vcmp = None
+        _latest_ver: 'Dict[str, str]' = {}
+        for _pf in pool:
+            _parts = _pf.rsplit('_', 2)
+            if len(_parts) != 3:
+                continue
+            _bn, _ver = _parts[0], _parts[1]
+            _cur = _latest_ver.get(_bn)
+            if _cur is None or (
+                    _vcmp(_ver, _cur) > 0 if _vcmp is not None
+                    else _pf > _pool_latest.get(_bn, '')):
+                _latest_ver[_bn] = _ver
+                _pool_latest[_bn] = _pf
+
     _pending: List[dict] = []
     try:
         _entries = sorted(os.listdir(buildlog_dir))
@@ -94,19 +135,6 @@ def generate_pending_claims(
         _phase = _rec.get('phase')
         if _phase not in ('done', 'tunneled'):
             continue
-        # A package we PULLED from a peer (mirror pull stamps `pulled_from`
-        # on its build record) belongs to that peer — never re-claim it.
-        # It would be ownership-blocked anyway, but skipping avoids the noise
-        # and the reverse-sync footgun where a publisher that pulled a peer's
-        # packages tries to take ownership of them on its next publish.
-        # This INCLUDES adopted tunnels: `mirror pull` now stamps
-        # `pulled_from` on tunneled adoptions too, so a peer that pulled a
-        # no-owner republish does NOT re-push/re-claim byte-identical copies
-        # — only the original republisher ships it.  A SELF-tunnel
-        # (`cmd_tunnel_package`, the first shipper) carries no `pulled_from`
-        # and stays claimable.
-        if _rec.get('pulled_from'):
-            continue
         # a deprecated/retracted source must NOT regenerate
         # claims — its build record stays phase=done (the receipt is
         # kept), but the deprecation excluded its old claims from
@@ -118,6 +146,44 @@ def generate_pending_claims(
             continue
         _outputs = _rec.get('outputs') or []
         _hashes = _rec.get('output_hashes') or {}
+        _rebuilt_claim = False
+        # DRIFT: the record's declared outputs aren't the LATEST version in the
+        # pool for their binaries.  The apt index (dpkg-scanpackages) ships the
+        # latest, so a stale receipt — one that still names an OLD version after
+        # an asg-restamp / upstream-bump rebuild (which may leave the old file
+        # in the pool too) — leaves the indexed-latest file UNCLAIMED → it 404s.
+        # Detect by latest-mismatch, not mere pool-absence, so a superseded dup
+        # still sitting in the pool doesn't mask the drift.
+        _drifted = bool(pool is not None and _outputs and any(
+            _fn != _pool_latest.get(_fn.rsplit('_', 2)[0]) for _fn in _outputs))
+        # A package PULLED from a peer (mirror pull stamps `pulled_from`) is
+        # normally never re-claimed (the reverse-sync footgun) — UNLESS a local
+        # rebuild has superseded the adoption (drift), in which case we own and
+        # must claim the rebuilt version the index ships.
+        if _rec.get('pulled_from') and not _drifted:
+            continue
+        # On drift, re-derive the claim from the pool: the latest indexed file
+        # per declared binary, (re)hashed (the record's hashes are for the stale
+        # version).  The hash-conflict / ownership scan backstops over-claiming
+        # a file another builder genuinely owns.
+        if _drifted:
+            _bins = {_fn.rsplit('_', 2)[0] for _fn in _outputs}
+            _pool_outputs = sorted(
+                _pool_latest[_bn] for _bn in _bins if _bn in _pool_latest)
+            _rec_hashes = _rec.get('output_hashes') or {}
+            _hashes = {}
+            for _pf in _pool_outputs:
+                if _pf in _known:
+                    continue   # already claimed — the loop skips it; no re-hash
+                _h = _rec_hashes.get(_pf)
+                _hashes[_pf] = (_h if isinstance(_h, str)
+                                else _sha256_file(pool[_pf]))
+            _outputs = _pool_outputs
+            _rebuilt_claim = True
+            if any(_pf not in _known for _pf in _pool_outputs):
+                logger.info(
+                    f"generate_pending_claims: {_pkg} record outputs drifted "
+                    f"from the pool — claiming the actual indexed pool file(s)")
         # per-output upstream provenance for tunneled
         # passthrough.  Build record's `republished_from` field is
         # the {filename: {url, upstream_sha256}} dict written by
@@ -149,12 +215,18 @@ def generate_pending_claims(
             _rfrom = _republished.get(_fn) if isinstance(_republished, dict) else None
             if not (isinstance(_rfrom, dict) and _rfrom):
                 _rfrom = None
+            # For a rebuilt-supersession claim the record's version fields are
+            # the stale pulled version — derive from the filename instead.
+            _bv = (_fn.rsplit('_', 2)[1] if _rebuilt_claim
+                   else str(_rec.get('built_version', '')))
+            _iv = (_bv if _rebuilt_claim
+                   else str(_rec.get('intended_version', '')))
             _pending.append(_schema.new_claim(
                 builder=builder_id,
                 seq=0,  # caller assigns before signing
                 package=_pkg,
-                intended_version=str(_rec.get('intended_version', '')),
-                built_version=str(_rec.get('built_version', '')),
+                intended_version=_iv,
+                built_version=_bv,
                 filename=_fn,
                 sha256=_sha,
                 size=0,  # filled in below by stat'ing pool path
@@ -550,6 +622,7 @@ def local_publish(
         snapshot_pin=snapshot_pin,
         read_build_record=read_build_record,
         build_arch=getattr(config, 'arch', None),
+        pool=_pool,
     )
     fill_sizes_from_pool(_pending, _pool)
     if not _pending:
@@ -906,6 +979,7 @@ def remote_publish(
             snapshot_pin=snapshot_pin,
             read_build_record=read_build_record,
             build_arch=getattr(config, 'arch', None),
+            pool=_pool,
         )
         _pending_total = len(_pending)
         _pending = [_p for _p in _pending if _p['filename'] not in _remote_known]
