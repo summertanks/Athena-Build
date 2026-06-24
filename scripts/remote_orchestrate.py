@@ -11,12 +11,21 @@ copy-in/out.
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 
 import remote_build   # for the shared RESULT_MARKER (single source)
 
 RESULT_MARKER = remote_build.RESULT_MARKER
+
+# The stable on-remote path for the local build mirror — a literal `~` the
+# remote python resolves (remote_localmirror.py and remote_build.py both
+# expanduser it), so BS1 needn't know the remote user's $HOME.  The build
+# container bind-mounts this at /localmirror.
+REMOTE_LOCALMIRROR_DIR = '~/athena-localmirror'
+LM_PROGRESS_MARKER = '__ATHENA_LM_PROGRESS__'
+LM_RESULT_MARKER = '__ATHENA_LM_RESULT__'
 
 
 def parse_ssh_host(remote: str) -> str:
@@ -48,10 +57,14 @@ def _scp_base(ssh_key: 'str | None' = None) -> 'list[str]':
 
 def stage_bundle(bundle: str, *, dockerfile: str, source_files: 'list[str]',
                  patch_dir: str, recipe: dict, build_cpus, build_memory,
-                 remote_build_py: str) -> None:
+                 remote_build_py: str,
+                 localmirror_dir: 'str | None' = None) -> None:
     """Populate <bundle> with the everything remote_build.py needs:
     Dockerfile, source/<pkg files>, patch/<*.patch>, remote_build.py, and
-    build.json (the params blob — image tag/args + cmd_str + caps)."""
+    build.json (the params blob — image tag/args + cmd_str + caps).
+
+    `localmirror_dir` (set only when the recipe emits the file:///localmirror
+    source) tells remote_build.py to bind-mount that on-remote mirror dir."""
     os.makedirs(os.path.join(bundle, 'source'), exist_ok=True)
     os.makedirs(os.path.join(bundle, 'patch'), exist_ok=True)
     shutil.copy(dockerfile, os.path.join(bundle, 'Dockerfile'))
@@ -73,6 +86,8 @@ def stage_bundle(bundle: str, *, dockerfile: str, source_files: 'list[str]',
         _params['build_cpus'] = build_cpus
     if build_memory:
         _params['build_memory'] = build_memory
+    if localmirror_dir:
+        _params['localmirror_dir'] = localmirror_dir
     with open(os.path.join(bundle, 'build.json'), 'w') as _fh:
         json.dump(_params, _fh, indent=2)
 
@@ -121,6 +136,95 @@ def ensure_remote_image(host: str, image_tag: str, *,
         return 'transferred'
     log("LAN image transfer failed — the remote will build the image instead")
     return 'build'
+
+
+def build_remote_image(host: str, dockerfile_path: str, image_tag: str,
+                       build_args: dict, *, ssh_key: 'str | None' = None,
+                       log=print) -> bool:
+    """Build `image_tag` ON the remote from `dockerfile_path`, streamed over ssh
+    via stdin (empty build context — matches remote_build.build_image).  Returns
+    True on success.  `container remote init` uses this to eagerly build the
+    image when NEITHER this host nor the remote has it cached, rather than
+    deferring the multi-ten-minute build to the first `source remotebuild`."""
+    _flags = [f'--build-arg {shlex.quote(f"{_k}={_v}")}'
+              for _k, _v in (build_args or {}).items()]
+    _cmd = (f"docker build -t {shlex.quote(image_tag)} "
+            f"{' '.join(_flags)} -")
+    log(f"building image {image_tag} on {host} (this can take a while) …")
+    try:
+        with open(dockerfile_path, 'rb') as _fh:
+            _r = subprocess.run(_ssh_base(host, ssh_key) + [_cmd], stdin=_fh)
+    except OSError as _e:
+        log(f"build_remote_image: {_e}")
+        return False
+    return _r.returncode == 0
+
+
+def stage_remote_localmirror(
+        host: str, plan_dict: dict, remote_localmirror_py: str, *,
+        remote_mirror_dir: str = REMOTE_LOCALMIRROR_DIR,
+        ssh_key: 'str | None' = None, on_progress=None,
+        log=print) -> 'dict | None':
+    """Populate the local build mirror ON the remote from a BS1-computed plan.
+
+    Ships ``plan.json`` + ``remote_localmirror.py`` to a throwaway staging dir on
+    the remote, runs the runner (which downloads the closure into the STABLE
+    ``remote_mirror_dir`` — resumable, so re-running just continues), streams its
+    PROGRESS markers to ``on_progress(payload)`` for a live two-bar display, and
+    returns the parsed RESULT dict (or None on a transport/spawn failure).  The
+    mirror dir persists; only the staging dir is cleaned up.
+    """
+    import json as _json
+    import tempfile as _tempfile
+    _ssh = _ssh_base(host, ssh_key)
+    _stage = f"/tmp/athena-lm-stage-{os.getpid()}-{abs(hash(host)) % 100000}"
+    _result: 'dict | None' = None
+    _local_plan = None
+    try:
+        if subprocess.run(_ssh + [f'mkdir -p {_stage}']).returncode != 0:
+            log(f"remote-localmirror: cannot create {_stage} on {host}")
+            return None
+        _fd, _local_plan = _tempfile.mkstemp(suffix='.json', prefix='lmplan-')
+        with os.fdopen(_fd, 'w') as _fh:
+            _json.dump(plan_dict, _fh)
+        if subprocess.run(_scp_base(ssh_key) + [
+                _local_plan, remote_localmirror_py,
+                f'{host}:{_stage}/']).returncode != 0:
+            log("remote-localmirror: scp of plan/runner failed")
+            return None
+        _planfn = os.path.basename(_local_plan)
+        _runnerfn = os.path.basename(remote_localmirror_py)
+        _cmd = (f'cd {_stage} && python3 {_runnerfn} --plan {_planfn} '
+                f'--dir {remote_mirror_dir}')
+        _proc = subprocess.Popen(
+            _ssh + [_cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True)
+        assert _proc.stdout is not None
+        for _line in _proc.stdout:
+            _line = _line.rstrip('\n')
+            if _line.startswith(LM_PROGRESS_MARKER):
+                if on_progress is not None:
+                    try:
+                        on_progress(_json.loads(_line[len(LM_PROGRESS_MARKER):]))
+                    except (ValueError, TypeError):
+                        pass
+            elif _line.startswith(LM_RESULT_MARKER):
+                try:
+                    _result = _json.loads(_line[len(LM_RESULT_MARKER):])
+                except (ValueError, TypeError):
+                    _result = None
+            else:
+                log(_line)
+        _proc.wait()
+        return _result
+    finally:
+        subprocess.run(_ssh + [f'rm -rf {_stage}'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if _local_plan and os.path.exists(_local_plan):
+            try:
+                os.remove(_local_plan)
+            except OSError:
+                pass
 
 
 def _parse_marker_line(line: 'str | None') -> 'tuple[int, list[str]]':
