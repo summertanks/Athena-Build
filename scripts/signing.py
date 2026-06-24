@@ -290,21 +290,40 @@ def generate_key(config, _key_length: int = 4096) -> bool:
         return False
 
     # Export the public key to the stable path so downstream callers
-    # (cmd_index_repo, build_chroot keyring install) don't need to
-    # re-derive it.  Overwrites any prior export.
+    # (cmd_index_repo, build_chroot keyring install) don't need to re-derive it.
+    _ok, _det = export_public_keyring(config)
+    if not _ok:
+        logger.error(f"signing.generate_key: {_det}")
+        return False
+    return True
+
+
+def export_public_keyring(config) -> Tuple[bool, str]:
+    """Export the public half of the signing key(s) in ``signing_home`` to the
+    stable path (``athena-archive-keyring.gpg``), so ``cmd_index_repo`` and
+    ``build_chroot``'s keyring install can pick it up.
+
+    Exports EVERY public key in the signing homedir (which holds only the
+    project signing key) rather than filtering by ``config.signing_key_uid`` —
+    so it works whether the key was generated locally OR IMPORTED by a
+    federation peer (whose UID is the origin's, not this box's config).
+    ``generate_key`` calls this after generating; the federation onboarding
+    calls it after importing.  Overwrites any prior export.  Returns
+    ``(ok, detail)``."""
+    if shutil.which('gpg') is None:
+        return False, 'gpg not on PATH'
+    home = signing_home(config)
     pub_path = signing_pubkey_path(config)
     proc = subprocess.run(
         ['gpg', '--homedir', home, '--batch', '--yes',
-         '--export', '--output', pub_path, uid],
-        capture_output=True, text=True
+         '--export', '--output', pub_path],
+        capture_output=True, text=True,
     )
     if proc.returncode != 0:
-        logger.error(
-            f"signing.generate_key: gpg --export failed: "
-            f"{proc.stderr.strip()}"
-        )
-        return False
-    return True
+        return False, f"gpg --export failed: {proc.stderr.strip()[:200]}"
+    if not (os.path.isfile(pub_path) and os.path.getsize(pub_path) > 0):
+        return False, 'export produced an empty keyring (no signing key present?)'
+    return True, 'exported'
 
 
 def verify_key(config) -> Tuple[bool, str]:

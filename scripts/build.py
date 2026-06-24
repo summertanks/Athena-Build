@@ -1592,12 +1592,33 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         _table = {
             'generate': 'generate the project signing keypair (`force` to overwrite)',
             'verify':   'sign+verify roundtrip against the current signing key',
+            'export':   're-export the public keyring (athena-archive-keyring.gpg) '
+                        'from the current key — for imported (federation) keys',
         }
         if action == 'generate':
             return self.cmd_generate_signing_key(*args)
         if action == 'verify':
             return self.cmd_verify_signing_key(*args)
+        if action == 'export':
+            return self.cmd_export_signing_keyring(*args)
         return self._group_help('key', _table, action)
+
+    def cmd_export_signing_keyring(self, *args):
+        """`key export` — (re-)export the PUBLIC signing keyring to
+        athena-archive-keyring.gpg from the key already in the signing homedir.
+
+        Use this on a federation peer: it IMPORTED the shared tier-1 key rather
+        than generating one, so the public keyring (which build_chroot embeds so
+        the installed system trusts our mirror) was never written.  Safe and
+        non-destructive — exports the public half only, never touches the key."""
+        import signing
+        _ok, _det = signing.export_public_keyring(self.config)
+        if _ok:
+            console.print(
+                f"  signing keyring exported → {signing.signing_pubkey_path(self.config)}",
+                tui.COLOR_HIGHLIGHT)
+        else:
+            console.print(f"  key export failed: {_det}", tui.COLOR_ERROR)
 
     def cmd_clean(self, action: str = '', *args):
         """Wipe per-stage working state.  Each sub-action is

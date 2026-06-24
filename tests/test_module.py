@@ -839,6 +839,34 @@ def test_signing_import_key_round_trip_real_gpg():
         assert _ok2 is False and 'not found' in _det2
 
 
+def test_signing_export_public_keyring_from_existing_key():
+    """export_public_keyring re-creates the public keyring from the key already
+    in the signing homedir — the federation case (key imported, keyring never
+    exported) — without regenerating the key."""
+    import shutil
+    import subprocess
+    import tempfile
+    if shutil.which('gpg') is None:
+        return
+    from signing import (export_public_keyring, generate_key,
+                         signing_pubkey_path)
+    with tempfile.TemporaryDirectory() as tmp:
+        class _Cfg:
+            dir_gnupg = os.path.join(tmp, 'gnupg')
+            signing_key_uid = 'Athena Test <test@athena.local>'
+        assert generate_key(_Cfg(), _key_length=2048) is True
+        _pub = signing_pubkey_path(_Cfg())
+        os.remove(_pub)                      # simulate the federation gap
+        assert not os.path.isfile(_pub)
+        _ok, _det = export_public_keyring(_Cfg())   # re-export from the key
+        assert _ok, _det
+        assert os.path.isfile(_pub) and os.path.getsize(_pub) > 0
+        _r = subprocess.run(
+            ['gpg', '--no-default-keyring', '--keyring', _pub, '--list-keys'],
+            capture_output=True, text=True)
+        assert 'Athena Test' in _r.stdout, _r.stdout
+
+
 def test_adopt_snapshot_forward_from_head():
     """A peer adopts the mirror's snapshot pin FORWARD from the coord head:
     empty local → adopt; forward → adopt; equal → no-op; disabled → None.
@@ -38364,6 +38392,7 @@ def main() -> int:
         test_onboarding_federation_gpg_mismatch_aborts,
         test_ask_cancel_returns_none,
         test_signing_import_key_round_trip_real_gpg,
+        test_signing_export_public_keyring_from_existing_key,
         test_adopt_snapshot_forward_from_head,
         test_parse_build_pkg_list_strips_comments_dedups_preserves_order,
         test_print_state_shows_mode_header,

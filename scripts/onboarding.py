@@ -415,6 +415,15 @@ def _validate_and_install_gpg(session, gpg_src, ssh_url, ssh_key) -> bool:
     if not _ok:
         console.print(f"✗ signing key not usable ({_msg})", tui.COLOR_ERROR)
         return False
+    # Export the PUBLIC keyring so build_chroot can embed it (the installed
+    # system trusts our mirror via `[signed-by=…]`).  generate_key does this for
+    # an origin builder; a federation peer IMPORTED the key, so do it here too —
+    # otherwise the keyring file is missing and build_chroot warns.
+    _ek, _ed = signing.export_public_keyring(config)
+    if not _ek:
+        console.print(
+            f"  warning: signing keyring export failed ({_ed}) — "
+            "run `key export` before build_chroot", tui.COLOR_WARNING)
     return True
 
 
