@@ -1591,6 +1591,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             console.print("container remote add: an SSH key (key=<path>) is "
                           "required", tui.COLOR_ERROR)
             return
+        _keysrc = os.path.expanduser(_keysrc)     # accept ~/.ssh/… paths
         _keydst = os.path.join(self.config.dir_config, f"{_name}.key")
         if not utils.copy_ssh_key(_keysrc, _keydst):
             console.print(f"container remote add: cannot read SSH key {_keysrc}",
