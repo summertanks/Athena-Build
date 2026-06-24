@@ -1572,6 +1572,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
 BuildSession._SETTABLE = {
     'mode':                BuildSession._set_mode,
     'include-recommends':  BuildSession._set_include_recommends,
+    'include-build-closure': BuildSession._set_include_build_closure,
     # machine-local (persist to config/local.conf)
     'name':                BuildSession._set_name,
     'jobs':                BuildSession._set_jobs,
@@ -1585,6 +1586,8 @@ BuildSession._GETTABLE = {
                                               'distribution'),
     'include-recommends':  lambda s: getattr(s.config,
                                               'include_recommends', False),
+    'include-build-closure': lambda s: getattr(s.config,
+                                               'include_build_closure', False),
     'build-version':       lambda s: getattr(s.config, 'build_version', '?'),
     'codename':            lambda s: getattr(s.config, 'build_codename', '?'),
     'distribution':        lambda s: getattr(s.config,

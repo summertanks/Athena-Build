@@ -13,6 +13,7 @@ import logging
 import os
 from typing import Optional
 
+import build_closure
 import buildcontainer
 import dependencytree
 import selection_lock
@@ -715,6 +716,56 @@ class CacheCommandsMixin(SessionState):
             console.print(
                 "RECOMMENDS: excluded — set IncludeRecommends to include ",
                 tui.COLOR_INFO)
+
+        # IncludeBuildClosure: widen the selection with the build closure —
+        # the Build-Depends of every selected source, resolved transitively —
+        # so the toolchain itself is built from + served by our own mirror.
+        # OFF by default (the build closure is ~5-6x the runtime source set).
+        # Reuses the proven resolver path (like pool.list, conflicts disabled),
+        # then segregates the added set into toolchain/language/leaf tiers.
+        if self.config.include_build_closure:
+            console.print(
+                "Pass VIII: Resolving build closure (Build-Depends, "
+                "conflicts disabled)", tui.COLOR_INFO)
+            _bd_names: set = set()
+            for _src in self.dep_tree.selected_srcs.values():
+                for _grp in _src.build_depends(
+                        self.config.arch,
+                        frozenset(self.config.build_profiles),
+                        cache=self.cache):
+                    # first alternative present in the deb cache wins
+                    _chosen = next(
+                        (_alt[0] for _alt in _grp if _alt[0] in _deb_table),
+                        _grp[0][0] if _grp else None)
+                    if _chosen:
+                        _bd_names.add(_chosen)
+            _pre_bc = set(self.dep_tree.selected_pkgs.keys())
+            _bd_resolvable = sorted(n for n in _bd_names if n in _deb_table)
+            if _bd_resolvable:
+                self.dep_tree.resolve_packages(
+                    _bd_resolvable, check_conflicts=False)
+            _delta = {
+                n for n in (set(self.dep_tree.selected_pkgs.keys()) - _pre_bc)
+                if n == self.dep_tree.selected_pkgs[n]['Package']
+            }
+            self.dep_tree.build_closure_pkg_names = _delta
+            _adj = {
+                n: list(p.depends_on)
+                for n, p in self.dep_tree.selected_pkgs.items()
+                if n == p['Package']
+            }
+            _tiers = build_closure.classify_tiers(_delta, _adj)
+            self.dep_tree.build_closure_tiers = _tiers
+            console.print(
+                "BUILD CLOSURE: added "
+                f"{len(_delta)} pkg(s) — toolchain {len(_tiers['toolchain'])}"
+                f" / language {len(_tiers['language'])}"
+                f" / leaf {len(_tiers['leaf'])} ",
+                tui.COLOR_INFO)
+        else:
+            console.print(
+                "BUILD CLOSURE: disabled — set IncludeBuildClosure to "
+                "self-host the toolchain ", tui.COLOR_INFO)
 
         # --- Validation ---------------------------------------------------------
         console.print("Checking Breaks and Conflicts...")

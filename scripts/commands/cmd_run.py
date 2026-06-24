@@ -139,6 +139,32 @@ class ConfigRunCommandsMixin(SessionState):
                 "  dep_check_ready cleared — run `cache parse`",
                 tui.COLOR_INFO)
 
+    def _set_include_build_closure(self, value: str) -> None:
+        """`set include-build-closure <true|false>`"""
+        _v = value.lower()
+        if _v in ('true', '1', 'yes', 'on'):
+            _new = True
+        elif _v in ('false', '0', 'no', 'off'):
+            _new = False
+        else:
+            console.print(
+                f"  invalid bool: {value!r}  (try: true | false)",
+                tui.COLOR_ERROR)
+            return
+        if getattr(self.config, 'include_build_closure', False) == _new:
+            console.print(f"  include-build-closure already = {_new}",
+                          tui.COLOR_INFO)
+            return
+        self.config.include_build_closure = _new
+        console.print(
+            f"  include-build-closure  →  {_new}  (session-local)",
+            tui.COLOR_HIGHLIGHT)
+        if self.flags.dep_check_ready:
+            self.flags.dep_check_ready = False
+            console.print(
+                "  dep_check_ready cleared — run `cache parse`",
+                tui.COLOR_INFO)
+
     # ── machine-local setters: persist to config/local.conf ──────────
     # These mutate the per-machine keys that the config split moved OUT of the
     # tracked config (build.conf/distro.conf) and INTO the untracked

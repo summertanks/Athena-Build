@@ -144,6 +144,14 @@ class DependencyTree:
         self.pool_extras_pkg_names: set = set()
         self.pool_extras_src_names: set = set()
 
+        # Build-closure (IncludeBuildClosure): the Build-Depends of every
+        # selected source, resolved transitively, so the toolchain is built
+        # from + served by our own mirror.  build_closure_pkg_names is the
+        # full added set; build_closure_tiers is its toolchain/language/leaf
+        # segregation (see build_closure.py).  Empty unless the flag is on.
+        self.build_closure_pkg_names: set = set()
+        self.build_closure_tiers: dict = {}
+
         # pkg.list groups — operator-defined install-time package
         # groups.  `pkg_group_pkg_names[<group>]` is the set of
         # canonical package names whose membership in selected_pkgs is
