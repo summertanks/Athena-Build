@@ -55,7 +55,7 @@ RESULT_MARKER = "__ATHENA_LM_RESULT__"
 LOCAL_ORIGIN = "AthenaLocalMirror"
 
 _CHUNK = 1 << 16            # 64 KiB read chunk
-_EMIT_EVERY = 1 << 18      # emit a progress marker every 256 KiB (smooth bar)
+_EMIT_EVERY = 1 << 16      # emit a progress marker every 64 KiB (== read chunk)
 
 
 def _log(msg: str) -> None:
