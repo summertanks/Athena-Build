@@ -2820,6 +2820,8 @@ def _download_source_with_mocked_get(mock_resp_factory, expected_size: int = 100
         def __init__(s, *a, **k): pass
         def step(s, *a, **k): pass
         def label(s, *a, **k): pass
+        def set_max(s, *a, **k): pass
+        def reset(s, *a, **k): pass
         def close(s, *a, **k): pass
 
     mirror = Mirror('main', 'http://x.test', 'debian', 'bookworm', '', 'main', 'amd64')
@@ -8746,6 +8748,8 @@ def test_download_file_returns_http_status_detail_on_404():
         def __init__(s, *a, **k): pass
         def step(s, *a, **k): pass
         def label(s, *a, **k): pass
+        def set_max(s, *a, **k): pass
+        def reset(s, *a, **k): pass
         def close(s, *a, **k): pass
 
     saved_console = utils.tui.console
