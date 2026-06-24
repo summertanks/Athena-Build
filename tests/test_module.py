@@ -38283,12 +38283,25 @@ def test_local_mirror_index_writes_flat_apt_repo_with_origin():
         assert os.path.isfile(os.path.join(d, 'Packages.gz'))
 
 
+def test_local_mirror_index_failure_leaves_no_valid_mirror():
+    """A failed/empty dpkg-scanpackages (e.g. no .debs) must NOT leave an empty
+    Packages that is_valid_for would treat as ready."""
+    import local_mirror
+    with tempfile.TemporaryDirectory() as d:
+        # empty dir → dpkg-scanpackages emits nothing → index() returns False
+        assert not local_mirror.index(d)
+        assert not os.path.isfile(os.path.join(d, 'Packages'))
+        local_mirror._write_marker(d, '20260621T135952Z')
+        assert not local_mirror.is_valid_for(d, '20260621T135952Z')
+
+
 def test_local_mirror_is_valid_for_keys_to_snapshot_marker():
     """is_valid_for is True only when Packages exists AND the .snapshot marker
     matches the requested ts (so a snapshot bump invalidates the mirror)."""
     import local_mirror
     with tempfile.TemporaryDirectory() as d:
-        open(os.path.join(d, 'Packages'), 'w').close()
+        with open(os.path.join(d, 'Packages'), 'w') as fh:
+            fh.write('Package: x\nVersion: 1\n')   # non-empty index
         assert not local_mirror.is_valid_for(d, '20260621T135952Z')  # no marker
         local_mirror._write_marker(d, '20260621T135952Z')
         assert local_mirror.is_valid_for(d, '20260621T135952Z')
@@ -38303,6 +38316,7 @@ def main() -> int:
         test_build_closure_classify_tiers_uses_adjacency,
         test_local_mirror_plan_resolves_build_closure_to_snapshot_urls,
         test_local_mirror_index_writes_flat_apt_repo_with_origin,
+        test_local_mirror_index_failure_leaves_no_valid_mirror,
         test_local_mirror_is_valid_for_keys_to_snapshot_marker,
         # v0.2 step 1
         test_mirror_url_composition,
