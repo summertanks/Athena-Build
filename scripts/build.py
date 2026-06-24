@@ -1655,15 +1655,11 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         if _guided and not getattr(self.config, 'create_local_mirror', False):
             _lm_resp = Prompt(
                 PROMPT_YESNO,
-                "Enable a local build mirror? (caches the build-dep closure on "
-                "the build host's disk so builds don't re-download from "
-                "snapshot — built at `container remote init`)").get_response()
+                "Enable a local build mirror?").get_response()
             if _lm_resp.strip().lower() in ('y', 'yes'):
                 self.config.create_local_mirror = True
                 utils.write_local_conf(self.config, create_local_mirror=True)
-                console.print(
-                    "  local build mirror ENABLED (machine-wide; populated on "
-                    "each remote at `container remote init`)", tui.COLOR_INFO)
+                console.print("  local build mirror ENABLED", tui.COLOR_INFO)
 
         # 6. Persist + summary.
         _ok, _detail = utils.add_remote(
