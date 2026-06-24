@@ -186,6 +186,24 @@ class ConfigRunCommandsMixin(SessionState):
         console.print(f"  name  →  {_v}  (saved to local.conf)",
                       tui.COLOR_HIGHLIGHT)
 
+    def _set_create_local_mirror(self, value: str) -> None:
+        """`set create-local-mirror <true|false>` — persist to local.conf."""
+        _v = value.lower()
+        if _v in ('true', '1', 'yes', 'on'):
+            _new = True
+        elif _v in ('false', '0', 'no', 'off'):
+            _new = False
+        else:
+            console.print(
+                f"  invalid bool: {value!r}  (try: true | false)",
+                tui.COLOR_ERROR)
+            return
+        self.config.create_local_mirror = _new
+        utils.write_local_conf(self.config, create_local_mirror=_new)
+        console.print(
+            f"  create-local-mirror  →  {_new}  (saved to local.conf)",
+            tui.COLOR_HIGHLIGHT)
+
     def _set_jobs(self, value: str) -> None:
         """`set jobs <N>` — MaxParallelBuilds (1-8)."""
         try:

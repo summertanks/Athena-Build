@@ -238,6 +238,7 @@ _BASE_CONF_BODY = """
     Source = source
     Build = build
     Repo = repo
+    LocalMirror = localmirror
     Config = config
     Patch = patch
     Fork = fork
@@ -3894,13 +3895,18 @@ def test_build_conf_ingests_nonfree_components_and_tunnels_firmware():
             _cp.get('Source', 'Tunneled', fallback='').split(',') if _t.strip()}
     for _src in ('intel-microcode', 'amd64-microcode', 'firmware-nonfree'):
         assert _src in _tun, (_src, _tun)
-    # shim-signed / shim-helpers-amd64-signed / grub2 are intentionally NOT
-    # tunneled — Athena ships no Secure Boot story today.  Path C (self-
-    # signed + MOK) is tracked in docs/plans/secboot-01-mok-self-sign.md.
-    for _src in ('shim-signed', 'shim-helpers-amd64-signed', 'grub2'):
+    # shim-signed / shim-helpers-amd64-signed / fwupd-amd64-signed entered the
+    # closure via Recommends and ARE tunneled — they repackage Debian's signed
+    # binaries from source data, so we ship the pristine .deb rather than
+    # source-build a relabelled signature (see build.conf [Source]).
+    for _src in ('shim-signed', 'shim-helpers-amd64-signed',
+                 'fwupd-amd64-signed'):
+        assert _src in _tun, (_src, _tun)
+    # grub-efi-amd64-signed / linux-signed-amd64 are left source-building (NOT
+    # tunneled); grub2 is not a signed package.
+    for _src in ('grub-efi-amd64-signed', 'linux-signed-amd64', 'grub2'):
         assert _src not in _tun, (
-            f"{_src} unexpectedly in Tunneled — SECBOOT-01 is deferred, "
-            f"don't auto-add the Debian-signed chain")
+            f"{_src} unexpectedly in Tunneled — left source-building")
     with open(os.path.join(_ROOT, 'config', 'pool.list')) as fh:
         _pool = {ln.strip() for ln in fh
                  if ln.strip() and not ln.lstrip().startswith('#')}
@@ -38197,10 +38203,107 @@ def test_build_closure_classify_tiers_uses_adjacency():
     assert t['leaf'] == {'libbar-dev'}
 
 
+def _lm_mock_cache_and_tree():
+    """Shared fixture for local_mirror tests: a tiny package universe + one
+    source whose Build-Depends seed a resolvable closure."""
+    class _Mir:
+        url = 'https://snapshot.debian.org/archive/debian/20260621T135952Z'
+
+    class _Pkg(dict):
+        def __init__(s, d):
+            super().__init__(d)
+            s._mirror = _Mir()
+
+    def _P(deps, fn, sz):
+        return _Pkg({'Depends': deps, 'Pre-Depends': '', 'Filename': fn,
+                     'Size': str(sz), 'SHA256': '', 'Provides': ''})
+
+    class _Cache:
+        package_hashtable = {
+            'build-essential': {'1': [_P('gcc, make',
+                'pool/main/b/be/build-essential_1_amd64.deb', 100)]},
+            'gcc':       {'1': [_P('libc6-dev', 'pool/main/g/gcc/gcc_1_amd64.deb', 200)]},
+            'make':      {'1': [_P('', 'pool/main/m/make/make_1_amd64.deb', 50)]},
+            'libc6-dev': {'1': [_P('', 'pool/main/g/glibc/libc6-dev_1_amd64.deb', 300)]},
+            'dpkg-dev':  {'1': [_P('', 'pool/main/d/dpkg/dpkg-dev_1_amd64.deb', 80)]},
+            'debhelper': {'1': [_P('dpkg-dev', 'pool/main/d/dh/debhelper_1_amd64.deb', 60)]},
+            'libfoo-dev': {'1': [_P('', 'pool/main/f/foo/libfoo-dev_1_amd64.deb', 40)]},
+        }
+
+    class _Src(dict):
+        pass
+
+    class _Dt:
+        selected_srcs = {'foo': _Src({'Build-Depends': 'debhelper, libfoo-dev',
+                                      'Build-Depends-Indep': '',
+                                      'Build-Depends-Arch': ''})}
+    return _Cache(), _Dt()
+
+
+def test_local_mirror_plan_resolves_build_closure_to_snapshot_urls():
+    """local_mirror.plan: the build closure (toolchain + build-deps + install
+    closure) maps to download entries whose URLs are the snapshot-pinned
+    pkg._mirror.url + Filename."""
+    import local_mirror
+    cache, dt = _lm_mock_cache_and_tree()
+    pl = local_mirror.plan(cache, dt, object())
+    names = {e['name'] for e in pl['entries']}
+    assert {'build-essential', 'gcc', 'make', 'libc6-dev'} <= names   # toolchain
+    assert {'debhelper', 'dpkg-dev', 'libfoo-dev'} <= names           # build-deps
+    assert pl['total_size'] == 830
+    assert all(e['url'].startswith(
+        'https://snapshot.debian.org/archive/debian/20260621T135952Z/pool/')
+        for e in pl['entries'])
+
+
+def test_local_mirror_index_writes_flat_apt_repo_with_origin():
+    """local_mirror.index: dpkg-scanpackages → a flat Packages (./ filenames)
+    plus a Release carrying Origin: AthenaLocalMirror (so the container can
+    pin it above the snapshot)."""
+    import subprocess
+
+    import local_mirror
+    with tempfile.TemporaryDirectory() as d:
+        _root = os.path.join(d, 'pkgroot')
+        os.makedirs(os.path.join(_root, 'DEBIAN'))
+        with open(os.path.join(_root, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write('Package: athena-test-marker\nVersion: 1.0\n'
+                     'Architecture: all\nMaintainer: t <t@t>\nDescription: t\n')
+        subprocess.run(['dpkg-deb', '--build', '-Znone', _root,
+                        os.path.join(d, 'athena-test-marker_1.0_all.deb')],
+                       check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        assert local_mirror.index(d)
+        _pkgs = open(os.path.join(d, 'Packages')).read()
+        _rel = open(os.path.join(d, 'Release')).read()
+        assert 'Package: athena-test-marker' in _pkgs
+        assert './athena-test-marker' in _pkgs          # flat ./ filename
+        assert 'Origin: AthenaLocalMirror' in _rel
+        assert 'SHA256:' in _rel
+        assert os.path.isfile(os.path.join(d, 'Packages.gz'))
+
+
+def test_local_mirror_is_valid_for_keys_to_snapshot_marker():
+    """is_valid_for is True only when Packages exists AND the .snapshot marker
+    matches the requested ts (so a snapshot bump invalidates the mirror)."""
+    import local_mirror
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, 'Packages'), 'w').close()
+        assert not local_mirror.is_valid_for(d, '20260621T135952Z')  # no marker
+        local_mirror._write_marker(d, '20260621T135952Z')
+        assert local_mirror.is_valid_for(d, '20260621T135952Z')
+        assert not local_mirror.is_valid_for(d, '20260101T000000Z')  # stale
+        assert not local_mirror.is_valid_for(d, None)
+        assert local_mirror.status(d)['snapshot'] == '20260621T135952Z'
+
+
 def main() -> int:
     tests = [
         test_build_closure_module_partitions_tiers_disjointly,
         test_build_closure_classify_tiers_uses_adjacency,
+        test_local_mirror_plan_resolves_build_closure_to_snapshot_urls,
+        test_local_mirror_index_writes_flat_apt_repo_with_origin,
+        test_local_mirror_is_valid_for_keys_to_snapshot_marker,
         # v0.2 step 1
         test_mirror_url_composition,
         test_mirror_suite_with_suffix,
