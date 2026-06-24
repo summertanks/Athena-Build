@@ -1647,6 +1647,24 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             return
         _mem = _mem_s
 
+        # 5b. Local build mirror — a machine-wide toggle (CreateLocalMirror)
+        # that governs LOCAL builds' localmirror AND, for remote builders, the
+        # on-remote build-closure mirror populated at `container remote init`.
+        # Offer it here (guided only) since it's part of "set up a build host";
+        # skip if already enabled.  Built later, at init — not now.
+        if _guided and not getattr(self.config, 'create_local_mirror', False):
+            _lm_resp = Prompt(
+                PROMPT_YESNO,
+                "Enable a local build mirror? (caches the build-dep closure on "
+                "the build host's disk so builds don't re-download from "
+                "snapshot — built at `container remote init`)").get_response()
+            if _lm_resp.strip().lower() in ('y', 'yes'):
+                self.config.create_local_mirror = True
+                utils.write_local_conf(self.config, create_local_mirror=True)
+                console.print(
+                    "  local build mirror ENABLED (machine-wide; populated on "
+                    "each remote at `container remote init`)", tui.COLOR_INFO)
+
         # 6. Persist + summary.
         _ok, _detail = utils.add_remote(
             self.config, name=_name, host=_host, ssh_key=_keydst,
