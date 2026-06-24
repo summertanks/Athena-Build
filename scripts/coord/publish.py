@@ -167,6 +167,7 @@ def generate_pending_claims(
         # version).  The hash-conflict / ownership scan backstops over-claiming
         # a file another builder genuinely owns.
         if _drifted:
+            assert pool is not None   # _drifted is only True when pool is set
             _bins = {_fn.rsplit('_', 2)[0] for _fn in _outputs}
             _pool_outputs = sorted(
                 _pool_latest[_bn] for _bn in _bins if _bn in _pool_latest)
