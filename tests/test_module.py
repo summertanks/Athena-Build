@@ -20222,6 +20222,43 @@ def test_transport_remote_sha256_parses_digest_and_guards():
         _tr.subprocess = _orig
 
 
+def test_transport_list_remote_debs_parses_and_guards():
+    """list_remote_debs runs `find dists … *.deb/*.udeb` on the pool host and
+    returns the relative paths as a set; None on bad spec / non-zero rc."""
+    import types as _types
+
+    import coord.transport as _tr
+    _seen = {}
+    _orig = _tr.subprocess
+
+    def _run_factory(rc, out):
+        def _run(argv, **k):
+            _seen['argv'] = argv
+            return _types.SimpleNamespace(returncode=rc, stdout=out, stderr='')
+        return _run
+    try:
+        _tr.subprocess = _types.SimpleNamespace(
+            run=_run_factory(
+                0,
+                'dists/thor/main/binary-amd64/a.deb\n'
+                'dists/thor/main-udeb/binary-amd64/b.udeb\n'),
+            SubprocessError=Exception)
+        _got = _tr.list_remote_debs('ubuntu@host:asgard', 'k.key')
+        assert _got == {'dists/thor/main/binary-amd64/a.deb',
+                        'dists/thor/main-udeb/binary-amd64/b.udeb'}
+        # finds both .deb and .udeb under dists, from the pool path
+        _cmd = _seen['argv'][-1]
+        assert 'find dists' in _cmd and "*.deb" in _cmd and "*.udeb" in _cmd
+        assert 'asgard' in _cmd
+        # no colon → None (no ssh attempted)
+        assert _tr.list_remote_debs('not-a-spec') is None
+        # non-zero rc → None
+        _tr.subprocess.run = _run_factory(1, '')
+        assert _tr.list_remote_debs('ubuntu@host:asgard') is None
+    finally:
+        _tr.subprocess = _orig
+
+
 def test_mirror_audit_disk_vs_claims_folds_superseded_claims():
     """_mirror_audit_disk_vs_claims must fold marker claims (retracted/
     deprecated/obsolete) AND the published claims their *_seq back-refs
@@ -39025,6 +39062,7 @@ def main() -> int:
         test_mirror_publish_reindexes_stale_local_index,
         test_push_dist_tree_excludes_pool_artifacts,
         test_transport_remote_sha256_parses_digest_and_guards,
+        test_transport_list_remote_debs_parses_and_guards,
         test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
         test_cmd_source_fork_enable_removes_marker,

@@ -25,6 +25,7 @@ in cmd_repo_publish has its own ProgressBar that wraps this).
 
 import logging
 import os
+import shlex
 import subprocess
 from typing import Callable, List, Optional, Tuple
 
@@ -213,6 +214,43 @@ def remote_sha256(
         return None
     _parts = (_r.stdout or '').strip().split()
     return _parts[0] if _parts and len(_parts[0]) == 64 else None
+
+
+def list_remote_debs(
+    pool_remote_spec: str, ssh_key: 'Optional[str]' = None,
+) -> 'Optional[set]':
+    """Set of .deb/.udeb paths under the remote pool root, RELATIVE to that
+    root (e.g. ``dists/thor/main/binary-amd64/foo.deb``) — matching the local
+    relpaths from ``config.dir_repo``.  ``pool_remote_spec`` is the rsync-style
+    ``user@host:poolroot``.  Returns None on failure so the pool-completeness
+    check can degrade to a warning rather than a false "all present".
+
+    Used by mirror publish to confirm every .deb the pushed Packages index
+    references is actually on the mirror — a per-file push that failed dropped
+    its CLAIM but left the .deb in the local index, so the published index can
+    otherwise promise files that 404."""
+    if ':' not in pool_remote_spec:
+        return None
+    _host, _path = pool_remote_spec.split(':', 1)
+    _path = _path.rstrip('/') or '.'
+    _find = (f"cd {shlex.quote(_path)} && "
+             "find dists -type f \\( -name '*.deb' -o -name '*.udeb' \\)")
+    _argv = ['ssh']
+    if ssh_key:
+        _argv += ['-i', ssh_key]
+    _argv += ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'BatchMode=yes',
+              _host, _find]
+    try:
+        _r = subprocess.run(_argv, capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as _e:
+        logger.error(f"coord.transport.list_remote_debs({pool_remote_spec}): {_e}")
+        return None
+    if _r.returncode != 0:
+        logger.error(
+            f"coord.transport.list_remote_debs: rc={_r.returncode}: "
+            f"{(_r.stderr or '').strip()[:200]}")
+        return None
+    return {_ln.strip() for _ln in (_r.stdout or '').splitlines() if _ln.strip()}
 
 
 def pull_single_file(
