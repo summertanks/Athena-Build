@@ -3475,22 +3475,38 @@ def download_source(dependency_tree: 'dependencytree.DependencyTree',
     _skipped = 0
     _total = len(_file_list)
 
+    # Two stacked bars: a CUMULATIVE bar (package count in the label, total
+    # bytes as value/total, NO rate — a cumulative B/s figure is misleading,
+    # it averages over already-downloaded files) kept persistent at the end;
+    # and a PER-FILE bar (filename + that file's size, WITH the real per-file
+    # rate) reset for each file and removed once all downloads finish.
     try:
-        progress_bar = ProgressBar(label='Downloading', itr_label='B/s', maxvalue=max(1, _download_size))
+        _cumulative_bar = ProgressBar(
+            label=f'(0/{_total})', maxvalue=max(1, _download_size),
+            show_rate=False)
+        _file_bar = ProgressBar(
+            label='', itr_label='B/s', maxvalue=1, show_rate=True)
     except Exception as e:
-        progress_bar = None
+        _cumulative_bar = None
+        _file_bar = None
         tui.console.print("WARNING: progress bar unavailable, continuing without it")
         logger.error(f"download_source ProgressBar: {type(e).__name__}: {e}")
 
     for _file in _file_list:
-        if progress_bar is not None:
-            progress_bar.label(f'({_index}/{_total}) {_file[:20]}')
+        _expected_size = int(_file_list[_file]['size'])
+        if _cumulative_bar is not None:
+            _cumulative_bar.label(f'({_index}/{_total})')
+        if _file_bar is not None:
+            # set_max + reset zeroes the value AND the timer, so the rate
+            # shown is THIS file's rate, not a cumulative average.
+            _file_bar.set_max(max(1, _expected_size))
+            _file_bar.reset()
+            _file_bar.label(_file[:20])
 
         _mirror = _file_mirror[_file]
         _base_url = _mirror.url + '/'
         _url = urljoin(_base_url, _file_list[_file]['path'])
         _sha256 = _file_list[_file]['sha256']
-        _expected_size = int(_file_list[_file]['size'])
         _download_path = os.path.join(dst_dir, _file)
 
         if get_sha256(_download_path) != _sha256:
@@ -3508,11 +3524,14 @@ def download_source(dependency_tree: 'dependencytree.DependencyTree',
                     tui.console.print(f"ERROR: file:// copy failed for {_url}")
                     logger.error(f"download_source({_url}): {e}")
                     continue
-                if progress_bar is not None:
-                    try:
-                        progress_bar.step(os.path.getsize(_download_path))
-                    except OSError:
-                        pass
+                try:
+                    _sz = os.path.getsize(_download_path)
+                    if _cumulative_bar is not None:
+                        _cumulative_bar.step(_sz)
+                    if _file_bar is not None:
+                        _file_bar.step(_sz)
+                except OSError:
+                    pass
                 # Fall through to the size + sha256 verification below
                 # (which gates _file_list[_file] for downstream consumers).
             else:
@@ -3543,8 +3562,10 @@ def download_source(dependency_tree: 'dependencytree.DependencyTree',
                                 for chunk in response.iter_content(chunk_size=8192):
                                     if chunk:
                                         f.write(chunk)
-                                        if progress_bar is not None:
-                                            progress_bar.step(len(chunk))
+                                        if _cumulative_bar is not None:
+                                            _cumulative_bar.step(len(chunk))
+                                        if _file_bar is not None:
+                                            _file_bar.step(len(chunk))
                         break  # success
                     except (_ReqConnErr, _ReqReadTimeout, _ReqConnTimeout) as e:
                         if _attempt < _HTTP_RETRY_COUNT - 1:
@@ -3609,14 +3630,19 @@ def download_source(dependency_tree: 'dependencytree.DependencyTree',
 
         else:
             _skipped += 1
-            if progress_bar is not None:
-                progress_bar.step(_expected_size)
+            if _cumulative_bar is not None:
+                _cumulative_bar.step(_expected_size)
+            if _file_bar is not None:
+                _file_bar.step(_expected_size)
             _downloaded_size += _expected_size
 
         _index += 1
 
-    if progress_bar is not None:
-        progress_bar.close(persist=True)
+    # Per-file bar is transient — remove it; keep the cumulative summary line.
+    if _file_bar is not None:
+        _file_bar.close(persist=False)
+    if _cumulative_bar is not None:
+        _cumulative_bar.close(persist=True)
 
     tui.console.print(f"Downloading {_total - _skipped} files, Skipped {_skipped} files")
     return _downloaded_size
