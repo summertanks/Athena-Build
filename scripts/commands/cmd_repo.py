@@ -995,6 +995,7 @@ class RepoCommandsMixin(SessionState):
                 f"{len(_claimed)} file(s) still have a LIVE mirror claim — "
                 "`mirror publish` releases them first (the clean order).  "
                 "Delete locally now anyway?",
+                informational=True,
             ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 console.print(
@@ -1012,6 +1013,7 @@ class RepoCommandsMixin(SessionState):
             + (f" + {len(_sidecar_orphans)} orphan sidecar(s)"
                if _sidecar_orphans else "")
             + "?  This is IRREVERSIBLE.",
+            informational=True,
         ).get_response()
         if _resp.lower() not in ('y', 'yes'):
             console.print("Aborted — no files deleted")

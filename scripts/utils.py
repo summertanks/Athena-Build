@@ -2601,6 +2601,14 @@ class BuildConfig:
             # the full operator-facing rationale.
             self.include_recommends = config_parser.getboolean(
                 'Build', 'IncludeRecommends', fallback=True)
+            # When true, the build closure — Build-Depends of every selected
+            # source, resolved transitively — is added to the selection so the
+            # toolchain is built from and served by our own mirror
+            # (reproducible builds with no reach-out to snapshot.debian.org).
+            # OFF by default; when on, the added set is segregated into
+            # toolchain-core / language-stack / leaf build-dep tiers.
+            self.include_build_closure = config_parser.getboolean(
+                'Source', 'IncludeBuildClosure', fallback=False)
             # Docker client read-timeout (seconds).  Optional; the floor
             # below is generous so a multi-hour build's quiet phases
             # don't trip container.wait()/logs reads (the worker survives
