@@ -157,6 +157,15 @@ class Prompt:
                 masked=self._masked,
                 keymode=self._keymode,
             )
+            # Input stream exhausted (headless `--cmd` with no `--yes`, or
+            # Ctrl-D): don't re-prompt forever on an endlessly-empty read.
+            # Choose a safe default — a YESNO confirmation defaults to "n"
+            # (abort the action); other types break with whatever was read.
+            if getattr(b, 'stdin_eof', False):
+                if self._type == PROMPT_YESNO:
+                    console.print('  no input (EOF) — defaulting to n')
+                    return 'n'
+                break
             if self._type == PROMPT_OPTIONS and answer not in self._options:
                 console.print(f'  Please enter one of: {", ".join(self._options)}')
                 continue

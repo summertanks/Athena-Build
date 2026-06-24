@@ -136,6 +136,11 @@ class Cli:
         # prompts (sudo password, conflict-resolution OPTIONS) wait
         # for operator input regardless of the flag.
         self.auto_yes: bool = False
+        # Set True whenever a prompt read hits EOF (closed/exhausted stdin —
+        # headless `--cmd` with no `--yes`, or Ctrl-D).  Prompt.get_response()
+        # consults it to break its YESNO/OPTIONS re-prompt loop instead of
+        # spinning forever on an endlessly-empty stdin.
+        self.stdin_eof: bool = False
         # ANSI colour for stdout when running attached to a TTY
         # and the operator hasn't set NO_COLOR (https://no-color.org/).
         # Redirected output (`> log.txt`) gets plain text.
@@ -238,22 +243,26 @@ class Cli:
         (PROMPT_PASSWORD).  ``keymode``: PROMPT_PAUSE — read any line and
         discard.  Default: read a line from stdin via ``input()``.
         """
+        self.stdin_eof = False
         if keymode:
             try:
                 input(message)
             except EOFError:
                 # Ctrl+D at a pause prompt — treat as "continue".
+                self.stdin_eof = True
                 print()
             return ''
         if masked:
             try:
                 return getpass.getpass(message)
             except EOFError:
+                self.stdin_eof = True
                 print()
                 return ''
         try:
             return input(message)
         except EOFError:
+            self.stdin_eof = True
             print()
             return ''
 
