@@ -24,7 +24,7 @@ State document shape (extensible — readers MUST preserve unknown keys):
       "arch": "amd64",
       "snapshot": "20260602T173733Z",        # informational baseline
       "flags": {"IncludeRecommends": true,
-                "IncludeBuildDep": false},    # IncludeBuildDep reserved
+                "IncludeBuildClosure": false},
       "seeds": {"pkg": {"<group>": [...]},
                 "live": [...], "installer": [...], "pool": [...]},
       "closure": {"bins": {"<name>": ["<tier>", ...]},
@@ -263,7 +263,8 @@ def assemble_state(
         'snapshot': getattr(config, 'snapshot_timestamp_config', ''),
         'flags': {
             'IncludeRecommends': bool(getattr(config, 'include_recommends', False)),
-            'IncludeBuildDep': False,   # reserved — see module docstring
+            'IncludeBuildClosure': bool(
+                getattr(config, 'include_build_closure', False)),
         },
         'seeds': seeds_from_config(config),
         'closure': closure,
@@ -289,7 +290,8 @@ def federation_state(config: 'Any', payload: dict) -> dict:
         'flags': payload.get('flags') or {
             'IncludeRecommends': bool(
                 getattr(config, 'include_recommends', False)),
-            'IncludeBuildDep': False,
+            'IncludeBuildClosure': bool(
+                getattr(config, 'include_build_closure', False)),
         },
         'seeds': seeds_from_config(config),
         'closure': payload.get('closure') or {},
