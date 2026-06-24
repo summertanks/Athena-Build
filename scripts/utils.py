@@ -2082,7 +2082,8 @@ def write_local_conf(config: 'BuildConfig', *,
                      max_parallel_builds: 'Optional[int]' = None,
                      build_cpus: 'Optional[float]' = None,
                      build_memory: 'Optional[str]' = None,
-                     docker_server: 'Optional[str]' = None) -> None:
+                     docker_server: 'Optional[str]' = None,
+                     create_local_mirror: 'Optional[bool]' = None) -> None:
     """Read-merge-write config/local.conf (mirrors write_snapshot_state's
     shape: read existing, set only the provided fields, atomic write).
 
@@ -2107,6 +2108,9 @@ def write_local_conf(config: 'BuildConfig', *,
                     'true' if setup_complete else 'false')
     if name is not None:
         _parser.set('Local', 'Name', name)
+    if create_local_mirror is not None:
+        _parser.set('Local', 'CreateLocalMirror',
+                    'true' if create_local_mirror else 'false')
     # [Build] host tuning — machine-specific, never tracked.
     if (max_parallel_builds is not None or build_cpus is not None
             or build_memory is not None or docker_server is not None):
@@ -2645,6 +2649,14 @@ class BuildConfig:
                 _local_conf.get('Local', 'Role', fallback='') or '').strip().lower()
             self.setup_complete = _local_conf.getboolean(
                 'Local', 'SetupComplete', fallback=False)
+            # When true, a snapshot-pinned local apt mirror of the build
+            # closure is maintained under dir_localmirror; build containers add
+            # it as their first apt source so build-deps come from local disk
+            # instead of re-downloading from snapshot.debian.org every time.
+            # Machine-local (per-machine bandwidth/disk choice); set by the
+            # container-init prompt or `set create-local-mirror`.
+            self.create_local_mirror = _local_conf.getboolean(
+                'Local', 'CreateLocalMirror', fallback=False)
             # Build-system name — this machine's builder identity (e.g.
             # athena-primary), set at `configure`.  Machine-local only; empty on
             # a fresh/un-onboarded checkout.
@@ -3013,6 +3025,13 @@ class BuildConfig:
             # mirror that here so a Python-only invocation (e.g. tests)
             # gets the same layout without depending on the bash script.
             self.dir_gnupg = os.path.join(self.working_dir, config_parser.get('Directories', 'Gnupg'))
+            # Local build mirror — snapshot-pinned apt repo of the build
+            # closure (see local_mirror.py / CreateLocalMirror).  Fallback keeps
+            # older checkouts (no LocalMirror key) working.
+            self.dir_localmirror = os.path.join(
+                self.working_dir,
+                config_parser.get('Directories', 'LocalMirror',
+                                  fallback='localmirror'))
 
         except (configparser.Error, OSError) as e:
             self.error_str = str(e)
@@ -3032,6 +3051,7 @@ class BuildConfig:
             pathlib.Path(self.dir_build_stage).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_source).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_repo).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_localmirror).mkdir(parents=True, exist_ok=True)
             for _sub in (
                 self.dir_repo_main, self.dir_repo_main_udeb,
                 self.dir_repo_main_source,
@@ -3116,7 +3136,8 @@ class BuildConfig:
             for _dir in (
                 self.dir_log, self.dir_config, self.dir_cache, self.dir_temp,
                 self.dir_build_stage,
-                self.dir_source, self.dir_repo, self.dir_patch, self.dir_patch_empty,
+                self.dir_source, self.dir_repo, self.dir_localmirror,
+                self.dir_patch, self.dir_patch_empty,
                 self.dir_patch_source, self.dir_patch_preinstall, self.dir_patch_postinstall,
                 self.dir_fork, self.dir_fork_source, self.dir_fork_source_repo,
                 self.dir_image, self.dir_publish, self.dir_buildroot, self.dir_chroot,

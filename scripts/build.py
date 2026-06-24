@@ -43,6 +43,7 @@ from typing import Callable, Optional
 import apt_pkg
 
 # Local imports
+import local_mirror
 import utils
 import _version
 from utils import BuildConfig
@@ -1002,6 +1003,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             self.flags.build_container_ready = True
             spin.done()
             console.print("  Build container ready")
+            self._prompt_local_mirror_first_run()
         except (RuntimeError,
                 buildcontainer.docker.errors.DockerException) as e:
             # connect failures are wrapped in RuntimeError, but a
@@ -1011,6 +1013,37 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             spin.done()
             console.print(f"  ERROR: build container initialisation failed — {e}")
             logger.error(f"BuildContainer() raised: {e}")
+
+    def _prompt_local_mirror_first_run(self) -> None:
+        """First container init: if the operator hasn't yet decided on a local
+        build mirror, offer it (persists the choice to local.conf).  The mirror
+        itself builds at the next `cache parse` (or `container local mirror
+        build`); if the dep tree is already resolved, build it now."""
+        _lc = utils.read_local_conf(self.config)
+        if _lc.has_option('Local', 'CreateLocalMirror'):
+            return   # operator already decided — don't re-ask
+        _resp = Prompt(
+            PROMPT_YESNO,
+            "Enable a local build mirror?  Caches every Debian build-dep on "
+            "disk so build containers stop re-downloading them from "
+            "snapshot.debian.org on every build — a big speedup on "
+            "bandwidth-limited links (costs a few GB of disk).",
+            informational=True,
+        ).get_response()
+        _enable = _resp.lower() in ('y', 'yes')
+        self.config.create_local_mirror = _enable
+        utils.write_local_conf(self.config, create_local_mirror=_enable)
+        if _enable:
+            console.print(
+                "  local build mirror enabled — builds at the next "
+                "`cache parse` (or `container local mirror build`)",
+                tui.COLOR_INFO)
+            if self.flags.dep_check_ready:
+                self._ensure_local_mirror()
+        else:
+            console.print(
+                "  local build mirror disabled — `set create-local-mirror "
+                "true` to enable later", tui.COLOR_INFO)
 
     def cmd_init_remote_container(self):
         """Set up the build container for `source remotebuild` and ENSURE the
@@ -1290,6 +1323,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             'test':  'ping the local Docker daemon + show its version',
             'purge': 'stop+remove athenalinux containers + images '
                      '(force rebuild on next init)',
+            'mirror': 'local build mirror — build | rebuild | status | purge',
         }
         if sub == 'init':
             return self.cmd_init_container(*args)
@@ -1297,7 +1331,41 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             return self.cmd_container_local_test(*args)
         if sub == 'purge':
             return self.cmd_container_purge(*args)
+        if sub == 'mirror':
+            return self._cmd_container_local_mirror(*args)
         return self._group_help('container local', _table, sub)
+
+    def _cmd_container_local_mirror(self, sub: str = '', *args):
+        """`container local mirror {build|rebuild|status|purge}` — manage the
+        snapshot-pinned local build mirror that containers serve build-deps
+        from."""
+        _table = {
+            'build':   'build/refresh the mirror for the current snapshot',
+            'rebuild': 'force a full rebuild (ignore the up-to-date check)',
+            'status':  'show package count / size / pinned snapshot',
+            'purge':   'delete the mirror contents',
+        }
+        _dir = self.config.dir_localmirror
+        if sub == 'status':
+            _st = local_mirror.status(_dir)
+            console.print(
+                f"local build mirror: {_st['n_debs']} package(s), "
+                f"{local_mirror.human_size(_st['size'])}, "
+                f"snapshot {_st['snapshot'] or '(none)'}")
+            return None
+        if sub == 'purge':
+            local_mirror.purge(_dir)
+            console.print("local build mirror purged")
+            return None
+        if sub in ('build', 'rebuild'):
+            if not (self.flags.cache_ready and self.flags.dep_check_ready):
+                console.print(
+                    "container local mirror: run `cache build` + "
+                    "`cache parse` first", tui.COLOR_WARNING)
+                return None
+            self._ensure_local_mirror(force=(sub == 'rebuild'))
+            return None
+        return self._group_help('container local mirror', _table, sub)
 
     def _cmd_container_remote(self, sub: str = '', *args):
         _table = {
@@ -1575,6 +1643,7 @@ BuildSession._SETTABLE = {
     'include-build-closure': BuildSession._set_include_build_closure,
     # machine-local (persist to config/local.conf)
     'name':                BuildSession._set_name,
+    'create-local-mirror': BuildSession._set_create_local_mirror,
     'jobs':                BuildSession._set_jobs,
     'cpus':                BuildSession._set_cpus,
     'memory':              BuildSession._set_memory,
@@ -1600,6 +1669,7 @@ BuildSession._GETTABLE = {
                                               'max_parallel_builds', 1),
     # machine-local mirrors of the local.conf keys
     'name':                lambda s: getattr(s.config, 'system_name', '') or '(unset)',
+    'create-local-mirror': lambda s: getattr(s.config, 'create_local_mirror', False),
     'jobs':                lambda s: getattr(s.config, 'max_parallel_builds', 1),
     'cpus':                lambda s: getattr(s.config, 'build_cpus', 0.0),
     'memory':              lambda s: getattr(s.config, 'build_memory', '') or '(no cap)',
