@@ -76,13 +76,39 @@ def _universe_from_cache(cache: Any) -> Tuple[dict, dict, dict]:
     return bin_index, provides, best
 
 
-def plan(cache: Any, dep_tree: Any, config: Any) -> 'Dict[str, Any]':
+def _stanza_for(pkg: Any, basename: str) -> str:
+    """The package's apt Packages stanza with ``Filename:`` rewritten to
+    ``./<basename>`` (flat repo).  Uses ``pkg.dump()`` — python-debian's own
+    serializer — so every control field the dep solver needs (Depends, Provides,
+    Conflicts, …) is carried verbatim; no hand-rolled emitter.  Lets the REMOTE
+    localmirror be indexed natively from cache metadata (no dpkg-scanpackages)."""
+    _txt = pkg.dump() or ''
+    _out = []
+    _seen_filename = False
+    for _ln in _txt.splitlines():
+        if _ln.startswith('Filename:'):
+            _ln = f'Filename: ./{basename}'
+            _seen_filename = True
+        _out.append(_ln)
+    if not _seen_filename:
+        _out.append(f'Filename: ./{basename}')
+    return '\n'.join(_out).rstrip('\n') + '\n'
+
+
+def plan(cache: Any, dep_tree: Any, config: Any,
+         include_index: bool = False) -> 'Dict[str, Any]':
     """Resolve the full build closure and map each binary to a download.
 
     Returns ``{'entries': [{name, basename, url, size, sha256}, ...],
     'total_size': int, 'unsatisfiable': [...]}``.  Reuses the snapshot-rewritten
     ``pkg._mirror.url`` (cache rewrites mirrors once at ingest), so URLs point
     straight at the pinned snapshot.
+
+    When ``include_index`` is set, the result also carries ``packages_index`` —
+    the flat-repo Packages text built from the cache stanzas (``pkg.dump()`` with
+    ``Filename:`` rewritten) — so a REMOTE host can write a valid apt index
+    without dpkg-scanpackages.  Off by default: the LOCAL mirror indexes its
+    downloaded files with dpkg-scanpackages and doesn't need this.
     """
     bin_index, provides, best = _universe_from_cache(cache)
     _sbd: dict = {}
@@ -96,6 +122,7 @@ def plan(cache: Any, dep_tree: Any, config: Any) -> 'Dict[str, Any]':
         list(dep_tree.selected_srcs.keys()), _sbd, bin_index, provides)
 
     _entries: 'List[dict]' = []
+    _stanzas: 'List[str]' = []
     _total = 0
     for _name in sorted(cast('Set[str]', _closure['all'])):
         _pkg = best.get(_name)
@@ -104,20 +131,26 @@ def plan(cache: Any, dep_tree: Any, config: Any) -> 'Dict[str, Any]':
         _fname = _pkg.get('Filename', '') or ''
         if not _fname:
             continue
+        _basename = os.path.basename(_fname)
         _size = int(_pkg.get('Size', '0') or 0)
         _entries.append({
             'name': _name,
-            'basename': os.path.basename(_fname),
+            'basename': _basename,
             'url': urljoin(_pkg._mirror.url + '/', _fname),
             'size': _size,
             'sha256': _pkg.get('SHA256', '') or '',
         })
+        if include_index:
+            _stanzas.append(_stanza_for(_pkg, _basename))
         _total += _size
-    return {
+    _result: 'Dict[str, Any]' = {
         'entries': _entries,
         'total_size': _total,
         'unsatisfiable': _closure.get('unsatisfiable', []),
     }
+    if include_index:
+        _result['packages_index'] = '\n'.join(_stanzas)
+    return _result
 
 
 # ── Disk + download ──────────────────────────────────────────────────────────

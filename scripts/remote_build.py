@@ -74,9 +74,16 @@ def build_image(bundle: str, tag: str, build_args: dict) -> None:
 
 
 def run_container(bundle: str, tag: str, cmd_str: str,
-                  cpus: 'float | None', memory: 'str | None') -> int:
+                  cpus: 'float | None', memory: 'str | None',
+                  localmirror_dir: 'str | None' = None) -> int:
     """Run the build container with local bind mounts; stream logs; return the
-    container exit code."""
+    container exit code.
+
+    When `localmirror_dir` is given and exists on this host, it's bind-mounted
+    read-only at /localmirror — the build-closure apt mirror the recipe's
+    `file:///localmirror` source consumes (so build-deps come from local disk,
+    not the network).  Mount-presence tracks source-presence: the orchestrator
+    only sets this when the recipe emits that source."""
     _src = os.path.join(bundle, "source")
     _patch = os.path.join(bundle, "patch")
     _out = os.path.join(bundle, "out")
@@ -93,8 +100,18 @@ def run_container(bundle: str, tag: str, cmd_str: str,
     if memory:
         _caps += ["--memory", str(memory)]
 
+    _lm: list = []
+    if localmirror_dir:
+        _lm_abs = os.path.abspath(os.path.expanduser(localmirror_dir))
+        if os.path.isdir(_lm_abs):
+            _lm = ["-v", f"{_lm_abs}:/localmirror:ro"]
+            _log(f"mounting local build mirror {_lm_abs} → /localmirror")
+        else:
+            _log(f"WARNING: localmirror {_lm_abs} not present — skipping mount "
+                 "(recipe's file:///localmirror source may fail)")
+
     _cmd = [
-        "docker", "run", "--rm", *_caps,
+        "docker", "run", "--rm", *_caps, *_lm,
         "-v", f"{os.path.abspath(_src)}:/source:rw",
         "-v", f"{os.path.abspath(_patch)}:/patch:rw",
         "-v", f"{os.path.abspath(_out)}:/repo:rw",
@@ -124,7 +141,8 @@ def main(argv: 'list[str] | None' = None) -> int:
     build_image(_bundle, _tag, _params.get("build_args", {}))
     _exit = run_container(
         _bundle, _tag, _cmd_str,
-        _params.get("build_cpus"), _params.get("build_memory"))
+        _params.get("build_cpus"), _params.get("build_memory"),
+        _params.get("localmirror_dir"))
 
     _out = os.path.join(_bundle, "out")
     _outputs = sorted(

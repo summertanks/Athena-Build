@@ -38564,8 +38564,13 @@ def _lm_mock_cache_and_tree():
             super().__init__(d)
             s._mirror = _Mir()
 
+        def dump(s):
+            # mimic python-debian Deb822.dump() — used by plan(include_index)
+            return ''.join(f"{_k}: {_v}\n" for _k, _v in s.items())
+
     def _P(deps, fn, sz):
-        return _Pkg({'Depends': deps, 'Pre-Depends': '', 'Filename': fn,
+        return _Pkg({'Package': os.path.basename(fn).split('_')[0],
+                     'Depends': deps, 'Pre-Depends': '', 'Filename': fn,
                      'Size': str(sz), 'SHA256': '', 'Provides': ''})
 
     class _Cache:
@@ -38604,6 +38609,191 @@ def test_local_mirror_plan_resolves_build_closure_to_snapshot_urls():
     assert all(e['url'].startswith(
         'https://snapshot.debian.org/archive/debian/20260621T135952Z/pool/')
         for e in pl['entries'])
+
+
+def test_local_mirror_plan_include_index_emits_packages_blob():
+    """plan(include_index=True) carries a packages_index built from pkg.dump()
+    with Filename rewritten to ./<basename> — so a REMOTE host can write a valid
+    apt index natively (no dpkg-scanpackages).  Off by default."""
+    import local_mirror
+    cache, dt = _lm_mock_cache_and_tree()
+    pl = local_mirror.plan(cache, dt, object(), include_index=True)
+    assert 'packages_index' in pl
+    _idx = pl['packages_index']
+    # every download entry appears as a flat ./<basename> Filename + a stanza
+    for _e in pl['entries']:
+        assert f"Filename: ./{_e['basename']}" in _idx
+    assert 'Package: gcc' in _idx and 'Package: debhelper' in _idx
+    # no original pool/ Filenames leaked through
+    assert 'Filename: pool/' not in _idx
+    # default omits it (the LOCAL mirror uses dpkg-scanpackages)
+    assert 'packages_index' not in local_mirror.plan(cache, dt, object())
+
+
+def test_remote_localmirror_populate_downloads_skips_indexes():
+    """remote_localmirror.populate: download (resumable, sha-verified) + write a
+    flat apt index (Origin: AthenaLocalMirror) + .snapshot marker; re-run skips
+    complete files; a sha256 mismatch is reported as a failure."""
+    import hashlib
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_localmirror as rlm
+    with tempfile.TemporaryDirectory() as tmp:
+        _origin = os.path.join(tmp, 'origin')
+        os.makedirs(_origin)
+        _target = os.path.join(tmp, 'lm')
+        _entries = []
+        _stanzas = []
+        _total = 0
+        for _name, _size in [('aaa_1_amd64.deb', 2000), ('bbb_2_amd64.deb', 3000)]:
+            _data = bytes((_i * 7) % 256 for _i in range(_size))
+            with open(os.path.join(_origin, _name), 'wb') as _f:
+                _f.write(_data)
+            _sha = hashlib.sha256(_data).hexdigest()
+            _entries.append({'basename': _name,
+                             'url': 'file://' + os.path.join(_origin, _name),
+                             'sha256': _sha, 'size': _size})
+            _stanzas.append(f"Package: {_name.split('_')[0]}\n"
+                            f"Filename: ./{_name}\nSize: {_size}\n"
+                            f"SHA256: {_sha}\n")
+            _total += _size
+        _plan = {'snapshot_ts': '20260101T000000Z', 'total_size': _total,
+                 'entries': _entries, 'packages_index': '\n'.join(_stanzas)}
+        _r = rlm.populate(_plan, _target)
+        assert _r['downloaded'] == 2 and _r['failed'] == 0
+        assert _r['indexed'] is True
+        for _n in ('Packages', 'Packages.gz', 'Packages.xz', 'Release',
+                   '.snapshot'):
+            assert os.path.isfile(os.path.join(_target, _n)), _n
+        with open(os.path.join(_target, 'Release')) as _f:
+            assert 'Origin: AthenaLocalMirror' in _f.read()
+        with open(os.path.join(_target, '.snapshot')) as _f:
+            assert _f.read().strip() == '20260101T000000Z'
+        # re-run → all skipped (size-match, no re-download)
+        _r2 = rlm.populate(_plan, _target)
+        assert _r2['skipped'] == 2 and _r2['downloaded'] == 0
+        # sha256 mismatch → failure (force re-download by removing the file)
+        os.remove(os.path.join(_target, 'aaa_1_amd64.deb'))
+        _bad = {'snapshot_ts': 'x', 'total_size': _total,
+                'entries': [{'basename': 'aaa_1_amd64.deb',
+                             'url': _entries[0]['url'],
+                             'sha256': 'deadbeef' * 8, 'size': 2000}],
+                'packages_index': 'Package: x\nFilename: ./x\n'}
+        _r3 = rlm.populate(_bad, _target)
+        assert _r3['failed'] == 1
+
+
+def test_stage_remote_localmirror_parses_progress_and_result():
+    """remote_orchestrate.stage_remote_localmirror streams the runner's PROGRESS
+    markers to on_progress and returns the parsed RESULT dict."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as ro
+
+    class _FakePopen:
+        def __init__(self, *a, **k):
+            self.stdout = iter([
+                ro.LM_PROGRESS_MARKER + ' {"i":1,"n":2,"basename":"a.deb",'
+                '"file_done":10,"file_total":10,"cum_done":10,"cum_total":20}\n',
+                '[remote-localmirror] working\n',
+                ro.LM_RESULT_MARKER + ' {"downloaded":2,"skipped":0,'
+                '"failed":0,"indexed":true,"failures":[]}\n',
+            ])
+
+        def wait(self):
+            return 0
+
+    class _R:
+        returncode = 0
+
+    _seen = []
+    _orig_run, _orig_popen = ro.subprocess.run, ro.subprocess.Popen
+    ro.subprocess.run = lambda *a, **k: _R()
+    ro.subprocess.Popen = _FakePopen
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.py') as _runner:
+            _result = ro.stage_remote_localmirror(
+                'u@h', {'entries': [], 'total_size': 20}, _runner.name,
+                on_progress=_seen.append)
+    finally:
+        ro.subprocess.run, ro.subprocess.Popen = _orig_run, _orig_popen
+    assert _result == {'downloaded': 2, 'skipped': 0, 'failed': 0,
+                       'indexed': True, 'failures': []}
+    assert len(_seen) == 1 and _seen[0]['basename'] == 'a.deb'
+
+
+def test_remote_build_run_container_mounts_localmirror():
+    """remote_build.run_container bind-mounts an existing localmirror dir at
+    /localmirror:ro, and skips the mount (with a warning) when it's absent."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_build as rb
+
+    class _R:
+        returncode = 0
+
+    _cap = {}
+    _orig = rb.subprocess.run
+    rb.subprocess.run = lambda argv, **k: (_cap.__setitem__('argv', argv)
+                                           or _R())
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _lm = os.path.join(tmp, 'lm')
+            os.makedirs(_lm)
+            _bundle = os.path.join(tmp, 'b')
+            os.makedirs(_bundle)
+            rb.run_container(_bundle, 'img:t', 'true', None, None, _lm)
+            assert f'{os.path.abspath(_lm)}:/localmirror:ro' in _cap['argv']
+            # absent dir → no mount
+            _cap.clear()
+            rb.run_container(_bundle, 'img:t', 'true', None, None,
+                             os.path.join(tmp, 'nope'))
+            assert not any('/localmirror:ro' in str(_a)
+                           for _a in _cap['argv'])
+    finally:
+        rb.subprocess.run = _orig
+
+
+def test_stage_bundle_writes_localmirror_dir_into_build_json():
+    """stage_bundle records localmirror_dir in build.json when given, omits it
+    otherwise (so remote_build only mounts when the recipe emits the source)."""
+    import json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as ro
+    _recipe = {'filename_prefix': 'foo', 'image_tag': 'img:t',
+               'build_args': {}, 'cmd_str': 'true'}
+    with tempfile.TemporaryDirectory() as tmp:
+        _df = os.path.join(tmp, 'Dockerfile')
+        open(_df, 'w').write('FROM x')
+        _rb = os.path.join(tmp, 'remote_build.py')
+        open(_rb, 'w').write('x')
+        _b1 = os.path.join(tmp, 'b1')
+        ro.stage_bundle(_b1, dockerfile=_df, source_files=[], patch_dir='',
+                        recipe=_recipe, build_cpus=None, build_memory=None,
+                        remote_build_py=_rb,
+                        localmirror_dir='~/athena-localmirror')
+        with open(os.path.join(_b1, 'build.json')) as _f:
+            assert json.load(_f)['localmirror_dir'] == '~/athena-localmirror'
+        _b2 = os.path.join(tmp, 'b2')
+        ro.stage_bundle(_b2, dockerfile=_df, source_files=[], patch_dir='',
+                        recipe=_recipe, build_cpus=None, build_memory=None,
+                        remote_build_py=_rb)
+        with open(os.path.join(_b2, 'build.json')) as _f:
+            assert 'localmirror_dir' not in json.load(_f)
+
+
+def test_init_remote_builds_image_and_gates_localmirror():
+    """container remote init builds the image ON the remote when absent, and —
+    with CreateLocalMirror — populates the mirror per remote, enabling the
+    file:///localmirror source ONLY when ready on every remote (gated)."""
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _f:
+        _b = _f.read()
+    _m = _b[_b.index('def cmd_init_remote_container'):]
+    _m = _m[:_m.index('\n    def ', 1)]
+    assert 'build_remote_image' in _m, (
+        "init must BUILD the image on the remote when neither side has it")
+    assert '_stage_remote_localmirror_bars' in _m, "init populates the mirror"
+    assert '_localmirror_active = bool(_want_lm and _all_ready)' in _m, (
+        "source emitted only when the mirror is ready on EVERY remote")
+    assert 'build_container_ready = _all_ready' in _m, (
+        "init is gated on image + mirror readiness")
 
 
 def test_local_mirror_index_writes_flat_apt_repo_with_origin():
@@ -38665,6 +38855,12 @@ def main() -> int:
         test_build_closure_module_partitions_tiers_disjointly,
         test_build_closure_classify_tiers_uses_adjacency,
         test_local_mirror_plan_resolves_build_closure_to_snapshot_urls,
+        test_local_mirror_plan_include_index_emits_packages_blob,
+        test_remote_localmirror_populate_downloads_skips_indexes,
+        test_stage_remote_localmirror_parses_progress_and_result,
+        test_remote_build_run_container_mounts_localmirror,
+        test_stage_bundle_writes_localmirror_dir_into_build_json,
+        test_init_remote_builds_image_and_gates_localmirror,
         test_local_mirror_index_writes_flat_apt_repo_with_origin,
         test_local_mirror_index_failure_leaves_no_valid_mirror,
         test_local_mirror_is_valid_for_keys_to_snapshot_marker,
