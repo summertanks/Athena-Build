@@ -22736,17 +22736,204 @@ def test_remotebuild_command_wired():
     with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_source.py')) as _f:
         _cs = _f.read()
     assert 'def cmd_source_remotebuild' in _cs
-    # the build STREAM (run_remote) goes to the per-package log file, NOT the
-    # console tab — the run_remote call must use the file writer, not
-    # console.print (ensure_remote_image's brief status may still print).
-    _rb = _cs[_cs.index('def cmd_source_remotebuild'):]
+    # The per-package remote build body lives in _remotebuild_one_source (the
+    # fan-out worker).  Its build STREAM (run_remote) goes to the per-package
+    # log file, NOT the console tab (N concurrent workers would interleave) —
+    # the run_remote call must use the file writer, not console.print.
+    _rb = _cs[_cs.index('def _remotebuild_one_source'):]
     _rb = _rb[:_rb.index('\n    def ', 1)]
     _after = _rb[_rb.index('run_remote('):]
-    assert 'log=_to_log' in _after[:200]
+    assert 'log=_to_log' in _after[:300]
     assert 'log=console.print' not in _after     # build stream not to console
     assert 'buildlog_path' in _rb and '_to_log' in _rb   # → log/build/<pkg>
+    # The per-remote SSH key threads through to run_remote (vs ambient ~/.ssh).
+    assert 'ssh_key=' in _after[:300]
     with open(os.path.join(_ROOT, 'scripts', 'utils.py')) as _f:
         assert "'RemoteBuildHost'" in _f.read()
+
+
+def test_orchestrator_ssh_key_threads_into_argv():
+    """`remote_orchestrate._ssh_base`/`_scp_base` insert `-i <key>` so every
+    ssh/scp call honours the per-remote key; _has_image builds the keyed argv."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+    assert _ro._ssh_base('u@h', '/k') == [
+        'ssh', '-o', 'BatchMode=yes', '-i', '/k', 'u@h']
+    assert _ro._ssh_base('u@h', None) == ['ssh', '-o', 'BatchMode=yes', 'u@h']
+    assert _ro._scp_base('/k') == ['scp', '-q', '-i', '/k']
+    assert _ro._scp_base(None) == ['scp', '-q']
+    # _has_image(remote) routes through _ssh_base → the key reaches the argv.
+    import subprocess as _sp
+    _seen = {}
+
+    def _fake_run(argv, **k):
+        _seen['argv'] = argv
+        return type('R', (), {'returncode': 0})()
+    _orig = _sp.run
+    _sp.run = _fake_run
+    try:
+        _ro._has_image('img:t', ssh_host='u@h', ssh_key='/k')
+    finally:
+        _sp.run = _orig
+    assert '-i' in _seen['argv'] and '/k' in _seen['argv']
+
+
+def test_probe_remote_build_host_parses_and_gates():
+    """`mirror.probe_remote_build_host` parses the KEY=VALUE round-trip into a
+    fields dict and gates `ok` on Docker reachable AND python3 present."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import subprocess as _sp
+    import mirror
+    import types as _types
+
+    def _fake_run(stdout):
+        return lambda *a, **k: _types.SimpleNamespace(
+            returncode=0, stdout=stdout, stderr='')
+
+    _orig = _sp.run
+    try:
+        _sp.run = _fake_run(
+            "DOCKER=24.0.7\nGROUPS=ubuntu docker sudo\n"
+            "PYTHON3=Python 3.11.2\nNPROC=8\nMEMKB=16317432\n")
+        _ok, _info = mirror.probe_remote_build_host('h', 'u', '/k')
+        assert _ok is True
+        assert _info['docker'] == '24.0.7'
+        assert _info['in_docker_group'] is True
+        assert _info['python3'].startswith('Python')
+        assert _info['cores'] == 8
+        assert _info['mem_gib'] == 15.6
+        # Docker unreachable → not ok, error names docker; group False.
+        _sp.run = _fake_run("DOCKER=\nGROUPS=ubuntu\nPYTHON3=Python 3.11.2\n"
+                            "NPROC=4\nMEMKB=8000000\n")
+        _ok2, _info2 = mirror.probe_remote_build_host('h', 'u', '/k')
+        assert _ok2 is False and 'docker' in _info2['error']
+        assert _info2['in_docker_group'] is False
+    finally:
+        _sp.run = _orig
+
+
+def test_copy_ssh_key_copies_with_0600_and_delete_removes_key():
+    """utils.copy_ssh_key copies a key 0600 (False on missing src); `container
+    remote delete` removes the copied config/<name>.key."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    with tempfile.TemporaryDirectory() as _tmp:
+        _src = os.path.join(_tmp, 'id')
+        with open(_src, 'w') as _f:
+            _f.write('PRIVATE-KEY')
+        _dst = os.path.join(_tmp, 'remote.key')
+        assert utils.copy_ssh_key(_src, _dst) is True
+        with open(_dst) as _f:
+            assert _f.read() == 'PRIVATE-KEY'
+        assert (os.stat(_dst).st_mode & 0o777) == 0o600
+        assert utils.copy_ssh_key(os.path.join(_tmp, 'nope'), _dst) is False
+    # delete handler removes the key file (source-level: os.remove of <name>.key)
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _f:
+        _b = _f.read()
+    _del = _b[_b.index('def cmd_container_remote_delete'):]
+    _del = _del[:_del.index('\n    def ', 1)]
+    assert 'os.remove' in _del and '.key' in _del, (
+        "delete must remove the copied config/<name>.key")
+
+
+def test_container_remote_add_is_guided_with_probes():
+    """`container remote add` copies the key into config/, runs the service +
+    capacity probes, and persists via add_remote (the guided registration)."""
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _f:
+        _b = _f.read()
+    _add = _b[_b.index('def cmd_container_remote_add'):]
+    _add = _add[:_add.index('\n    def ', 1)]
+    assert 'copy_ssh_key' in _add, "add must copy the key into config/"
+    assert 'probe_remote_build_host' in _add, "add must run the service check"
+    assert 'probe_ssh_auth' in _add, "add must validate ssh auth"
+    assert 'add_remote' in _add, "add must persist to remote.conf"
+
+
+def test_remotebuild_shares_workload_resolver_and_fans_out():
+    """`source remotebuild` reuses `_resolve_build_workload` (remote=True, so
+    same subset/all/force/names surface as `source build`) and fans out across
+    `config.remotes` via `_remotebuild_fanout`."""
+    import re
+    _body = _session_source()
+    _rb = re.search(r'def cmd_source_remotebuild\(self.*?(?=\n    def )',
+                    _body, re.DOTALL).group(0)
+    assert '_resolve_build_workload(' in _rb and 'remote=True' in _rb, (
+        "remotebuild must share source build's arg/workload front-half")
+    assert '_remotebuild_fanout(' in _rb, "remotebuild must fan out"
+    assert "getattr(self.config, 'remotes'" in _rb, (
+        "remotebuild must target every configured remote")
+    # source build shares the SAME resolver (remote=False).
+    _sb = re.search(r'def cmd_source_build\(self.*?(?=\n    def )',
+                    _body, re.DOTALL).group(0)
+    assert '_resolve_build_workload(args, remote=False)' in _sb
+
+
+def test_remotebuild_fanout_respects_slot_caps_and_requeues():
+    """`_remotebuild_fanout` never runs more concurrent builds on a remote than
+    its MaxParallelBuilds, builds every package, and re-queues a transport-failed
+    package onto another remote."""
+    import threading
+    import time
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import remote_orchestrate as _ro
+    from build import BuildSession
+
+    class _Cfg:
+        tunnel_packages: set = set()
+        heavy_packages: set = set()
+    class _Container:
+        _image_tag = 'athenalinux:build-test'
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.config = _Cfg()
+    _sess.container = _Container()
+
+    _lock = threading.Lock()
+    _cur = {'A': 0, 'B': 0}
+    _peak = {'A': 0, 'B': 0}
+    _seen: 'list[str]' = []
+    _transport_done = {'fired': False}
+
+    def _fake_one(_src, _slot, _po, _force, register_proc=None):
+        _name = _slot['name']
+        with _lock:
+            _cur[_name] += 1
+            _peak[_name] = max(_peak[_name], _cur[_name])
+        time.sleep(0.04)
+        with _lock:
+            _cur[_name] -= 1
+            _seen.append(_src.package)
+        if _src.package == 'tfail' and not _transport_done['fired']:
+            _transport_done['fired'] = True
+            return ('transport', 0)
+        return ('built', 0)
+    _sess._remotebuild_one_source = _fake_one      # type: ignore[assignment]
+
+    class _P:
+        def __init__(_s, _n):
+            _s.package = _n
+    _pkgs = [_P(f'p{_i}') for _i in range(8)] + [_P('tfail')]
+    _remotes = [
+        {'name': 'A', 'host': 'ssh://u@a', 'ssh_key': '',
+         'max_parallel_builds': 2, 'build_cpus': 0.0, 'build_memory': ''},
+        {'name': 'B', 'host': 'ssh://u@b', 'ssh_key': '',
+         'max_parallel_builds': 1, 'build_cpus': 0.0, 'build_memory': ''},
+    ]
+    _orig_ensure = _ro.ensure_remote_image
+    _ro.ensure_remote_image = lambda *a, **k: 'present'
+    try:
+        _sess._remotebuild_fanout(_pkgs, _remotes, None, False)
+    finally:
+        _ro.ensure_remote_image = _orig_ensure
+    # Never oversubscribe a remote beyond its MaxParallelBuilds.
+    assert _peak['A'] <= 2, f"remote A oversubscribed: peak {_peak['A']}"
+    assert _peak['B'] <= 1, f"remote B oversubscribed: peak {_peak['B']}"
+    # Both remotes were actually used (work distributed, not all on one host).
+    assert _peak['A'] >= 1 and _peak['B'] >= 1
+    # All 9 packages built; tfail was attempted twice (transport → re-queue).
+    assert _sess.last_source_build_counts['built'] == 9, (
+        _sess.last_source_build_counts)
+    assert _seen.count('tfail') == 2, "transport-failed pkg must be re-queued"
 
 
 def test_segregate_never_deletes_existing_published_deb():
@@ -27015,11 +27202,22 @@ def test_source_build_autodetects_update_mode():
     COMP-03 Phase 4 extracted the per-source unit into _build_one_source."""
     import re
     _body = _session_source()
+    # Update-mode DETECTION moved into the shared _resolve_build_workload helper
+    # (so `source build` + `source remotebuild` share the front-half); the
+    # ROUTING (calling _do_update_build) stays in cmd_source_build.
     _m = re.search(r'def cmd_source_build\(self.*?(?=\n    def )', _body, re.DOTALL)
     _b = _m.group(0)
-    assert '_update_build_pending()' in _b and '_do_update_build()' in _b, (
-        "source build must auto-detect + route to update mode")
-    assert 'not _names' in _b, "explicit package names opt out of update mode"
+    assert '_do_update_build()' in _b, (
+        "source build must route to update mode")
+    _rw = re.search(r'def _resolve_build_workload\(self.*?(?=\n    def )',
+                    _body, re.DOTALL)
+    assert _rw, '_resolve_build_workload not found'
+    _rwb = _rw.group(0)
+    assert '_update_build_pending()' in _rwb, (
+        "the shared workload resolver must auto-detect update mode")
+    assert 'not _names' in _rwb, "explicit package names opt out of update mode"
+    # Detection is gated to LOCAL builds only (remote=True skips update mode).
+    assert 'not remote' in _rwb, "update-mode detection must be local-only"
     # Bump-awareness lives in _build_one_source after the Phase 4 refactor.
     _w = re.search(r'def _build_one_source\(.*?(?=\n    def )', _body, re.DOTALL)
     assert _w, "_build_one_source not found"
@@ -38499,6 +38697,12 @@ def main() -> int:
         test_container_init_remote_ensures_image,
         test_container_two_level_command_surface_wired,
         test_remotebuild_command_wired,
+        test_orchestrator_ssh_key_threads_into_argv,
+        test_probe_remote_build_host_parses_and_gates,
+        test_copy_ssh_key_copies_with_0600_and_delete_removes_key,
+        test_container_remote_add_is_guided_with_probes,
+        test_remotebuild_shares_workload_resolver_and_fans_out,
+        test_remotebuild_fanout_respects_slot_caps_and_requeues,
         test_recipe_only_container_skips_local_docker,
         test_remote_container_init_wired,
         test_local_conf_mode_overrides_build_conf,
