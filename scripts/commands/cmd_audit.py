@@ -564,7 +564,14 @@ class AuditCommandsMixin(SessionState):
                                 "skipped — repo state scan failed", ok=False)
                 continue
             _ok = 0
-            _failed: 'list[tuple]' = []   # (src, binary, diag)
+            _failed: 'list[tuple]' = []          # (src, binary, diag) — in hard closure
+            _failed_outside: 'list[tuple]' = []  # (src, binary, diag) — outside hard closure
+            # Hard-closure binary names for this cohort: a source can emit
+            # binaries we never ship (e.g. libreoffice → libreoffice-qt5,
+            # libofficebean-java) whose deps (Qt/KDE/Java) aren't in our
+            # GNOME/GTK distro.  Their unsatisfied deps are NOT a build
+            # blocker — we just note them, never fail the audit on them.
+            _closure = self._canonical_names(_tree)
             _skipped_tunneled = 0
             _skipped_missing = 0
             _no_pkgs = 0
@@ -592,6 +599,10 @@ class AuditCommandsMixin(SessionState):
                             and utils.classify_build_record(_record) == 'tunneled'):
                         _skipped_tunneled += 1
                         continue
+                    # Verify in-closure binaries FIRST so an out-of-closure
+                    # failure never masks (break-on-first) a real shipped one.
+                    _expected.sort(
+                        key=lambda _ef: _ef.split('_', 1)[0] not in _closure)
                     _any_missing = False
                     _failing = None
                     # Component from the source's origin mirror — without
@@ -625,11 +636,19 @@ class AuditCommandsMixin(SessionState):
                         continue
                     if _failing is None:
                         _ok += 1
-                    else:
+                    elif _failing[0].split('_', 1)[0] in _closure:
                         _failed.append((_name,) + _failing)
                         logger.info(
                             f"repo audit integrity {_label} {_name}: "
                             f"{_failing[0]}: {_failing[1]}"
+                        )
+                    else:
+                        # Failing binary isn't in the hard ship closure —
+                        # informational only, not an audit failure.
+                        _failed_outside.append((_name,) + _failing)
+                        logger.info(
+                            f"repo audit integrity {_label} {_name} "
+                            f"(outside closure): {_failing[0]}: {_failing[1]}"
                         )
             finally:
                 _bar.close()
@@ -674,6 +693,19 @@ class AuditCommandsMixin(SessionState):
                 )
                 for _src_name, _f, _diag in _failed:
                     console.print(f"    {_src_name}: {_f}: {_diag}")
+
+            # Out-of-closure dep failures are not a build blocker — one
+            # short INFO line (detail behind `verbose`).
+            if _failed_outside:
+                console.print(
+                    f"  [INFO] {len(_failed_outside)} package(s) outside the "
+                    f"hard closure ({_label}) have unsatisfied deps "
+                    f"(not shipped).  Run with `verbose` to list them.",
+                    tui.COLOR_INFO,
+                )
+                if verbose:
+                    for _src_name, _f, _diag in _failed_outside:
+                        console.print(f"    {_src_name}: {_f}: {_diag}")
 
     def _report_nmu_residue(self, state, *, verbose: bool) -> None:
         """NMU-suffix residue check — absorbed from the former

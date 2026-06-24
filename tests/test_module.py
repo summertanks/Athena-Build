@@ -250,6 +250,7 @@ _BASE_CONF_BODY = """
     BuildProfiles = nodoc, nocheck
     Tunneled =
     DistroSuffix = thor1
+    IncludeBuildClosure = false
     """
 
 
@@ -36252,7 +36253,7 @@ def test_selection_lock_roundtrip_signs_and_verifies():
         _cfg = _selection_lock_cfg(_root)
         _state = {
             'arch': 'amd64', 'snapshot': '20260602T173733Z',
-            'flags': {'IncludeRecommends': True, 'IncludeBuildDep': False},
+            'flags': {'IncludeRecommends': True, 'IncludeBuildClosure': False},
             'seeds': {'pkg': {'base': ['a', 'b']}, 'pool': ['c']},
             'closure': {'bins': {'a': ['base']}, 'srcs': {'asrc': ['base']}},
             'pins': {'awk': 'mawk'},
@@ -36292,7 +36293,7 @@ def test_federation_state_adopts_owner_payload_and_local_seeds():
                 _f.write('')
         _payload = {'pins': {'x-terminal-emulator': 'xterm'},
                     'closure': {'bins': {'firefox': ['base']}, 'srcs': {}},
-                    'flags': {'IncludeRecommends': True, 'IncludeBuildDep': False},
+                    'flags': {'IncludeRecommends': True, 'IncludeBuildClosure': False},
                     'arch': 'amd64', 'snapshot': '20260602T173733Z'}
         _state = _sl.federation_state(_cfg, _payload)
         _sl.write_selection_state(_cfg, _state)         # peer-signed
@@ -36344,7 +36345,7 @@ def test_selection_lock_malformed_json_is_malformed():
 
 def test_selection_lock_preserves_unknown_future_keys():
     """Forward-compat: a key this version doesn't know (e.g. a future
-    IncludeBuildDep closure section) survives a read and re-verifies."""
+    IncludeBuildClosure closure section) survives a read and re-verifies."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import selection_lock as _sl
     with tempfile.TemporaryDirectory() as _root:
@@ -36491,7 +36492,7 @@ def test_selection_lock_assemble_state_shape_and_pin_union():
     _state = _sl.assemble_state(_deb, _udeb, _cfg)
     assert _state['arch'] == 'amd64'
     assert _state['flags']['IncludeRecommends'] is True
-    assert _state['flags']['IncludeBuildDep'] is False
+    assert _state['flags']['IncludeBuildClosure'] is False
     # pins union across both trees
     assert _state['pins'] == {'awk': 'mawk', 'telnet-client': 'telnet'}, _state['pins']
     assert 'a' in _state['closure']['bins'] and 'anna' in _state['closure']['bins']
@@ -38149,8 +38150,53 @@ def test_retract_claim_by_filename_targets_single_file():
         assert not _ok2
 
 
+def test_build_closure_module_partitions_tiers_disjointly():
+    """compute_build_closure: toolchain/language/leaf are a disjoint
+    partition of 'all'; build-essential closure lands in toolchain, the
+    language seed in language, a source-specific -dev lib in leaf."""
+    import build_closure as bc
+    bin_index = {
+        'build-essential': {'Depends': 'gcc, make'},
+        'gcc': {'Depends': 'libc6-dev'}, 'make': {}, 'libc6-dev': {},
+        'dpkg-dev': {}, 'cmake': {'Depends': 'libc6-dev'},
+        'debhelper': {'Depends': 'dpkg-dev'},
+        'libfoo-dev': {'Depends': 'libfoo1'}, 'libfoo1': {},
+    }
+    r = bc.compute_build_closure(
+        ['foo'], {'foo': 'debhelper, cmake, libfoo-dev'},
+        bin_index, {}, runtime_closure={'libfoo1'})
+    assert {'gcc', 'libc6-dev', 'make'} <= r['toolchain']
+    assert {'cmake', 'debhelper'} <= r['language']
+    assert 'libfoo-dev' in r['leaf']
+    # disjoint partition of 'all'
+    assert r['toolchain'] & r['language'] == set()
+    assert r['toolchain'] & r['leaf'] == set()
+    assert r['language'] & r['leaf'] == set()
+    assert r['toolchain'] | r['language'] | r['leaf'] == r['all']
+    # 'added' excludes the already-shipped runtime member
+    assert 'libfoo1' not in r['added']
+
+
+def test_build_closure_classify_tiers_uses_adjacency():
+    """classify_tiers: reachability over a forward-dep adjacency assigns
+    toolchain (from build-essential) vs language (from cmake) vs leaf."""
+    import build_closure as bc
+    members = {'build-essential', 'gcc', 'cmake', 'cmake-data', 'libbar-dev'}
+    adjacency = {
+        'build-essential': ['gcc'], 'gcc': [],
+        'cmake': ['cmake-data'], 'cmake-data': [],
+        'libbar-dev': [],
+    }
+    t = bc.classify_tiers(members, adjacency)
+    assert t['toolchain'] == {'build-essential', 'gcc'}
+    assert t['language'] == {'cmake', 'cmake-data'}
+    assert t['leaf'] == {'libbar-dev'}
+
+
 def main() -> int:
     tests = [
+        test_build_closure_module_partitions_tiers_disjointly,
+        test_build_closure_classify_tiers_uses_adjacency,
         # v0.2 step 1
         test_mirror_url_composition,
         test_mirror_suite_with_suffix,
