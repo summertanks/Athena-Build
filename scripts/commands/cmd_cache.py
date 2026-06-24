@@ -388,7 +388,13 @@ class CacheCommandsMixin(SessionState):
                 _pins = _lock.get('pins', {}) or {}
 
         console.print("Preparing Parsing Tree...", tui.COLOR_INFO)
-        self.dep_tree = dependencytree.DependencyTree(self.cache, select_recommended=False,
+        # IncludeRecommends folds Recommends into the HARD closure: when on,
+        # parse_dependency follows Recommends transitively so they enter
+        # selected_pkgs and get installed in live/target like any Depends —
+        # NOT the old soft, pool-only depth-1 'extras' tier.
+        self.dep_tree = dependencytree.DependencyTree(
+                    self.cache,
+                    select_recommended=self.config.include_recommends,
                     arch=self.config.arch, build_profiles=self.config.build_profiles,
                     pins=_pins)
 
@@ -696,16 +702,19 @@ class CacheCommandsMixin(SessionState):
             f"{len(self.dep_tree.pool_extras_pkg_names)}"
         )
 
-        # When [Build] IncludeRecommends is on (default)
+        # IncludeRecommends is a HARD-closure flag: when on, the dep_tree
+        # above was built with select_recommended=True, so Recommends are
+        # already folded into selected_pkgs transitively (installed in
+        # live/target).  The old soft depth-1 pool-only path
+        # (pull_recommends_extras) is intentionally bypassed.
         if self.config.include_recommends:
-            _added = self.dep_tree.pull_recommends_extras()
-            if _added:
-                console.print(
-                    f"EXTRAS: pulled {_added} recommended package(s) into the repo ", tui.COLOR_INFO)
-            else:
-                console.print("EXTRAS: 0 recommends added — if unexpected check logs ", tui.COLOR_INFO)
+            console.print(
+                "RECOMMENDS: folded into hard closure (transitive, installed) ",
+                tui.COLOR_INFO)
         else:
-            console.print("EXTRAS: disabled — check IncludeRecommends", tui.COLOR_INFO)
+            console.print(
+                "RECOMMENDS: excluded — set IncludeRecommends to include ",
+                tui.COLOR_INFO)
 
         # --- Validation ---------------------------------------------------------
         console.print("Checking Breaks and Conflicts...")
