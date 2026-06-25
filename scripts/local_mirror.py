@@ -123,6 +123,7 @@ def plan(cache: Any, dep_tree: Any, config: Any,
 
     _entries: 'List[dict]' = []
     _stanzas: 'List[str]' = []
+    _excluded: 'List[str]' = []
     _total = 0
     for _name in sorted(cast('Set[str]', _closure['all'])):
         _pkg = best.get(_name)
@@ -131,12 +132,21 @@ def plan(cache: Any, dep_tree: Any, config: Any,
         _fname = _pkg.get('Filename', '') or ''
         if not _fname:
             continue
+        _url = urljoin(_pkg._mirror.url + '/', _fname)
+        # The build mirror caches the UPSTREAM (snapshot) build closure only.
+        # A closure member whose best version is OURS (a fork / locally-built
+        # package, served from a file:// mirror) is excluded: it's served by our
+        # own repo, and the common case (base-files — Essential) is already in
+        # the build container's base image, so it's never downloaded at build.
+        if _url.startswith('file:'):
+            _excluded.append(os.path.basename(_fname))
+            continue
         _basename = os.path.basename(_fname)
         _size = int(_pkg.get('Size', '0') or 0)
         _entries.append({
             'name': _name,
             'basename': _basename,
-            'url': urljoin(_pkg._mirror.url + '/', _fname),
+            'url': _url,
             'size': _size,
             'sha256': _pkg.get('SHA256', '') or '',
         })
@@ -147,6 +157,7 @@ def plan(cache: Any, dep_tree: Any, config: Any,
         'entries': _entries,
         'total_size': _total,
         'unsatisfiable': _closure.get('unsatisfiable', []),
+        'local_excluded': _excluded,
     }
     if include_index:
         _result['packages_index'] = '\n'.join(_stanzas)
