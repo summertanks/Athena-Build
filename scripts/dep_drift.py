@@ -34,7 +34,7 @@ def _dep_target_names(_obj) -> 'set[str]':
 
     Names only — version constraints are intentionally ignored, so an
     NMU-strip that rewrites `(= 1.47.0-2)` → `(>= …)` is NOT seen as a
-    removal (STA-24 diffs on dep PRESENCE, not on constraints)."""
+    removal (diffs on dep PRESENCE, not on constraints)."""
     _names: 'set[str]' = set()
     for _f in ('depends', 'pre_depends'):
         for _t in getattr(_obj, _f, None) or ():
@@ -52,7 +52,7 @@ def _provided_names(_obj) -> 'set[str]':
     """Every package NAME the Package satisfies via its `Provides:` field.
 
     apt treats `Depends: X` as satisfied by the real package X OR by any
-    installed package that `Provides: X`.  STA-24 uses this to tell a real
+    installed package that `Provides: X`. uses this to tell a real
     dropped edge from a benign modernisation: when shlibdeps emits a renamed
     library (libgcc-s1, which `Provides: libgcc1`) in place of a virtual /
     transitional name (libgcc1), the dependency is still satisfied — no
@@ -177,7 +177,7 @@ class _DepDriftMixin:
 
             # a dep present on the upstream cache record but ABSENT
             # on the built .deb is a LOST dependency.  If its target is a
-            # package we SELECT, the minimal SURFACES-01 closure won't pull
+            # package we SELECT, the minimal closure won't pull
             # it in and it silently won't be installed — the e2fsprogs case
             # (built binaries lost libext2fs2/libcom-err2/libss2 when the
             # patch dropped `-L shlibs.local`), where the disk image's root

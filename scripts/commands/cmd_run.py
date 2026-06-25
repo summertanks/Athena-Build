@@ -617,7 +617,7 @@ class ConfigRunCommandsMixin(SessionState):
         ))
 
     # ─────────────────────────────────────────────────────────────────
-    # build — OBS-02 cross-run build-history ledger
+    # build — cross-run build-history ledger
     # ─────────────────────────────────────────────────────────────────
 
     def cmd_build(self, action: str = '', *args):
@@ -629,7 +629,7 @@ class ConfigRunCommandsMixin(SessionState):
         }, action)
 
     def cmd_build_history(self, *args) -> None:
-        """`build history [pkg]` — OBS-02.  No pkg: every package's run count
+        """`build history [pkg]` —. No pkg: every package's run count
         + rolling pass rate, flakiest first.  With pkg: that package's most
         recent runs.  Reads the append-only log/build-history.jsonl ledger."""
         _buildlog = os.path.join(self.config.dir_log, 'build')
@@ -658,7 +658,7 @@ class ConfigRunCommandsMixin(SessionState):
                           f"{'elapsed':<11}{'peakRSS':<10}cpu%")
             for _r in _runs[-20:][::-1]:
                 _el = _r.get('elapsed_seconds')
-                _rss = _r.get('peak_rss_mb')       # OBS-03
+                _rss = _r.get('peak_rss_mb')
                 _cpu = _r.get('peak_cpu_pct')
                 _color = (tui.COLOR_ERROR if _r.get('status') == 'FAIL'
                           else tui.COLOR_NORMAL)

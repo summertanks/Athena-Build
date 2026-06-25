@@ -268,7 +268,7 @@ def _print_state(session, *_extras) -> None:
         ('build_container_ready', 'container_init        ', 'init Docker build sandbox'),
         ('source_build_ready',    'source_build          ', 'run dpkg-buildpackage per source'),
         ('signing_key_verified',  'signing_key_verified  ',
-            'sign+verify roundtrip against project key (CONF-02)'),
+            'sign+verify roundtrip against project key'),
     ]
     for attr, label, desc in _shared:
         _row(attr, label, desc)
@@ -683,7 +683,7 @@ def _iter_build_records(session) -> 'list[dict]':
 
 
 def _print_build_times(session, *_extras) -> None:
-    """All sources sorted by wall-clock elapsed.  Reads the OBS-01
+    """All sources sorted by wall-clock elapsed. Reads the
     build records — covers built (phase=done) and failed (phase=failed)
     attempts.  Tunneled and interrupted records carry timing too and
     are surfaced with a status tag.
@@ -941,7 +941,7 @@ def _print_groups(session, *_extras) -> None:
     except Exception:
         _deb_dirs = []
     for _dd in _deb_dirs:
-        # Post-CONF-01 the .debs live under dists/<codename>/<comp>/binary-*/,
+        # Post the .debs live under dists/<codename>/<comp>/binary-*/,
         # not at the repo root — walk the real binary dirs or the size
         # column is permanently '?'.
         if not os.path.isdir(_dd):
@@ -1248,7 +1248,7 @@ CATEGORIES: 'dict[str, tuple[Callable[..., None], str, str]]' = {
     'state':     (_print_state,     'Build state',   'pipeline stage progress (which stages are done)'),
     'stats':     (_print_stats,     'Build state',   'high-level counts across cache, dep tree, sources'),
     'summary':   (_print_summary,   'Build state',   'full pipeline summary (counts + chroot + ISO target)'),
-    'build-times': (_print_build_times, 'Build state', 'per-source wall-clock from build records (OBS-01)'),
+    'build-times': (_print_build_times, 'Build state', 'per-source wall-clock from build records'),
 
     # Packages
     'required':  (_print_required,  'Packages',      "packages with 'required' priority from APT cache"),
@@ -1271,7 +1271,7 @@ CATEGORIES: 'dict[str, tuple[Callable[..., None], str, str]]' = {
     'provides':  (_print_provides,  'Relations',     'virtual packages with multiple providers'),
 
     # Repo
-    'signing':   (_print_signing,   'Repo',          'project signing key — identity + on-disk state (CONF-02)'),
+    'signing': (_print_signing, 'Repo', 'project signing key — identity + on-disk state'),
 
     # Meta
     'help':      (_print_help,      'Meta',          'this help'),

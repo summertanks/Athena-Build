@@ -1609,7 +1609,7 @@ def virtual_publish_dry_run(
                                       currently owned by another builder
                                       AND we're not strictly higher
                                       version (the chunk-8 ownership
-                                      rule from the MIRROR-02 plan)
+                                      rule from the plan)
       ``virtual_ownership_transfer``  INFO — we'd take ownership of a
                                       currently-tunneled or
                                       lower-version filename; not a

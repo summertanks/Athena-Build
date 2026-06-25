@@ -211,7 +211,7 @@ class Tui:
         mode = ('key' if keymode else ('masked' if masked else 'line'))
         return self.dispatcher.request_prompt(message, mode)
 
-    # ─── Interactive-tab API (COMP-06 package selector) ──────────────────
+    # ─── Interactive-tab API (package selector) ──────────────────
     def add_tab(self, name: str) -> None:
         """Create a tab at runtime (idempotent)."""
         from .events import TabAdd

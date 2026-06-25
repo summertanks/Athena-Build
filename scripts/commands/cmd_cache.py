@@ -131,7 +131,7 @@ class CacheCommandsMixin(SessionState):
         snapshot.timestamp marker.  Purging is safe — the next `cache build`
         re-fetches everything from configured mirrors; the cost is a multi-GB
         re-download.  Useful when mirror metadata has gone stale or a
-        previous run left orphan artefacts (e.g. the reverted UX-04
+        previous run left orphan artefacts (e.g. the reverted
         cache.pkl.gz / buildflags.json files).
 
         Subdirectories (if any) are left intact — only top-level files go.
@@ -182,7 +182,7 @@ class CacheCommandsMixin(SessionState):
         # The udeb (installer) dep-tree is built off the same cache — drop
         # it too, or `cache purge` leaves a stale tree pointing at deleted
         # files (`clean all` nulls it explicitly; standalone purge didn't —
-        # STA-49).
+        #).
         self.udeb_dep_tree = None
         self.flags.cache_ready = False
         self.flags.dep_check_ready = False
@@ -819,7 +819,7 @@ class CacheCommandsMixin(SessionState):
                 _resp = Prompt(
                     PROMPT_YESNO,
                     "There are one or more udeb source parse failures, Proceed?",
-                    informational=True,   # UX-05f
+                    informational=True,
                 ).get_response()
                 if _resp.lower() not in ('y', 'yes'):
                     return

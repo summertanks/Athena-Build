@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     import buildcontainer   # forward-reference target for type hints
 
 # apt-repo metadata generators — lifted from this module to scripts/apt_repo.py
-# in CONF-01 Stage A.  See docs/plans/conf-01-repo-layout-migration.md.
+# in Stage A. See docs/plans/conf-01-repo-layout-migration.md.
 # Pure code motion; call sites below kept the same semantics.
 from apt_repo import (
     generate_apt_repo,
@@ -90,14 +90,14 @@ def build_installer_iso(
         dir_chroot_installer: Path to the unpacked installer chroot
                               (the buildroot/installer/ produced by
                               cmd_build_chroot_installer).
-        dir_repo:             Path to repo/main/ (in the CONF-01 unified
+        dir_repo: Path to repo/main(in the unified
                               layout this is repo/dists/<codename>/main/
                               binary-<arch>/) — the dir holding regular
                               .debs.  Used for kernel lookup + as the
                               first source dir for pool staging.
         dir_repo_main_udeb:   Path to repo/dists/<codename>/main/
                               debian-installer/binary-<arch>/ — udebs
-                              live here post-CONF-01.  Optional for
+                              live here post. Optional for
                               backwards-compat; when omitted, udebs are
                               not staged to the ISO pool (legacy code
                               expected them colocated with .debs in
@@ -304,7 +304,7 @@ def _find_kernel(dir_repo: str, dir_chroot_installer: str,
         f"find kernel: chroot={dir_chroot_installer}/boot, repo={dir_repo}, "
         f"expected={expected_kernel_pkg or '-'}"
     )
-    # Strategy 1: chroot's boot dir.  STA-31: version-aware pick (the
+    # Strategy 1: chroot's boot dir. version-aware pick (the
     # installer ramdisk's own initrd is built separately by cpio, so only
     # the vmlinuz matters here).
     _candidates = glob.glob(
@@ -375,7 +375,7 @@ def _find_kernel(dir_repo: str, dir_chroot_installer: str,
                 tui.COLOR_INFO,
             )
 
-    # Pick the highest ABI version.  STA-31: version-aware — a plain
+    # Pick the highest ABI version. version-aware — a plain
     # sorted()[-1] on the .deb names is lexicographic, so '6.1.0-9' beat
     # '6.1.0-47' ('9' > '4'); apt_pkg.version_compare on the extracted ABI
     # gets it right (the docstring's "numeric padding makes sort-on-name
@@ -535,7 +535,7 @@ def _stage_grub_cfg(staging: str, installer_dir: str) -> bool:
 
     Optional assets (not fatal if absent):
       - grub-background.png — referenced by grub.cfg's `background_image`
-        line for the COMP-01f Phase 2 boot splash.  When absent, GRUB's
+        line for the Phase 2 boot splash. When absent, GRUB's
         `if loadfont … ; then … background_image …; fi` guard simply
         skips the splash; boot still works in text mode.
     """
@@ -581,7 +581,7 @@ def _stage_disk_info(
     with `${codename}`, `${version}` and `${snapshot}` placeholder
     substitution, and (when `snapshot` is set) write a `.disk/snapshot`
     marker so the media records which upstream snapshot it was built from
-    (UPD-01 — distinguishes a base-snapshot disc from a stepped one).
+    (— distinguishes a base-snapshot disc from a stepped one).
 
     These files are d-i's "is this an installer disc?" marker convention:
     cdrom-detect parses the quoted codename out of /cdrom/.disk/info and
@@ -1022,7 +1022,7 @@ def _run_grub_mkrescue(staging: str, iso_path: str,
         staging:   ISO source tree.
         iso_path:  Output ISO file.
         container: BuildContainer instance (host->container bridge).
-                   Required (post-COMP-14); see docstring above for why
+                   Required (post); see docstring above for why
                    host grub-mkrescue is no longer used.
         password:  Host sudo password — passed through to BuildContainer
                    for symmetry with other ISO helpers (the container

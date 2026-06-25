@@ -137,7 +137,7 @@ class BuildContainer:
         # keep the full config reference so segregate
         # can route .deb / .udeb destinations via config.deb_dest_for_
         # filename (which knows about the new unified apt-repo layout).
-        # Pre-CONF-01 code only needed the path strings below.
+        # Originally the code only needed the path strings below.
         self.config = config
 
         self.build_path = config.dir_repo
@@ -282,7 +282,7 @@ class BuildContainer:
         # advance ([Snapshot] Timestamp change in build.conf) invalidates
         # the image cache automatically — `docker images` lookup misses
         # the old tag, we build a fresh image against the new snapshot.
-        # Pre-CONF-15 the tag was `athenalinux:build-<release>`; an
+        # Earlier the tag was `athenalinux:build-<release>`; an
         # operator's `[Snapshot] Timestamp` change wouldn't invalidate
         # the existing image even though its toolchain layer was now
         # against an older snapshot.
@@ -402,7 +402,7 @@ class BuildContainer:
         self.image = image
 
         # live-container registry.  Every container
-        # spawned by this BuildContainer (build / SEC-05 preview /
+        # spawned by this BuildContainer (build / preview
         # grub-mkrescue) registers here on `containers.run()` return and
         # deregisters in its finally block, so Phase 3's reap_all_live()
         # has an in-process list to force-remove on SIGINT.
@@ -456,7 +456,7 @@ class BuildContainer:
 
         # sweep leftover docker containers from a prior run
         # that didn't reach its build()/run_grub_mkrescue/capture
-        # finally-block (kill -9 / SIGSEGV / daemon restart).  STA-32: reap
+        # finally-block (kill -9 / SIGSEGV / daemon restart). reap
         # ONLY containers whose owner (com.athena.pid) is GONE — never one a
         # DIFFERENT live Athena process owns.  The old code force-removed
         # every com.athena.build=1 container, so a second session (or an
@@ -1266,7 +1266,7 @@ class BuildContainer:
             # then capture both signals.  Docker exposes the OOM-killed
             # flag distinctly from exit code 137 — a real cgroup-OOM has
             # OOMKilled=True; our reap_all_live SIGKILL also produces
-            # 137 but with OOMKilled=False.  Storing both lets OBS-02
+            # 137 but with OOMKilled=False. Storing both lets
             # history disambiguate retroactively.
             _oom_killed = False
             try:
@@ -1526,7 +1526,7 @@ class BuildContainer:
         """Render the apt install shell command(s) for a build's build-deps.
 
         Single source of truth for both the real install (build() main
-        container script) and the SEC-05 simulate preview.  `simulate=True`
+        container script) and the simulate preview. `simulate=True`
         inserts `--simulate` into every apt-get install invocation; the
         rendered command shape (plain deps + OR-group fallback chains) is
         otherwise identical.
@@ -1614,7 +1614,7 @@ class BuildContainer:
         plain_deps: 'list[str]',
         or_groups: 'list[list[str]]',
     ) -> 'Optional[str]':
-        """Helper for the SEC-05 gate.  Runs a transient container that
+        """Helper for the gate. Runs a transient container that
         writes the snapshot-pinned sources.list, runs `apt-get update`,
         then `apt-get install -y --simulate <deps>`.  Captures container
         stdout/stderr and returns the combined text.  Returns None if the
@@ -2028,7 +2028,7 @@ class BuildContainer:
 
         Returns the list of post-move absolute paths so the caller
         (_normalize_built_artifacts) can iterate only the
-        just-emitted files (STA-19 fix — was rescanning the whole
+        just-emitted files (fix — was rescanning the whole
         repo + opening every .deb with DebFile to identify them).
         Returns empty list on no-files-in-scratch (tunneled build,
         empty build, or rolled-back partial failure).
@@ -2110,7 +2110,7 @@ class BuildContainer:
                     # All-or-nothing per source: roll back every move done
                     # for THIS call so the caller sees a clean empty list
                     # (no partial _normalize / asg-stamp on a half-populated
-                    # set, no partial signed-manifest entry for STA-21).
+                    # set, no partial signed-manifest entry for).
                     logger.warning(
                         f"segregate: failed to move {_f} → {_dst_dir}: {e} "
                         f"(rolling back {len(_moved_paths)} prior move(s))"
@@ -2188,7 +2188,7 @@ class BuildContainer:
         _comp = getattr(getattr(src_pkg, '_mirror', None), 'component', '') or 'main'
         for _file in expected_files:
             # Only main-classified binaries gate rebuild; missing
-            # -dev/-doc/-dbgsym/-tests are tolerated.  CONF-01 Stage D:
+            # -dev/-doc/-dbgsym/-tests are tolerated. Stage D:
             # deb_dest_for_filename returns the new nested location
             # (main → dists/<codename>/main/binary-<arch>/ for .deb,
             # → debian-installer/binary-<arch>/ for .udeb).
@@ -2197,7 +2197,7 @@ class BuildContainer:
                 continue
             # accept the predicted pristine name OR a +asg<R>u<N>
             # stamped variant of it (find_matching_artifact).  The old
-            # exact-only os.path.isfile match was the CONF-13 rebuild-loop
+            # exact-only os.path.isfile match was the rebuild-loop
             # cause: a stamped/ABI-variant on-disk file never matched, so the
             # source was rebuilt every run.
             _dst_dir = self.config.deb_dest_for_filename(_file, _comp)

@@ -182,7 +182,7 @@ def generate_repo_indexes(
     description_for_suite: Optional['dict[str, str]'] = None,
 ) -> bool:
     """Multi-suite apt-repo index generator — operates IN-PLACE on
-    repo_root/dists/, assuming the unified layout from CONF-01.
+    repo_root/dists/, assuming the unified layout.
 
     Distinct from generate_apt_repo (which is the single-suite ISO-
     staging helper).  This one is what cmd_index_repo invokes against
@@ -197,7 +197,7 @@ def generate_repo_indexes(
       suites_spec:         {suite_name: [component_name, ...]}.  Each
                            (suite, component) pair must already have a
                            directory at <repo_root>/dists/<suite>/<comp>/
-                           binary-<arch>/ — Stage C of CONF-01 creates
+                           binary-<arch>/ — Stage C creates
                            these as part of the layout migration.  This
                            helper FAILS clean if the directory is
                            missing (signals "Stage C hasn't run yet").
@@ -371,7 +371,7 @@ def merge_packages_indexes(remote_text: str, local_text: str) -> str:
 
     Local stanzas (this snapshot's freshly built pool) take precedence on a
     (Package, Version) collision; every remote-only version is PRESERVED
-    (append-only — clients keep their rollback targets).  This is the UPD-01
+    (append-only — clients keep their rollback targets). This is the
     §5 step-8 core: the remote stays multi-version even though local repo/
     holds one version per package and references .debs the remote also has.
     Stanzas are re-emitted via apt_pkg, which is sufficient for a valid index
@@ -379,7 +379,7 @@ def merge_packages_indexes(remote_text: str, local_text: str) -> str:
 
     Retained as the reference re-merge implementation for a future
     LIST+GET+merge publish (the option-C shape); it has no live caller
-    today — the remote pre-MIRROR-01 publish path that used it was removed."""
+    today — the remote pre publish path that used it was removed."""
     import apt_pkg
     import tempfile as _tf
     _seen: 'set[tuple[str, str]]' = set()
@@ -548,7 +548,7 @@ def _scan_packages_to(
 
     Run with cwd=staging so Packages records carry relative Filename
     entries (matching the layout apt walks via /cdrom/pool/...).
-    Thin wrapper around `_run_dpkg_scan` since STA-22 consolidation —
+    Thin wrapper around `_run_dpkg_scan` since consolidation —
     keeps the apt_repo-specific concerns (compress + record-count log
     line) outside the shared helper.
     """
@@ -572,7 +572,7 @@ def _scan_sources_to(
     staging: str, pool_subdir: str, output_path: str, password: str,
 ) -> bool:
     """sudo dpkg-scansources <pool_subdir> > <output> + compress.  Thin
-    wrapper around `_run_dpkg_scan` since STA-22 consolidation."""
+    wrapper around `_run_dpkg_scan` since consolidation."""
     if not _run_dpkg_scan(
             ['dpkg-scansources', pool_subdir], output_path,
             cwd=staging, password=password,
@@ -921,7 +921,7 @@ def export_pubkey_to_staging(
     falls apart the same way an unsigned Release would.
 
     The pubkey was already exported by signing.generate_key at project
-    setup time (CONF-02 phase 1); we just copy it onto the disc.  The
+    setup time (phase 1); we just copy it onto the disc. The
     .disk/ directory is created earlier by _stage_disk_info, so we
     just need a write into an existing user-owned dir — no sudo.
     """

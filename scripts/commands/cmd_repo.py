@@ -267,7 +267,7 @@ class RepoCommandsMixin(SessionState):
             'strip':           'NMU-suffix backfill across repo/',
             'cleanup':         'delete obsolete .debs/.udebs (dry-run by default; '
                                'pass `force` to actually delete)',
-            'backfill-hashes': 'COORD-01: walk build.json records, hash any '
+            'backfill-hashes': 'walk build.json records, hash any '
                                'emitted .deb/.udeb missing output_hashes, bump '
                                'schema_version v1→v2.  Idempotent.',
         }
@@ -318,7 +318,7 @@ class RepoCommandsMixin(SessionState):
         """
         _force = 'force' in args
         # Post-segregation: .debs live in dists/<codename>/<comp>/
-        # binary-<arch>/ (CONF-01 Stage D unified layout); udebs in
+        # binary-<arch>(Stage D unified layout); udebs in
         # main/debian-installer/binary-<arch>/; dbgsyms in
         # dists/<codename>-debug/main/binary-<arch>/.  Walk all of
         # them so strip catches every tier.
@@ -480,7 +480,7 @@ class RepoCommandsMixin(SessionState):
 
     def _scan_stale_files(self) -> 'tuple[list, list, list, list, int]':
         """Walk the build-output components (main, main-udeb, doc, dbgsym,
-        tests — `utils._STALE_SCAN_SUBDIRS`; STA-38 added `main-udeb`) for
+        tests — `utils._STALE_SCAN_SUBDIRS`; added `main-udeb`) for
         .deb/.udeb files that shouldn't be there given the current
         selected_srcs + src_pkg_files.  Pristine tunneled binaries in the
         non-main components are intentionally out of scope (the classifier
@@ -706,7 +706,7 @@ class RepoCommandsMixin(SessionState):
         A `.verified` (utils.get_sha256's cache) lives next to a binary
         and is meaningless once that binary is removed.  Several removal
         paths drop the binary but NOT its sidecar — source-build output
-        replacement (`+asg1u1` → `+asg1u2`), pre-STA-38 cleanups, lifecycle
+        replacement (`+asg1u1` → `+asg1u2`), pre cleanups, lifecycle
         pruning — so orphans accumulate (15 found 2026-06-13 after the
         e2fsprogs/keyring rebuilds + the reportbug deprecation).
 
@@ -742,7 +742,7 @@ class RepoCommandsMixin(SessionState):
 
         These are bytes a published claim on a mirror still names as live —
         pruning them locally before the mirror is told (deprecate / obsolete
-        via `mirror publish`, or `mirror reclaim`) violates UPD-01's
+        via `mirror publish`, or `mirror reclaim`) violates's
         publish-before-prune discipline: the mirror keeps serving a sha we no
         longer hold, so a later reclaim/audit can't reproduce it.
 

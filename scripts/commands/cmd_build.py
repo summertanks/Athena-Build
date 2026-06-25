@@ -42,7 +42,7 @@ class BuildCommandsMixin(SessionState):
 
         Prerequisites: source build must have completed (source_build_ready flag)
         AND the signing key must verify (signing_key_verified flag, gated up
-        front via _ensure_signing_key_verified — see CONF-02 phase 3 for why).
+        front via _ensure_signing_key_verified — see phase 3 for why).
         The sudo password is collected interactively at the start of this command.
         """
         if self._refuse_in_build_mode("chroot build live"):
@@ -797,7 +797,7 @@ class BuildCommandsMixin(SessionState):
             # this, _find_kernel falls back to highest sorted on
             # disk — which can be a stale higher-ABI .deb left over
             # from a pre-rollback snapshot, breaking the installer
-            # because the ramdisk's modules won't match (CONF-13
+            # because the ramdisk's modules won't match
             # symptom from 2026-05-19).
             import re as _re
             _kernel_pat = _re.compile(
@@ -870,7 +870,7 @@ class BuildCommandsMixin(SessionState):
 
     def cmd_build_iso_disk(self, *args):
         """Build a pre-installed bootable qcow2 disk image
-        from the DISK surface chroot (SURFACES-01: buildroot/disk, the
+        from the DISK surface chroot (buildroot/disk, the
         minimal [Disk] Groups closure — decoupled from the live/GNOME
         chroot).
 
@@ -956,7 +956,7 @@ class BuildCommandsMixin(SessionState):
                     return
                 # NOTE: deliberately does NOT touch chroot_verified —
                 # that flag belongs to the LIVE surface; this verify ran
-                # against dir_chroot_disk (SURFACES-01 decoupling).
+                # against dir_chroot_disk (decoupling).
 
             _version  = self.config.build_version.strip('"').strip("'")
             _distro   = self.config.build_distribution.strip('"').strip("'")

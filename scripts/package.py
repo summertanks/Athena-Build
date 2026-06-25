@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 # `apt_pkg.config['APT::Build-Profiles']` is a PROCESS-GLOBAL that
 # `Source.build_depends` sets and then reads via `parse_src_depends`.
-# Under COMP-03 parallel builds (per-package profile overrides, ARCH-16),
+# Under parallel builds (per-package profile overrides,),
 # worker A's set could be overwritten by worker B before A's parse ran,
 # filtering A's `<!nocheck>`-style build-deps under B's profiles — a
 # silently wrong build-dep install set.  Serialise the set+parse pair.

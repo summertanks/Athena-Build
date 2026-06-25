@@ -77,7 +77,7 @@ def build_installer_chroot(
     Args:
         udeb_tree:           DependencyTree against Cache.udeb_view() — the
                              udeb closure to unpack.
-        dir_udebs:           Path to the dir holding .udeb files.  CONF-01
+        dir_udebs: Path to the dir holding .udeb files.
                              Stage D: this is repo/dists/<codename>/main/
                              debian-installer/binary-<arch>/ in the unified
                              layout.  Previously was repo/ (top-level) and
@@ -253,7 +253,7 @@ def _resolve_udeb_files(udeb_tree: 'dependencytree.DependencyTree',
     `dir_udebs` is now the dir holding .udeb files
     directly (in the unified apt-repo layout that's
     repo/dists/<codename>/main/debian-installer/binary-<arch>/).
-    Pre-CONF-01 the param was the top-level repo/ and we joined 'main';
+    Earlier the param was the top-level repo/ and we joined 'main';
     Stage D pushes the resolved path to the caller for clarity.
 
     Maps the cache's Packages-index Filename via strip_build_version
@@ -282,7 +282,7 @@ def _resolve_udeb_files(udeb_tree: 'dependencytree.DependencyTree',
             continue
         _filename = utils.normalize_repo_filename(_filename)
         # The index Filename is the PRISTINE name, but the on-disk .udeb may
-        # carry a +asg<R>u<N> stamp (UPD-01 update layer).  find_matching_artifact
+        # carry a +asg<R>u<N> stamp (update layer). find_matching_artifact
         # accepts the pristine name OR its stamped variant — the same
         # reconciliation check_build / _source_state use.  Without it, every
         # stamped udeb (e.g. busybox-udeb after a security delta) resolves as
@@ -447,10 +447,10 @@ def _audit_and_strip_chroot_hooks(
     apt-install in pre-pkgsel.d / finish-install.d must either resolve
     against our pool or be excluded entirely.
 
-    Pre-CONF-10: hardcoded `_targets = (20install-hwpackages,
+    Pre: hardcoded `_targets = (20install-hwpackages,
     50save-logs)` — rotted whenever upstream added/renamed a hook.
 
-    Post-CONF-10: walks the unpacked installer chroot's hook trees,
+    Post: walks the unpacked installer chroot's hook trees,
     parses every `apt-install X` line, and cross-references the named
     pkgs against the build's pool.  Decisions:
 

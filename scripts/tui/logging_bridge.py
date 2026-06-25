@@ -2,7 +2,7 @@
 
 Mirror of `_LogTabHandler` / `_ConsoleTabHandler` from legacy tui.py
 but emits Events instead of calling methods directly.  Routes by
-logger name (`athena.<stage>` -> `<stage>` tab) per ARCH-14 P6.
+logger name (`athena.<stage>` -> `<stage>` tab) per P6.
 """
 from __future__ import annotations
 

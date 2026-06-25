@@ -1,4 +1,4 @@
-"""/ AUDIT-01 — identity-leakage scanner.
+"""/ — identity-leakage scanner.
 
 Walks shipped / operator-facing fork content + (when called from the
 ISO stage) the staged ISO root, greps each text file for residue

@@ -1,7 +1,7 @@
 """Project signing key — generate, locate, inspect, verify.
 
 Phase 1: the *key management* surface.  Sign-Release wiring
-into ``cmd_index_repo`` is a follow-on (CONF-01 / CONF-02 phase 2).
+into ``cmd_index_repo`` is a follow-on (/ phase 2).
 
 What this module owns:
 
@@ -22,7 +22,7 @@ What this module owns:
 
 What this module deliberately does NOT do:
 
-- Sign Release files.  That's CONF-01 / CONF-02 phase 2's job; lives
+- Sign Release files. That's / phase 2's job; lives
   with the indexing flow once it exists.
 - Auto-generate on first call from another module.  Key generation is
   a security-relevant action; the operator runs ``key generate``

@@ -318,7 +318,7 @@ def emit_supersession_obsolescence(
     Lets a RECIPIENT retire its own superseded claims after a `mirror pull`
     WITHOUT a publish round-trip — the asymmetry the operator flagged: we pulled
     the source-of-truth state, so being forced to re-publish to release our own
-    now-superseded claims is backwards.  UPD-01 publish-before-prune is
+    now-superseded claims is backwards. publish-before-prune is
     preserved by construction: a claim is only obsoleted when a strictly-newer
     version is PRESENT in the live set (a drift file whose successor isn't built
     yet is the newest in its group → left live).  Only OUR claims are marked;
@@ -492,8 +492,8 @@ def filter_pending_by_ownership(
 
     Decision matrix (per filename):
       - No existing owner record         → KEEP (we become owner)
-      - Existing owner, different sha256  → BLOCK (`frozen_bytes_blocked`,
-                                            STA-47) unless a reclaim
+      - Existing owner, different sha256  → BLOCK (`frozen_bytes_blocked`)
+        unless a reclaim
       - Owner is us                      → KEEP (re-claim is no-op)
       - Tunneled (no owner)              → KEEP (we take ownership)
       - Owner is other, our_ver > theirs → KEEP (ownership transfers)
@@ -884,7 +884,7 @@ def remote_publish(
         if _div:
             _status(_div)
 
-        # Step 3a — STA-30(a): stale-local-jsonl guard.  Step 6 assigns new
+        # Step 3a — stale-local-jsonl guard. Step 6 assigns new
         # seqs from max_seq(our LOCAL jsonl) and Step 7 wholesale-replaces
         # the remote jsonl with it.  If our working dir was wiped/restored
         # (same BUILDER_ID, empty/short local file) max_seq is BEHIND the
@@ -913,7 +913,7 @@ def remote_publish(
                 f"{builder_id}.jsonl from the remote (it was just fetched "
                 f"to {os.path.join(_fetched, 'claims')}) before publishing.")
 
-        # Step 3b — MIRROR-01 Phase 3: federation gate.
+        # Step 3b — Phase 3: federation gate.
         # If remote head exists, its neighbours must match local config's
         # mirror URL set.  Diff → BLOCK, surface findings, release flock.
         _is_bootstrap = (_head_dict is None)
@@ -929,7 +929,7 @@ def remote_publish(
                     "`mirror reconcile-neighbours` to align peers, "
                     "then retry publish.")
 
-        # Step 3c — MIRROR-01 Phase 3: first-publish bootstrap.
+        # Step 3c — Phase 3: first-publish bootstrap.
         # When the remote has no coord-head yet (a freshly-prepared mirror
         # endpoint), upload our builder pubkey to <root>/keyring/builders/
         # so subsequent verify steps on this and every other peer can
@@ -1138,7 +1138,7 @@ def remote_publish(
                 "non-installable state)")
         fill_sizes_from_pool(_pending, _pool)
 
-        # Step 5b — MIRROR-01 Phase 3b: per-file .deb push.  For each
+        # Step 5b — Phase 3b: per-file .deb push. For each
         # pending claim, rsync the .deb from local pool → remote pool
         # (sibling tree of the coord root).  A push failure drops the
         # claim from the publish set (partial = converge on retry; we
@@ -1353,7 +1353,7 @@ def remote_publish(
         except Exception as _e:   # never let deprecation break a publish
             logger.warning(f"coord.publish: deprecation emission skipped: {_e}")
 
-        # Step 6c — LEDGER-01: mark OUR superseded old-version files
+        # Step 6c — mark OUR superseded old-version files
         # obsolete.  The grouping must see the claims just appended in
         # Step 6 (the NEW versions), so merge _pending into our slice of
         # the fetched view.  Ownership retained; the old .deb stays in the

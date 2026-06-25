@@ -171,8 +171,9 @@ _All architecture & coding-practice tickets are closed — see [`docs/done.md`](
 > module, all findings hand-verified against source).  Sanity baseline at the
 > time was green (ruff + mypy + 1086-test suite all pass).  CONS-01..09 were
 > FIXED in the same pass (triad-gated); CONS-10..16 were deferred.  CONS-10
-> (P1) landed later (2026-06-25); CONS-11..16 remain open (each needs a design
-> decision or a larger change).  Close deferred rows here as they land.
+> (P1) + CONS-15 (P3) landed later (2026-06-25); CONS-11/12/13/14/16 remain
+> open (each needs a design decision or a larger change).  Close deferred rows
+> here as they land.
 
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
@@ -190,7 +191,7 @@ _All architecture & coding-practice tickets are closed — see [`docs/done.md`](
 | CONS-12 | P2 | todo | **`.deb` sha-verify-on-push gap.** The `remote_sha256` verify-after-push (d50806c) is wired for ISO release assets only; pool `.deb` pushes (`push_single_deb`, `--ignore-existing`) trust rsync, so a stale same-name remote file (different bytes) is silently skipped → `claim_apt_sha_mismatch` at every peer's pull. The pool-completeness guard checks presence, not content. Fix: verify content for existing-remote pool files, or document the limitation. (coord/transport.py + publish.py Step 5b.) |
 | CONS-13 | P2 | todo | **Local vs remote build-mirror semantics drifted + remote hardening.** The LOCAL `local_mirror.download`/`index` path stamps + indexes a *partially-failed* mirror as valid-for-snapshot, while the remote runner correctly gates on `not failed` — align them. Also the remote path lacks the `disk_check` the local path has (no free-space pre-check before a multi-GB download) and its `_download` read loop doesn't catch `http.client.IncompleteRead` (one flaky transfer aborts the whole population instead of recording one failure). (local_mirror.py, remote_localmirror.py, cmd_cache.py.) |
 | CONS-14 | P3 | todo | **`repo repair cleanup force` under `--yes` bypasses confirmations** (cmd_repo.py:998/1016). Both the publish-before-prune ack and the irreversible-delete confirm are `informational=True`, which the facade auto-answers "yes" under `--yes` — so an unattended `--yes` session can delete live-claimed pool files and skip the ordering guard. Fix: make at least the publish-before-prune prompt non-informational, or document that `--yes` cleanup assumes publish already ran. |
-| CONS-15 | P3 | todo | **Bulk inline ticket-tag comment cleanup (~150 sites).** Code comments carry historical ticket IDs (CONF-01 ×20, UPD-01 ×15, MIRROR-01 ×13, STA-*, SEC-05, …) + dated-incident narration + rotting line-number references (e.g. `reconcile.py:310`). High-value individual ones were fixed in CONS-09; the bulk is a separate careful mechanical pass (most tags sit on load-bearing rationale — strip the bare ID, keep the why). Defer until a dedicated cleanup window. |
+| CONS-15 | P3 | done | **Bulk inline ticket-tag comment cleanup.** Stripped the bare Athena ticket IDs (CONF-01 ×20, UPD-01 ×15, MIRROR-01 ×13, STA-*, SEC-05, …) from code comments/docstrings across 47 files — 149 lines — preserving all rationale; Debian/standards tokens (DEP-3, SHA-256, ISO-8601, UTF-8, RSA-*, RFC-822) and live `CONS-N` refs kept. Done via a reviewable strip script + hand-fixed the ~11 grammatical holes (ticket-as-noun, `Pre-<ticket>`, line-wrapped colons). Triad green (1279/1279). Dated-incident narration kept (it's rationale, not a bare tag); a handful of stale line-number refs remain (low value). |
 | CONS-16 | P3 | todo | **`compute_build_closure` tier machinery duplicates `classify_tiers`.** The only production consumer (`local_mirror.py`) reads `compute_build_closure`'s `all`/`unsatisfiable` keys; its `toolchain`/`language`/`leaf`/`added` tiers + `runtime_closure` param are computed but consumed only by tests, while the real build-path tiering is done by the separate adjacency-based `classify_tiers` (cmd_cache.py:758). Two parallel build-closure tier mechanisms — consolidate onto one (consistent with IncludeBuildClosure being off-by-default/test-later). (build_closure.py.) |
 
 ---

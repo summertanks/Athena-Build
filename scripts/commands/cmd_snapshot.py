@@ -77,7 +77,7 @@ class SnapshotCommandsMixin(SessionState):
 
     def _mirror_floor(self) -> str:
         """Return min(mirror.<each>.state.current) across every configured
-        mirror — the workload floor for UPD-01 (`_do_update_build`).
+        mirror — the workload floor for (`_do_update_build`).
 
         When NO mirrors are configured, returns the local current pin
         (workload = "since current" = empty; no UPDATE mode work).
@@ -248,7 +248,7 @@ class SnapshotCommandsMixin(SessionState):
                                           confirmed; intended for backtrack /
                                           operator-driven recovery only.
 
-        Forward-only is the default rule because UPD-01's `+asg uN` ledger and
+        Forward-only is the default rule because's `+asg uN` ledger and
         the per-mirror federation state would otherwise drift.  `force` is the
         escape hatch — no list, no candidate filter, just a free-form prompt.
         """

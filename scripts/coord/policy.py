@@ -4,7 +4,7 @@ These are facts the codebase consults, separated from the data layer
 (schema, store) and the audit layer (reconcile) so a future operator
 override doesn't touch correctness code.
 
-For v1, every knob is HARDCODED at the value the original COORD-01
+For v1, every knob is HARDCODED at the value the original
 design fixed:
   HASH_CONFLICT_POLICY = 'BLOCK'   — see plan §"Hard constraints" #1
   COORD_HEAD_FRESHNESS = require InRelease.Date ≤ head_time
@@ -20,7 +20,7 @@ config block.  Don't sprinkle policy decisions inline in reconcile.
 #   'FIRST_WINS'    — second publisher silently rejected at lock acquire
 #   'BOTH_VALID'    — operator picks via `coord conflict resolve`
 #   'PER_PKG_LIST'  — small allowlist for known-nondeterministic pkgs
-# The user explicitly chose BLOCK during the COORD-01 planning session.
+# The user explicitly chose BLOCK during the planning session.
 HASH_CONFLICT_POLICY = 'BLOCK'
 
 

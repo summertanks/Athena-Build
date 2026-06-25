@@ -58,7 +58,7 @@ def write_coord_head(
 
     Returns True iff BOTH the JSON AND the signature land on disk.
     On signing failure, the unsigned JSON is removed (no false
-    authority — mirrors STA-21 discipline from repo_audit).
+    authority — mirrors discipline from repo_audit).
     """
     _path = coord_head_path(coord_dir)
     _sig = coord_head_sig_path(coord_dir)

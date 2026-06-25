@@ -552,7 +552,7 @@ class DependencyTree:
         # the now-mismatched key, so `foo` vanished from the closure — silently and
         # order-dependently (the athena-cdrom-setup / 50mirror loss class).
         #
-        # EXEMPTION (STA-45 follow-up): a REPLACEMENT package declares the standard Debian
+        # EXEMPTION (follow-up): a REPLACEMENT package declares the standard Debian
         # idiom `Provides: X` + `Replaces: X` (+ usually `Conflicts: X`) — it deliberately
         # supersedes X (our same-name forks: athena-tasksel→tasksel, athena-branding→
         # desktop-base).  Such a package MUST take the name so the real X drops out of the
@@ -678,7 +678,7 @@ class DependencyTree:
         cannot satisfy a versioned constraint — callers must treat None
         as "name match only" (satisfies unversioned constraint only).
 
-        Fixes STA-18: previously `selected_pkgs[alias].version` was read
+        Fixes previously `selected_pkgs[alias].version` was read
         directly, returning the provider's own Version field even when
         the Provides clause carried a different version (e.g. an epoch
         the provider lacks — libgcc-s1's Version is 12.2.0-14+deb12u1
@@ -850,7 +850,7 @@ class DependencyTree:
                             if pkg_constraint == '':
                                 _satisfies = True
                             elif _pkg_ver is None:
-                                # unversioned Provides vs versioned constraint — see STA-18
+                                # unversioned Provides vs versioned constraint
                                 _satisfies = False
                             else:
                                 _satisfies = apt_pkg.check_dep(_pkg_ver, pkg_constraint, pkg_version)
@@ -882,7 +882,7 @@ class DependencyTree:
                                     if pkg_constraint == '':
                                         _satisfies = True
                                     elif _pkg_ver is None:
-                                        # unversioned Provides vs versioned constraint — see STA-18
+                                        # unversioned Provides vs versioned constraint
                                         _satisfies = False
                                     else:
                                         _satisfies = apt_pkg.check_dep(_pkg_ver, pkg_constraint, pkg_version)
