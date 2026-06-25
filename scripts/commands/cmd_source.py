@@ -15,7 +15,6 @@ mixin shares session state.
 """
 import logging
 import os
-import re
 import subprocess
 
 import apt_pkg
@@ -23,7 +22,7 @@ import buildcontainer
 import repo_audit
 import tui
 import utils
-from tui import console, Prompt, PROMPT_YESNO, ProgressBar, Spinner
+from tui import console, Prompt, PROMPT_YESNO, ProgressBar
 
 from commands.base import SessionState
 

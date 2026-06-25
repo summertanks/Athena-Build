@@ -17,7 +17,7 @@ import argparse
 import requests
 import tui
 import _version
-from tui import Prompt, Spinner, ProgressBar
+from tui import ProgressBar
 from typing import (
     Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple,
     TYPE_CHECKING)

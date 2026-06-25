@@ -29,16 +29,14 @@ faulthandler.enable(_FAULT_LOG)
 atexit.register(_FAULT_LOG.close)
 
 import tui
-import datetime
 import json
 import os
-import re
 import shutil
 import subprocess
 import threading
 import time
 import sys
-from typing import Callable, Optional
+from typing import Optional
 
 import apt_pkg
 
@@ -47,15 +45,10 @@ import local_mirror
 import utils
 import _version
 from utils import BuildConfig
-from buildlog import BuildLog, human_size, safe_size
 from cache import Cache
 
 import buildcontainer
 import dependencytree
-import buildsystem
-import installer_chroot
-import iso_installer
-import repo_audit
 import signal
 
 

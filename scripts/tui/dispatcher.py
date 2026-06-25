@@ -22,7 +22,6 @@ from concurrent.futures import Future
 from concurrent.futures import TimeoutError as _FutureTimeout
 from typing import Any, Callable, List, Optional, Protocol
 
-from . import wrap
 from .events import (
     ClearTab, ConsoleMark, ConsoleTrim, KeyEvent, LogEvent, PrintEvent,
     PromptRequest, SetTabBuffer, Shutdown, StatusEvent, TabActivate, TabAdd,

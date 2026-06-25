@@ -16,7 +16,7 @@ OR group, virtual names canonicalized) — order-independent, self-contained.
 Edge semantics mirror ``chroot._resolve_depends``/``_resolve_pre_depends``.
 """
 
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Iterable, List, Optional, Set
 
 import utils
 
