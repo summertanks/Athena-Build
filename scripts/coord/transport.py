@@ -142,13 +142,19 @@ def push_single_deb(
     """Rsync one local `.deb` (or `.udeb`) → `remote_spec` (a remote FILE
     path, not a directory).
 
-    Uses `--ignore-existing` so a re-publish never re-uploads an
-    unchanged file by name — .deb filenames are immutable per (pkg,
-    version, arch), so name-match is the right key.  Single-file
-    semantics so Phase 3b can tick a ProgressBar one notch
-    per .deb and report failures precisely.
+    Uses `--size-only` so a re-publish skips an unchanged file by SIZE
+    (the cheap stat — .deb filenames are immutable per (pkg, version,
+    arch), so a same-name same-size remote file IS the same bytes), while
+    a TRUNCATED / partial remote file (a prior push that died mid-flight
+    leaves a wrong-size file) is re-sent rather than silently trusted by
+    name.  `--ignore-existing` would skip such a file forever, stranding a
+    claim whose pinned sha the remote pool can't serve.  Same-size byte
+    corruption is the residual (rare external corruption — caught by a
+    peer's pull-side sha verify and `mirror audit`).  Single-file
+    semantics so Phase 3b can tick a ProgressBar one notch per .deb and
+    report failures precisely.
 
-    overwrite=True: drop --ignore-existing so the
+    overwrite=True: drop --size-only so the
     transfer REPLACES the remote bytes — used exclusively for reclaim
     claims, the sanctioned exception to filename immutability (the
     remote file exists by definition and skipping it would publish a
@@ -158,7 +164,10 @@ def push_single_deb(
         return False, f"local file missing: {local_path}"
     _argv = list(_RSYNC_BASE)
     if not overwrite:
-        _argv += ['--ignore-existing']
+        # --size-only (NOT --ignore-existing): skip a remote file only when its
+        # size matches, so a correct immutable .deb still skips transfer but a
+        # wrong-size (truncated/partial) remote file is healed by re-sending.
+        _argv += ['--size-only']
     _ssh = _ssh_arg(ssh_key)
     if _ssh is not None:
         _argv += _ssh
@@ -195,7 +204,8 @@ def remote_sha256(
     so callers can distinguish "verified mismatch" (a real digest that differs)
     from "could not verify" (None).  Used by the release-asset push to confirm
     the bytes that landed on the mirror match what releases.json advertises —
-    catching a stale same-name file skipped by --ignore-existing (the qcow2) or
+    catching a same-name file whose bytes drifted without changing size (which
+    --size-only skips) — e.g. the qcow2 — or
     a transfer truncated mid-flight over a slow link."""
     if ':' not in remote_spec:
         return None
@@ -337,7 +347,7 @@ def push_dist_tree(
     This pass syncs INDEX files only (Release/InRelease/Packages/
     Sources/by-hash).  Pool ``.deb``/``.udeb`` artifacts — which live
     inside dists/<codename>/ since Stage D — are owned solely
-    by ``push_single_deb`` (additive, ``--ignore-existing``, or
+    by ``push_single_deb`` (additive, ``--size-only``, or
     ``overwrite=True`` for a sanctioned reclaim) and are EXCLUDED here.
     """
     if not os.path.isdir(local_dist_dir):

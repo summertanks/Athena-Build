@@ -264,7 +264,13 @@ def run_remote(host: str, local_bundle: str, remote_dir: str,
     written to a LOG FILE ON THE REMOTE (so the build runs at full speed,
     decoupled from the network), tail that file back through `log` for live
     progress, then scp the produced .debs back to `local_out`.  The remote temp
-    dir is always cleaned up.  Returns (exit_code, [recovered basenames]).
+    dir is always cleaned up.  Returns (exit_code, [recovered basenames]) — the
+    basename list is reconciled against the remote's reported outputs, so a
+    short recovery surfaces as a transport failure rather than a complete build.
+
+    Exit codes: the remote_build.py exit on a real build; 10 (remote mkdir) /
+    11 (bundle scp-up) / 12 (partial scp-DOWN recovery) are TRANSPORT failures
+    the fan-out scheduler re-queues on another remote.
 
     `register_proc`, if given, is called with the live `ssh` Popen running the
     build so a caller (the fan-out scheduler) can `terminate()` it on Ctrl+C.
@@ -313,13 +319,34 @@ def run_remote(host: str, local_bundle: str, remote_dir: str,
         _exit, _outputs = _parse_marker_line(_marker)
         if _outputs:
             os.makedirs(local_out, exist_ok=True)
-            # globs expand on the remote shell; only run when there's output
+            # globs expand on the remote shell; only run when there's output.
+            # stderr→DEVNULL because an empty glob (a source producing only
+            # .debs, or only .udebs) is a benign no-match — the reconcile below
+            # is the real integrity check, not the per-scp return code.
             subprocess.run(_scp_base(ssh_key) + [
                 f'{host}:{remote_dir}/out/*.deb', f'{local_out}/'],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(_scp_base(ssh_key) + [
                 f'{host}:{remote_dir}/out/*.udeb', f'{local_out}/'],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Reconcile recovery against the marker: a partial scp (connection
+            # dropped mid-transfer) must NOT be recorded as a complete build.
+            # EVERY artifact the remote reported must have landed locally; if any
+            # is missing, signal a transport failure (exit 12) so the scheduler
+            # re-queues this package on another remote — the remote_dir is wiped
+            # in `finally`, so the re-run rebuilds cleanly.  Returning the marker
+            # list with a short recovery would yield a `done` record claiming
+            # more .debs than are on disk.
+            _recovered = (set(os.listdir(local_out))
+                          if os.path.isdir(local_out) else set())
+            _missing = [_o for _o in _outputs
+                        if os.path.basename(_o) not in _recovered]
+            if _missing:
+                log(f"remote: scp recovered {len(_outputs) - len(_missing)}/"
+                    f"{len(_outputs)} artifact(s) from {host}; missing "
+                    f"{sorted(os.path.basename(_m) for _m in _missing)} — "
+                    "transport failure, re-queueing")
+                return (12, [])
         return (_exit, _outputs)
     finally:
         subprocess.run(_ssh + [f'rm -rf {remote_dir}'],

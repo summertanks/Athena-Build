@@ -1833,10 +1833,11 @@ class SourceCommandsMixin(SessionState):
                 _shutil.rmtree(_scratch, ignore_errors=True)
                 return ('failed', 0)
 
-        if _exit in (10, 11):
-            # mkdir / scp failure → host transport problem; let the scheduler
-            # re-queue this package on another remote (no failed record — the
-            # build never ran).
+        if _exit in (10, 11, 12):
+            # 10/11 mkdir/scp-up failure (build never ran); 12 partial
+            # scp-DOWN recovery (artifacts the remote built didn't all land).
+            # All are host transport problems → let the scheduler re-queue this
+            # package on another remote (no failed record).
             logger.warning(
                 f"remotebuild {_src.package}: transport failure (exit {_exit}) "
                 f"on {_slot['ssh_host']}")

@@ -985,17 +985,21 @@ class RepoCommandsMixin(SessionState):
             )
             return
 
-        # a dedicated publish-before-prune gate — when any target is
-        # still live on a mirror, require an explicit acknowledgement BEFORE
-        # the generic delete prompt (the operator should normally
-        # `mirror publish` the supersession first).
+        # a dedicated publish-before-prune gate — when any target is still live
+        # on a mirror, require an explicit acknowledgement BEFORE the generic
+        # delete prompt (the operator should normally `mirror publish` the
+        # supersession first).  NOT informational: pruning a live-claimed file
+        # is an ordering hazard (the mirror would keep serving a sha we just
+        # deleted → own_claim_disk_missing), so `--yes` must NOT auto-confirm
+        # it — a headless run defaults to "n" and aborts here.  Automating
+        # cleanup is still fine in the CORRECT order: publish first → no live
+        # claims → `_claimed` is empty → this gate is skipped entirely.
         if _claimed:
             _resp = Prompt(
                 PROMPT_YESNO,
                 f"{len(_claimed)} file(s) still have a LIVE mirror claim — "
                 "`mirror publish` releases them first (the clean order).  "
                 "Delete locally now anyway?",
-                informational=True,
             ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 console.print(
@@ -1004,7 +1008,11 @@ class RepoCommandsMixin(SessionState):
                 return
 
         # Force mode: final confirmation prompt.  _n_to_delete counts the
-        # obsolete .deb/.udeb plus the orphaned `.verified` sidecars.
+        # obsolete .deb/.udeb plus the orphaned `.verified` sidecars.  This one
+        # STAYS informational: the publish-before-prune gate above has already
+        # aborted under `--yes` if any target was live-claimed, so by here the
+        # delete set is obsolete supersession candidates — fine for `--yes` to
+        # auto-confirm a maintenance prune in the correct order.
         _n_to_delete = _n_obsolete + len(_sidecar_orphans)
         _resp = Prompt(
             PROMPT_YESNO,

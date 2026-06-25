@@ -980,7 +980,7 @@ class MirrorCommandsMixin(SessionState):
                            ssh_key: 'Optional[str]', transport) -> bool:
         """Confirm the pushed image's REMOTE sha256 matches what releases.json
         advertises (iso['sha256']).  On a verified mismatch — a stale same-name
-        file --ignore-existing skipped (the qcow2) or a truncated transfer —
+        file --size-only skipped (same size, the qcow2) or a truncated transfer —
         force-overwrite and re-verify.  Returns False only when the bytes are
         CONFIRMED wrong after the re-push (→ publish fails); True when verified
         good OR unverifiable (warn, don't block the publish)."""
@@ -1024,8 +1024,9 @@ class MirrorCommandsMixin(SessionState):
         ssh_key: 'Optional[str]', isos: 'list[dict]',
     ) -> bool:
         """Generate index.html + releases.json and push them + the ISOs to
-        the mirror's pool root.  ISOs push by name (--ignore-existing —
-        immutable per filename); the index files OVERWRITE (they change
+        the mirror's pool root.  ISOs push with --size-only (a same-size
+        same-name file skips; the qcow2 verify+repush below heals a
+        same-size content change); the index files OVERWRITE (they change
         every publish).  Returns True on full success."""
         import release_index
         import coord.transport as _transport
@@ -1080,8 +1081,9 @@ class MirrorCommandsMixin(SessionState):
                 _ok = False
                 continue
             # Verify the bytes that LANDED match what releases.json advertises.
-            # --ignore-existing SKIPS a same-name file whose content changed
-            # (the qcow2 keeps one filename across publishes), and a transfer
+            # --size-only SKIPS a same-name file whose content changed but
+            # whose SIZE matched (the qcow2 keeps one filename across
+            # publishes), and a transfer
             # can truncate over a slow link — both leave the wrong bytes on the
             # mirror while the index promises a sha256 nobody can satisfy.  On a
             # verified mismatch, force-overwrite and re-verify; fail the publish
@@ -1358,7 +1360,7 @@ class MirrorCommandsMixin(SessionState):
             def _progress(current, total, _filename, _ok, *,
                           _c=_cum_bar, _s=_push_st):
                 # file done — advance the cumulative bar by its FULL size so
-                # --ignore-existing skips (which stream no bytes) still count.
+                # --size-only skips (which stream no bytes) still count.
                 _s['base'] += _s['cur']
                 _s['cur'] = 0
                 if _c.value < _s['base']:
