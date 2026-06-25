@@ -1209,10 +1209,15 @@ class BuildContainer:
             # Client is non-None by the time build() is called — __init__
             # raises if both the configured and local daemon paths fail.
             assert self.client is not None
+            # /source and /patch are READ-ONLY: the build copies the source out
+            # (`cp /source/<prefix>* .`) and reads patches (`patch < /patch/…`),
+            # never writing back.  A passwordless-root `debian/rules` must not be
+            # able to corrupt the host's source/patch trees through the mount
+            # (MAT-04).  /repo is the build OUTPUT and stays rw.
             _volumes = {
-                self.src_path:    {'bind': '/source', 'mode': 'rw'},
+                self.src_path:    {'bind': '/source', 'mode': 'ro'},
                 _scratch_dir:     {'bind': '/repo',   'mode': 'rw'},
-                src_patch_path:   {'bind': '/patch',  'mode': 'rw'},
+                src_patch_path:   {'bind': '/patch',  'mode': 'ro'},
             }
             # The local build mirror is consumed (read-only) by apt inside the
             # container — matches the `file:///localmirror` source written by

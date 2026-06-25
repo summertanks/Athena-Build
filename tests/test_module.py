@@ -7224,6 +7224,24 @@ def test_conf15_buildcontainer_image_tag_carries_snapshot_ts():
         f"snapshot advance; got:\n{_snippet}")
 
 
+def test_mat04_build_container_mounts_source_and_patch_readonly():
+    """MAT-04: /source and /patch are bind-mounted READ-ONLY into the build
+    container.  The build copies the source out (`cp /source/<prefix>* .`) and
+    reads patches, never writing back — so a passwordless-root `debian/rules`
+    must not be able to corrupt the host's source/patch trees through the
+    mount.  /repo (the build OUTPUT) stays rw."""
+    import re
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    assert re.search(r"'/source',\s*'mode':\s*'ro'", _body), "/source must be ro"
+    assert re.search(r"'/patch',\s*'mode':\s*'ro'", _body), "/patch must be ro"
+    assert re.search(r"'/repo',\s*'mode':\s*'rw'", _body), "/repo (output) stays rw"
+    # guard against a regression to rw on either input mount
+    assert not re.search(r"'/source',\s*'mode':\s*'rw'", _body)
+    assert not re.search(r"'/patch',\s*'mode':\s*'rw'", _body)
+
+
 def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
     """CONF-15: client.images.build(buildargs=…) MUST pass
     SNAPSHOT_BASEURL / ARCHIVE_NAME / SNAPSHOT_TS so the Dockerfile's
@@ -39685,6 +39703,7 @@ def main() -> int:
         test_buildcontainer_changelog_uses_codename_field,
         test_conf15_dockerfile_pins_toolchain_to_snapshot,
         test_conf15_buildcontainer_image_tag_carries_snapshot_ts,
+        test_mat04_build_container_mounts_source_and_patch_readonly,
         test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
         test_sta40_no_shell_interpolation_in_sudo_sites,
         test_sta44_index_verified_against_release_sha,
