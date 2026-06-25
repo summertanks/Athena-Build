@@ -287,6 +287,27 @@ The override implies `force` — a prior build record (`<pkg>.build.json`) refle
 
 Multiple bracket-tokens in one invocation is an error (we don't try to merge or pick).  `recommended` and named packages are mutually exclusive — pick one mode.
 
+### Building on remote hosts + the local build mirror
+
+Two opt-in build-execution optimisations, both off by default and neither
+changing the local build path or the published artifacts:
+
+- **Remote build hosts** — `container remote add` registers a remote Docker
+  host (guided: copies an SSH key into `config/`, probes ssh/docker/cpu/ram,
+  prompts per-host caps).  `source remotebuild <pkg|all|…>` then fans builds
+  out across every configured remote concurrently and recovers the `.debs`
+  locally; it takes the SAME arguments as `source build`.  The build runs ON
+  the remote (a self-contained bundle is shipped over SSH); the recipe is
+  computed locally.
+- **Local build mirror** — `set create-local-mirror true` stages a
+  snapshot-pinned apt mirror of the build closure so containers resolve
+  Build-Depends from local disk instead of `snapshot.debian.org`.  Manage it
+  with `container local mirror <build|rebuild|status|purge>`.  The on-remote
+  variant is a per-remote toggle, asked at `container remote add`.
+
+Full howto, the `[Remote.<name>]` config schema, and the fan-out / on-remote-
+mirror details: [`docs/remote-build.md`](docs/remote-build.md).
+
 ### Resuming a prior session
 
 Not currently available.  The persistence layer — a fingerprint-gated pickle of `Cache` + `DependencyTree` under `<dir_cache>/` — is still in the tree but dormant: the `resume` command and `--resume` flag that consumed it were removed pending a relook.  Re-run `cache build` + `cache parse` on each launch (the two together take ~40s).
@@ -420,6 +441,7 @@ in CI for the same reason.
 - [`docs/patching.md`](docs/patching.md) — source / pre-install / post-install patch conventions + DEP-3.
 - [`docs/release.md`](docs/release.md) — release runbook (snapshot pin → key → build → publish → tag).
 - [`docs/mirror-setup.md`](docs/mirror-setup.md) — operator howto for `mirror add` / first-publish / wipe-and-redo on the MIRROR-01 federation surface.
+- [`docs/remote-build.md`](docs/remote-build.md) — building source packages on remote Docker hosts (`source remotebuild` fan-out) + the snapshot-pinned local build mirror (`set create-local-mirror`).
 - [`docs/virtual-build.md`](docs/virtual-build.md) — `virtual build` dry-run pipeline: predict bump arithmetic, closure breaks, and ownership blocks before running any source build.
 - [`docs/install-docker.md`](docs/install-docker.md) — Docker Engine install on the build host.
 - [`docs/build-quirks.md`](docs/build-quirks.md) — catalogue of Debian packaging/toolchain gotchas we've actually hit (Provides vs real packages, options vs profiles, arch wildcards, dh races, …) with the incident + the rule for each.
