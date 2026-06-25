@@ -9,7 +9,6 @@ BuildSession; see commands/base.py for how the mixin shares session state.
 """
 import logging
 import os
-import re
 import shutil
 
 import apt_pkg
@@ -17,7 +16,6 @@ import arch_filter
 import repo_audit
 import tui
 import utils
-from cache import Cache
 from tui import console, Prompt, PROMPT_YESNO, Spinner, ProgressBar
 
 from commands.base import SessionState
@@ -331,8 +329,15 @@ class RepoCommandsMixin(SessionState):
         _tunnel_bins: 'set[str]' = set()
         _tun = set(self.config.tunnel_packages)
         if _tun and self.flags.cache_ready and self.cache is not None:
-            for _bin_name, _pkg in self.cache.package_hashtable.items():
-                _src_field = (_pkg.get('Source') or _bin_name).strip()
+            for _bin_name, _ver_map in self.cache.package_hashtable.items():
+                # package_hashtable maps bin-name -> {Version: [Package,…]};
+                # reach an actual Package stanza to read its Source field
+                # (absent Source ⇒ source name == binary name).
+                _pkgs = next(iter(_ver_map.values()), None)
+                _pkg = _pkgs[0] if _pkgs else None
+                _src_field = (
+                    (_pkg.get('Source') if _pkg else None) or _bin_name
+                ).strip()
                 _src_name = _src_field.split(' ', 1)[0]
                 if _src_name in _tun:
                     _tunnel_bins.add(_bin_name)
@@ -925,8 +930,8 @@ class RepoCommandsMixin(SessionState):
                 "\nVersion-drift residue (binary name selected, this "
                 "specific filename not in predicted output):"
             )
-            _show = _drift if _verbose else _drift[:30]
-            for _sub, _f, _src, _sz in _show:
+            _drift_show = _drift if _verbose else _drift[:30]
+            for _sub, _f, _src, _sz in _drift_show:
                 console.print(
                     f"  {_sub}/{_f}  (source: {_src})"
                 )
@@ -942,8 +947,8 @@ class RepoCommandsMixin(SessionState):
                 f"non-{self.config.arch} arch; a build by-product, not part "
                 "of the distribution):"
             )
-            _show = _foreign if _verbose else _foreign[:30]
-            for _sub, _f, _src, _sz in _show:
+            _foreign_show = _foreign if _verbose else _foreign[:30]
+            for _sub, _f, _src, _sz in _foreign_show:
                 console.print(
                     f"  {_sub}/{_f}  (source: {_src})"
                 )

@@ -27,6 +27,9 @@ State document shape (extensible — readers MUST preserve unknown keys):
                 "IncludeBuildClosure": false},
       "seeds": {"pkg": {"<group>": [...]},
                 "live": [...], "installer": [...], "pool": [...]},
+      "seeds_raw": {"pkg": "<verbatim file text>",   # SELECT-01: byte-faithful
+                    "live": "...", "installer": "...", "pool": "..."},
+
       "closure": {"bins": {"<name>": ["<tier>", ...]},
                   "srcs": {"<name>": ["<origin>", ...]}},
       "pins": {"<ambiguous_seed>": "<chosen_pkg>"},
@@ -240,6 +243,31 @@ def seeds_from_config(config: 'Any') -> dict:
     }
 
 
+def seeds_raw_from_config(config: 'Any') -> 'Dict[str, str]':
+    """Verbatim text of the four seed list files (SELECT-01).
+
+    Captured so `cache restore` can rewrite each file BYTE-FOR-BYTE, keeping
+    operator comments (pool.list ships ~156 doc lines) and — critically —
+    pkg-group ORDER.  Group order is load-bearing: it steers OR-dependency
+    resolution, so re-rendering from the parsed `seeds` (whose group dict is
+    alphabetised by `json.dumps(sort_keys=True)`) can drift the closure
+    (SELECT-02).  The parsed `seeds` block stays the closure authority; this
+    is purely restore fidelity.  A missing file maps to '' so `restore_list_files`
+    falls back to the name-render (also covers lockfiles written before this key).
+    """
+    def _read(path: str) -> str:
+        try:
+            return utils.readfile(path) if path else ''
+        except OSError:
+            return ''
+    return {
+        'pkg': _read(getattr(config, 'pkglist_path', '')),
+        'live': _read(getattr(config, 'livelist_path', '')),
+        'installer': _read(getattr(config, 'installerlist_path', '')),
+        'pool': _read(getattr(config, 'poollist_path', '')),
+    }
+
+
 def assemble_state(
     dep_tree: 'Any', udeb_dep_tree: 'Any', config: 'Any',
     closure: 'Optional[dict]' = None,
@@ -267,6 +295,7 @@ def assemble_state(
                 getattr(config, 'include_build_closure', False)),
         },
         'seeds': seeds_from_config(config),
+        'seeds_raw': seeds_raw_from_config(config),
         'closure': closure,
         'pins': _pins,
     }
@@ -294,6 +323,9 @@ def federation_state(config: 'Any', payload: dict) -> dict:
                 getattr(config, 'include_build_closure', False)),
         },
         'seeds': seeds_from_config(config),
+        # The peer wrote the four list files verbatim from the owner's
+        # canonical config, so their raw bytes are byte-faithful here too.
+        'seeds_raw': seeds_raw_from_config(config),
         'closure': payload.get('closure') or {},
         'pins': payload.get('pins') or {},
     }
@@ -359,6 +391,7 @@ def restore_list_files(config: 'Any', lock: dict) -> 'Dict[str, str]':
     seeds (the authoritative selection).  Returns {label: path} for the files
     written.  IO — caller confirms with the operator first."""
     _seeds = (lock or {}).get('seeds', {}) or {}
+    _raw = (lock or {}).get('seeds_raw', {}) or {}
     _written: 'Dict[str, str]' = {}
     _targets = [
         ('pkg', getattr(config, 'pkglist_path', ''), render_pkg_list(_seeds)),
@@ -369,9 +402,14 @@ def restore_list_files(config: 'Any', lock: dict) -> 'Dict[str, str]':
         ('pool', getattr(config, 'poollist_path', ''),
          render_flat_list(_seeds.get('pool', []))),
     ]
-    for _label, _path, _text in _targets:
+    for _label, _path, _rendered in _targets:
         if not _path:
             continue
+        # SELECT-01: prefer the verbatim bytes (operator comments + pkg-group
+        # order preserved); fall back to the name-render for lockfiles written
+        # before seeds_raw existed (or a file that was absent at capture time).
+        _verbatim = _raw.get(_label)
+        _text = _verbatim if isinstance(_verbatim, str) and _verbatim else _rendered
         utils._atomic_write_bytes(_path, _text.encode('utf-8'))
         _written[_label] = _path
     return _written

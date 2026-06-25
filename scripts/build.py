@@ -29,16 +29,14 @@ faulthandler.enable(_FAULT_LOG)
 atexit.register(_FAULT_LOG.close)
 
 import tui
-import datetime
 import json
 import os
-import re
 import shutil
 import subprocess
 import threading
 import time
 import sys
-from typing import Callable, Optional
+from typing import Optional
 
 import apt_pkg
 
@@ -47,16 +45,10 @@ import local_mirror
 import utils
 import _version
 from utils import BuildConfig
-from buildlog import BuildLog, human_size, safe_size
 from cache import Cache
 
 import buildcontainer
 import dependencytree
-import buildsystem
-import installer_chroot
-import iso_installer
-import persistence
-import repo_audit
 import signal
 
 
@@ -101,9 +93,7 @@ class BuildFlags:
     from running on stale or missing state without repeating the earlier work.
 
     When constructed via `BuildFlags.load(path)`, every flag
-    transition autosaves to a JSON sidecar (cheap, ~1 ms).  `restored_summary()`
-    remains (dormant) for a future relook; the startup banner that consumed
-    it was removed alongside the `resume` command 2026-06-08.
+    transition autosaves to a JSON sidecar (cheap, ~1 ms).
     """
 
     # Class-level annotations — mypy uses these to see the attributes that
@@ -205,16 +195,6 @@ class BuildFlags:
         # Enable autosave now that all initial values are settled.
         object.__setattr__(_flags, '_save_path', save_path)
         return _flags
-
-    def restored_summary(self) -> str:
-        """Comma-separated list of persisted-True flags (excluding the
-        in-memory-only ones) for the startup banner."""
-        _kept = [
-            _f.replace('_ready', '')
-            for _f in self._FIELDS
-            if _f not in self._IN_MEMORY_ONLY and getattr(self, _f)
-        ]
-        return ', '.join(_kept)
 
     def __str__(self) -> str:
         """Return a compact one-line status string for display in the TUI."""
@@ -483,7 +463,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         _our_containers = []
         try:
             for _c in _client.containers.list(all=True):
-                _img_tags = []
+                _img_tags: list = []
                 try:
                     _img_tags = _c.image.tags or []
                 except docker.errors.APIError:
@@ -580,13 +560,13 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             return
         _ok_live = self._wipe_dir_contents(
             'buildroot/live', self.config.dir_chroot,
-            sudo=True, password=_password, skip_prompt=_force)
+            sudo=True, skip_prompt=_force)
         _ok_inst = self._wipe_dir_contents(
             'buildroot/installer', self.config.dir_chroot_installer,
-            sudo=True, password=_password, skip_prompt=_force)
+            sudo=True, skip_prompt=_force)
         _ok_disk = self._wipe_dir_contents(
             'buildroot/disk', self.config.dir_chroot_disk,
-            sudo=True, password=_password, skip_prompt=_force)
+            sudo=True, skip_prompt=_force)
         if _ok_live:
             self.flags.chroot_ready = False
             self.flags.chroot_verified = False
@@ -637,14 +617,14 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         self._wipe_dir_contents('image',    self.config.dir_image,    sudo=False, skip_prompt=True)
         # Sudo dirs: re-use the unlocked password.
         self._wipe_dir_contents('buildroot/live',
-            self.config.dir_chroot, sudo=True, password=_password, skip_prompt=True)
+            self.config.dir_chroot, sudo=True, skip_prompt=True)
         self._wipe_dir_contents('buildroot/installer',
-            self.config.dir_chroot_installer, sudo=True, password=_password, skip_prompt=True)
+            self.config.dir_chroot_installer, sudo=True, skip_prompt=True)
         # the disk chroot (its own minimal root) is
         # root-owned too — wipe it, else buildroot/disk survives while the
         # flag reset below clears chroot_disk_ready (claiming it's gone).
         self._wipe_dir_contents('buildroot/disk',
-            self.config.dir_chroot_disk, sudo=True, password=_password, skip_prompt=True)
+            self.config.dir_chroot_disk, sudo=True, skip_prompt=True)
         # Docker side: kills running athenalinux containers + removes
         # images so next `container local init` rebuilds from Dockerfile.
         self.cmd_container_purge('force')
@@ -1056,7 +1036,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                                label_width=20)
         _file_bar = ProgressBar(label='', itr_label='B/s', maxvalue=1,
                                 show_rate=True, label_width=24)
-        _st = {'last_cum': 0, 'cur_file': None, 'last_file': 0}
+        _st: dict = {'last_cum': 0, 'cur_file': None, 'last_file': 0}
 
         def _on_progress(_p):
             _cum_bar.label(f"({_p.get('i', 0)}/{_p.get('n', 0)})")

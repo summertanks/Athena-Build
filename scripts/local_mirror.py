@@ -34,7 +34,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple, cast
 from urllib.parse import urljoin
 
 import build_closure
-import tui
 import utils
 from tui import ProgressBar
 

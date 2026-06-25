@@ -668,7 +668,6 @@ def test_configured_summary_reports_state_and_warns_unregistered():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import onboarding
-    import utils
     with tempfile.TemporaryDirectory() as _tmp:
         cfg_path = _write_test_config(
             _tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
@@ -2758,6 +2757,31 @@ def test_verify_inrelease_empty_keyring_fails():
         assert 'no keys imported' in detail, detail
 
 
+def test_should_reuse_pinned_release_skip_decision():
+    """PERF-01: a snapshot-pinned InRelease is reused from cache only when
+    pinned, remote (not file://), and a non-empty cached copy exists."""
+    from cache import Cache
+    with tempfile.TemporaryDirectory() as tmp:
+        cached = os.path.join(tmp, 'InRelease')
+        with open(cached, 'w') as fh:
+            fh.write('signed release bytes\n')
+        empty = os.path.join(tmp, 'empty')
+        with open(empty, 'wb') as fh:
+            fh.write(b'')
+        missing = os.path.join(tmp, 'nope')
+
+        # Reuse ONLY in the fully-pinned, remote, cached, non-empty case.
+        assert Cache._should_reuse_pinned_release('20260622T000000Z', False, cached)
+        # Floating mirror (no pin) → always re-fetch (file may have moved).
+        assert not Cache._should_reuse_pinned_release(None, False, cached)
+        # file:// fork mirror is regenerated each build → never reuse.
+        assert not Cache._should_reuse_pinned_release('20260622T000000Z', True, cached)
+        # No cached copy yet → must download.
+        assert not Cache._should_reuse_pinned_release('20260622T000000Z', False, missing)
+        # Zero-byte cached copy (truncated/aborted) → must re-download.
+        assert not Cache._should_reuse_pinned_release('20260622T000000Z', False, empty)
+
+
 def test_buildconfig_security_defaults():
     """Without an explicit [Security] section, defaults kick in and (if the
     debian-archive-keyring is installed on the test host) validation passes."""
@@ -3259,7 +3283,6 @@ def test_ux08_signal_loss_fixes():
     (`tui.COLOR_ERROR`) prints red, not green; the LogEvent default tab is a
     real tab ('log', not the long-gone 'build' that silently dropped logs)."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import io
     from unittest.mock import patch
     import cli
     import tui
@@ -3343,7 +3366,7 @@ def test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits():
     """UX-05e: Cli with one_shot_cmds populated must dispatch each
     in order then exit (no REPL).  Exit code reflects worst outcome."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
     import cli
     _c = object.__new__(cli.Cli)
     _c._cmds = {}
@@ -7242,6 +7265,87 @@ def test_mat04_build_container_mounts_source_and_patch_readonly():
     assert not re.search(r"'/patch',\s*'mode':\s*'rw'", _body)
 
 
+def test_write_iso_md5sum_manifest_mat08():
+    """MAT-08: write_iso_md5sum_manifest emits a SORTED Debian-style md5sum.txt
+    (excluding itself) via `sudo -A find … -exec md5sum` → `sudo -A tee`, with
+    the password supplied through SUDO_ASKPASS so tee's stdin is the manifest
+    ONLY (no password/content mixing)."""
+    import types as _types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    with tempfile.TemporaryDirectory() as _stage:
+        _calls = []
+        _tee = {}
+
+        def _fake_run(argv, **kw):
+            _calls.append(argv)
+            if 'find' in argv:                # the hashing pass (unsorted)
+                return _types.SimpleNamespace(
+                    returncode=0, stderr='',
+                    stdout=("bbb  ./live/filesystem.squashfs\n"
+                            "aaa  ./boot/vmlinuz\n"))
+            if 'tee' in argv:
+                _tee['data'] = kw.get('input')
+                _tee['askpass'] = 'SUDO_ASKPASS' in (kw.get('env') or {})
+                return _types.SimpleNamespace(returncode=0, stdout='', stderr='')
+            return _types.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+        _orig = utils.subprocess
+        utils.subprocess = _types.SimpleNamespace(run=_fake_run, DEVNULL=-3)
+        try:
+            _ok = utils.write_iso_md5sum_manifest(_stage, 'pw')
+        finally:
+            utils.subprocess = _orig
+    assert _ok is True
+    _find = next(a for a in _calls if 'find' in a)
+    assert '-A' in _find and 'md5sum' in _find and 'md5sum.txt' in _find, _find
+    # tee receives the SORTED manifest (and only that), password via askpass.
+    assert _tee['data'] == ("aaa  ./boot/vmlinuz\n"
+                            "bbb  ./live/filesystem.squashfs\n"), _tee['data']
+    assert _tee['askpass']
+
+
+def test_iso_builders_write_md5sum_manifest_mat08():
+    """MAT-08 wiring: both ISO builders write md5sum.txt BEFORE grub-mkrescue,
+    and the live ISO offers a `live-media-check` boot entry."""
+    _iso = open(os.path.join(_ROOT, 'scripts', 'iso.py')).read()
+    _inst = open(os.path.join(_ROOT, 'scripts', 'iso_installer.py')).read()
+    assert 'write_iso_md5sum_manifest' in _iso, "live ISO must write the manifest"
+    assert 'write_iso_md5sum_manifest' in _inst, "installer must write the manifest"
+    assert (_iso.index('write_iso_md5sum_manifest')
+            < _iso.index('container.run_grub_mkrescue(')), \
+        "manifest must be written before grub-mkrescue (live)"
+    assert (_inst.index('write_iso_md5sum_manifest')
+            < _inst.index('if not _run_grub_mkrescue(')), \
+        "manifest must be written before grub-mkrescue (installer)"
+    assert 'live-media-check' in _iso, "live ISO must offer a Check-media entry"
+
+
+def test_mat09_live_root_password_randomized_and_sudo_guaranteed():
+    """MAT-09: the base chroot no longer ships the fixed `root`/`root` default
+    credential — systemd-firstboot gets a per-build random password, and a
+    `%sudo NOPASSWD` sudoers.d guarantees the live user (added to `sudo` by
+    live-config) can still escalate (else a random root pw would lock it out)."""
+    _src = open(os.path.join(_ROOT, 'scripts', 'chroot.py')).read()
+    assert '--root-password=root' not in _src, "the fixed root/root must be gone"
+    assert 'secrets.token_urlsafe' in _src, "root password must be randomized"
+    assert '--root-password={_root_pw}' in _src, "firstboot must use the random pw"
+    assert '/etc/sudoers.d/90-athena-nopasswd' in _src
+    assert '%sudo ALL=(ALL:ALL) NOPASSWD:ALL' in _src
+
+
+def test_mat09_disk_image_locks_root_and_adds_sudo_user():
+    """MAT-09: the disk image LOCKS root and adds a cloud-style passwordless-sudo
+    user (asgard, in the sudo group) with a per-build random console password —
+    so the qcow2 ships no default credential and stays loginnable."""
+    _src = open(os.path.join(_ROOT, 'scripts', 'disk_image.py')).read()
+    assert "'passwd', '-l', 'root'" in _src, "disk image must lock root"
+    assert "'useradd'" in _src and "'-G', 'sudo'" in _src, "asgard in sudo group"
+    assert 'chpasswd' in _src and 'secrets.token_urlsafe' in _src, \
+        "asgard needs a random console password"
+    assert "'asgard'" in _src
+
+
 def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
     """CONF-15: client.images.build(buildargs=…) MUST pass
     SNAPSHOT_BASEURL / ARCHIVE_NAME / SNAPSHOT_TS so the Dockerfile's
@@ -8280,7 +8384,6 @@ def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
     when force is in args."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     from commands import cmd_cache
     import tui as _tui
     from build import BuildSession, BuildFlags
@@ -8338,7 +8441,6 @@ def test_cmd_parse_dependency_skips_when_already_ready_no_force():
     be instantiated."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     import dependencytree
     from build import BuildSession, BuildFlags
 
@@ -8369,7 +8471,6 @@ def test_cmd_parse_dependency_runs_when_force_passed_even_if_ready():
     (which happens AFTER the guard but BEFORE any heavy work)."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     from commands import cmd_cache
     from build import BuildSession, BuildFlags
 
@@ -8548,7 +8649,6 @@ def test_cmd_container_purge_resets_flag_and_drops_session_ref():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import docker as _docker  # confirm available before running test
-    import build
     from build import BuildSession, BuildFlags
 
     _sess = BuildSession.__new__(BuildSession)
@@ -8577,7 +8677,6 @@ def test_cmd_container_purge_removes_athena_containers_and_images():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import docker as _docker
-    import build
     from build import BuildSession, BuildFlags
 
     _sess = BuildSession.__new__(BuildSession)
@@ -8626,7 +8725,6 @@ def test_cmd_container_purge_handles_docker_connect_failure_gracefully():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import docker as _docker
-    import build
     from build import BuildSession, BuildFlags
 
     _sess = BuildSession.__new__(BuildSession)
@@ -10135,7 +10233,6 @@ def test_scan_stale_files_covers_main_udeb_and_recovers_malformed():
     from unittest.mock import patch
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import utils, repo_audit
-    import build
     from build import BuildSession
 
     assert 'main-udeb' in utils._STALE_SCAN_SUBDIRS, (
@@ -11937,7 +12034,7 @@ def test_derive_extras_src_names_marks_extras_only_sources():
 def test_dep_tree_initialises_subset_exclusive_sets_empty():
     """A fresh DependencyTree has live_exclusive / installer_exclusive
     pkg + src sets that exist and start empty."""
-    import sys, types
+    import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import dependencytree
     # __init__ requires a real Cache; bypass via __new__ and replicate the
@@ -13394,7 +13491,6 @@ def test_parse_dependency_reuses_lookahead_for_multi_version_same_name():
     from collections import defaultdict
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import dependencytree
-    import tui
 
     class _Pkg:
         """Minimal Package surface used by parse_dependency's early
@@ -13822,7 +13918,7 @@ def test_sta24_check_dep_drift_warns_on_lost_selected_dep():
     import sys as _sys, subprocess as _subprocess
     from unittest.mock import patch
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import dep_drift, utils, tui, package
+    import dep_drift, utils, tui
 
     class _CachePkg:
         def __init__(self, depends):
@@ -14856,7 +14952,6 @@ def _stub_session_for_signing_gate():
     + restores tui.tui_instance so the Prompt() construction inside the
     helper can resolve the singleton."""
     import build
-    import tui
 
     class _Cfg:
         signing_key_uid = 'Athena Build <athena@local>'
@@ -16820,7 +16915,6 @@ def test_render_failure_one_shot_capture_writes_post_mortem():
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from tui import dispatcher as _disp
-    from tui.events import PrintEvent
     from tui.state import State
 
     # Renderer that always raises — simulates the silent-render bug.
@@ -16962,7 +17056,6 @@ def test_per_module_logger_names_pin_routing():
         'signing':          'athena',
         'apt_repo':         'athena',
         'repo_audit':       'athena',
-        'persistence':      'athena',
         'cli':              'athena',
     }
 
@@ -17340,7 +17433,6 @@ def test_cmd_cache_info_prints_identity_and_relations():
     relations; missing names report 'not found'."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     from commands import cmd_cache
     from build import BuildSession
 
@@ -21657,7 +21749,6 @@ def test_audit_identity_scan_default_true():
     production builds keep the gate on without operator action."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import BuildConfig
     with tempfile.TemporaryDirectory() as tmp:
         mirror_block = """
     [Mirror.main]
@@ -21676,7 +21767,6 @@ def test_audit_identity_scan_explicit_false_parses():
     """An explicit `[Audit] IdentityScan = false` flips the flag."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import BuildConfig
     mirror_block = """
     [Mirror.main]
     Suffix =
@@ -22042,7 +22132,6 @@ def test_reconstruct_historical_ledger_seeds_prior_generation_from_recorded_n():
     must synthesize the u1 entry from the recorded N so asg_next_n predicts u2."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
-    import utils as _u
     from bump import asg_next_n
     import types
     _src = types.SimpleNamespace(package='python3.11')
@@ -23083,7 +23172,6 @@ def test_remotebuild_fanout_respects_slot_caps_and_requeues():
     import threading
     import time
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     import remote_orchestrate as _ro
     from build import BuildSession
 
@@ -26538,7 +26626,7 @@ def test_local_cleanup_keeps_highest_prunes_superseded_and_flags_orphan():
     if not (_sh.which('dpkg-deb') and _sh.which('dpkg-scanpackages')):
         return
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build, repo_audit
+    import repo_audit
     from build import BuildSession
     with tempfile.TemporaryDirectory() as _tmp:
         # Disable security so BuildConfig.__init__ doesn't early-return on a
@@ -28179,154 +28267,6 @@ def test_index_minimal_stages_nested_subset():
             "minimal must NOT use a flat pool/ — unified nested layout")
 
 
-# ─── UX-04: session persistence ──────────────────────────────────────────────
-
-def _ux04_sample_session(dir_cache: str):
-    """Build a minimal session-shape stub for persistence round-trip tests.
-
-    Returns an object with .cache, .dep_tree, .udeb_dep_tree,
-    .last_source_build_counts, and .config attrs.  No real Cache/DT —
-    just enough for save_session / restore_session plumbing.
-    """
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    del persistence  # avoid lint complaints; ensures import succeeds
-
-    class _StubCache:
-        # Mirror Cache's snapshot/mirrors/cache_dir/fork_names surface so
-        # compute_fingerprint reads the right fields.
-        def __init__(self, snapshot_ts='20260101T000000Z', mirrors=()):
-            self.snapshot_ts = snapshot_ts
-            self.mirrors = list(mirrors)
-            self._fork_pkg_names: 'set' = set()
-            self._fork_src_names: 'set' = set()
-            self._fork_udeb_names: 'set' = set()
-            self.package_hashtable: 'dict' = {}
-            self.source_hashtable: 'dict' = {}
-            self.udeb_hashtable: 'dict' = {}
-
-    class _StubDT:
-        def __init__(self):
-            self.selected_pkgs: 'dict' = {}
-            self.selected_srcs: 'dict' = {}
-
-    class _StubSession:
-        cache = _StubCache()
-        dep_tree = _StubDT()
-        udeb_dep_tree = None
-        last_source_build_counts = None
-    return _StubSession()
-
-
-def test_ux04_sha256_sidecar_round_trip():
-    """persistence._sha256_of_file matches hashlib; _write_sha256 +
-    _verify_sha256 round-trip; missing or mismatched sidecar fails."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    import hashlib as _hl
-    with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as _f:
-        _f.write(b'hello UX-04')
-        _path = _f.name
-    try:
-        assert persistence._sha256_of_file(_path) == _hl.sha256(b'hello UX-04').hexdigest()
-        persistence._write_sha256(_path)
-        assert os.path.isfile(_path + '.sha256')
-        assert persistence._verify_sha256(_path) is True
-        # Mutate blob → verify fails
-        with open(_path, 'ab') as _ff:
-            _ff.write(b'!')
-        assert persistence._verify_sha256(_path) is False
-        # Remove sidecar → verify fails
-        os.unlink(_path + '.sha256')
-        assert persistence._verify_sha256(_path) is False
-    finally:
-        os.unlink(_path)
-
-
-def test_ux04_restore_session_silent_when_no_blob():
-    """No session.pkl.gz on disk → restore_session returns None silently
-    (no message to operator)."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    with tempfile.TemporaryDirectory() as _tmp:
-        class _Cfg:
-            dir_cache = _tmp
-        _messages: 'list' = []
-        _result = persistence.restore_session(_Cfg(), _messages.append)
-        assert _result is None
-        assert _messages == [], f"expected no message, got {_messages}"
-
-
-def test_ux04_restore_refuses_on_missing_fingerprint():
-    """Pickle blob present but no fingerprint file → refuse + message."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    with tempfile.TemporaryDirectory() as _tmp:
-        # Write a syntactically-valid but content-irrelevant pickle.
-        import gzip as _gz
-        import pickle as _pk
-        _blob = os.path.join(_tmp, 'session.pkl.gz')
-        with _gz.open(_blob, 'wb') as _fh:
-            _pk.dump({'_format_version': 1, 'cache': None, 'dep_tree': None}, _fh)
-        persistence._write_sha256(_blob)
-        # NO fingerprint file written.
-        class _Cfg:
-            dir_cache = _tmp
-        _messages: 'list' = []
-        _result = persistence.restore_session(_Cfg(), _messages.append)
-        assert _result is None
-        assert any('fingerprint' in _m.lower() for _m in _messages), _messages
-
-
-def test_ux04_restore_refuses_on_corrupt_sidecar():
-    """Pickle's SHA256 doesn't match sidecar → refuse + message."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    with tempfile.TemporaryDirectory() as _tmp:
-        _blob = os.path.join(_tmp, 'session.pkl.gz')
-        with open(_blob, 'wb') as _fh:
-            _fh.write(b'fake gzip content')
-        # Write a sidecar with the WRONG hash.
-        with open(_blob + '.sha256', 'w') as _fh:
-            _fh.write('0' * 64 + '\n')
-        # Also write a fingerprint so we get past the missing-file check.
-        with open(os.path.join(_tmp, 'session.fingerprint.json'), 'w') as _fh:
-            _fh.write('{"_format_version": 1}')
-        class _Cfg:
-            dir_cache = _tmp
-        _messages: 'list' = []
-        _result = persistence.restore_session(_Cfg(), _messages.append)
-        assert _result is None
-        assert any('sha256' in _m.lower() for _m in _messages), _messages
-
-
-def test_ux04_fingerprint_diff_detects_changes():
-    """fingerprint_diff returns named fields when scalars differ; uses
-    'kind.key' when dict entries differ."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    _saved = {
-        'config_hash': 'abc',
-        'snapshot_ts': 'A',
-        'arch': 'amd64',
-        'build_profiles': [],
-        'include_recommends': True,
-        'mirror_inreleases': {'main': 'a1', 'security': 'b1'},
-        'fork_tree_hashes':  {},
-        'patch_set_hashes':  {},
-    }
-    # Identical → no diffs
-    assert persistence.fingerprint_diff(_saved, _saved.copy()) == []
-    # Scalar mismatch
-    _cur = _saved.copy()
-    _cur['config_hash'] = 'xyz'
-    assert 'config_hash changed' in persistence.fingerprint_diff(_saved, _cur)
-    # Dict mismatch
-    _cur = _saved.copy()
-    _cur['mirror_inreleases'] = {'main': 'a1', 'security': 'CHANGED'}
-    _diffs = persistence.fingerprint_diff(_saved, _cur)
-    assert any('mirror_inreleases.security' in _d for _d in _diffs), _diffs
-
 
 def test_ux04_buildflags_autosave_round_trip():
     """BuildFlags.load reads what autosave wrote; persisted-True flags
@@ -28371,43 +28311,6 @@ def test_ux04_buildflags_in_memory_only_reset_on_load():
         _kept = set(BuildFlags._FIELDS) - BuildFlags._IN_MEMORY_ONLY
         for _f in _kept:
             assert getattr(_flags, _f) is True, f"{_f} not preserved"
-
-
-def test_ux04_buildflags_restored_summary_excludes_in_memory_flags():
-    """restored_summary lists persisted-True non-in-memory flags only;
-    the banner shouldn't claim 'cache' restored just because the JSON
-    had it True (the Cache instance hasn't been wired)."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildFlags
-    import json as _json
-    with tempfile.TemporaryDirectory() as _tmp:
-        _path = os.path.join(_tmp, 'buildflags.json')
-        with open(_path, 'w') as _fh:
-            _json.dump({
-                '_format_version': 1,
-                'flags': {
-                    'cache_ready':           True,   # _IN_MEMORY_ONLY
-                    'dep_check_ready':       True,   # _IN_MEMORY_ONLY
-                    'download_ready':        True,   # persists
-                    'build_container_ready': True,   # _IN_MEMORY_ONLY
-                    'source_build_ready':    True,   # persists
-                    'signing_key_verified':  True,   # _IN_MEMORY_ONLY
-                    'chroot_ready':          False,
-                    'chroot_verified':       False,
-                    'chroot_installer_ready': False,
-                    'iso_live_ready':        False,
-                    'iso_installer_ready':   False,
-                    'iso_disk_ready':        False,
-                },
-            }, _fh)
-        _flags = BuildFlags.load(_path)
-        _summary = _flags.restored_summary()
-        assert 'cache' not in _summary, _summary
-        assert 'dep_check' not in _summary, _summary
-        assert 'build_container' not in _summary, _summary
-        assert 'signing_key' not in _summary, _summary
-        assert 'download' in _summary, _summary
-        assert 'source_build' in _summary, _summary
 
 
 def _sbom_test_buildconfig(tmp: str) -> object:
@@ -29481,7 +29384,7 @@ def test_normalize_built_artifacts_uses_uniform_n_across_siblings():
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import buildcontainer as _bc
     import utils as _u
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     # Simulate published history: meta has 4 prior asg versions, the
     # ABI sibling is fresh.  Per-file N candidates: meta → 5, sibling → 1.
@@ -30330,8 +30233,6 @@ def test_build_record_v1_legacy_record_reads_tolerantly():
     have no output_hashes field).  Consumers treat absent
     output_hashes as {} — the backfill helper migrates them on demand."""
     _u = _utils_module()
-    import hmac as _hmac
-    import hashlib as _hashlib
     import json as _json
     with tempfile.TemporaryDirectory() as _td:
         # Hand-write a v1 record (no output_hashes field).
@@ -30956,7 +30857,6 @@ def test_mirror_recompute_base_returns_oldest_snapshot_across_claims():
     retracted entries; reads across all builders."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     from build import BuildSession
     import coord.schema as _schema
     import coord.store as _store
@@ -31170,7 +31070,6 @@ def test_mirror_pull_write_build_records_built_pkg_records_pulled_from():
     "we built it" from "we pulled it"."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     import utils as _utils
     from build import BuildSession
 
@@ -31222,7 +31121,6 @@ def test_mirror_pull_write_build_records_tunneled_pkg_records_republished_from()
     pulled_from and stays claimable."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     import utils as _utils
     from build import BuildSession
 
@@ -31324,7 +31222,6 @@ def test_mirror_pull_write_build_records_aggregates_multi_output_pkg():
     outputs listed."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     import utils as _utils
     from build import BuildSession
 
@@ -31382,7 +31279,6 @@ def test_generate_pending_claims_threads_republished_from_per_output():
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import coord.publish as _publish
-    import coord.schema as _schema
 
     # Fake a buildlog dir + custom read_build_record stub
     def _fake_read(_dir, _pkg):
@@ -36223,7 +36119,6 @@ def test_mirror_pull_falls_back_to_live_claims_when_no_ledger():
     live-claim set with NO snapshot-equality filter, so older-snapshot live
     claims (which the old :1541 filter stranded on a mixed-snapshot mirror)
     are downloaded."""
-    import sys as _sys
     import hashlib as _hashlib
     _a = _hashlib.sha256(b'liba').hexdigest()
     _e = _hashlib.sha256(b'libe').hexdigest()
@@ -36544,7 +36439,6 @@ def test_mirror_audit_disk_vs_claims_flags_missing_and_orphan():
     C has no claim (orphan, WARNING).  D is retracted → not counted."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     from build import BuildSession
     with tempfile.TemporaryDirectory() as _td:
         _pool = os.path.join(_td, 'pool')
@@ -36772,7 +36666,7 @@ def test_remote_publish_drops_claim_when_push_fails():
     import coord.store as _store
     import coord.identity as _identity
     import coord.reconcile as _reconcile
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
 
     with tempfile.TemporaryDirectory() as _td:
         class _Cfg:
@@ -37070,14 +36964,6 @@ def test_dependencytree_pins_resolve_silently_and_record_picks():
     assert _dt2._pinned_chosen == {'telnet-client': 'telnet'}, _dt2._pinned_chosen
 
 
-def test_persistence_format_version_bumped_for_pins():
-    """A pre-pins (v1) session blob must be refused, not resumed without
-    _pins/_pinned_chosen."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    assert persistence._FORMAT_VERSION >= 2
-
-
 def test_selection_lock_classify_asymmetric_guard():
     """SELECT-LOCK Chunk 4 policy: missing→bootstrap, badsig/malformed→
     hardstop, removal→block, additions-only/unchanged→refresh."""
@@ -37162,6 +37048,160 @@ def test_selection_lock_restore_roundtrips_lists_with_meta():
         # flat lists preserve order
         assert open(_cfg.poollist_path).read().split() == ['grub-pc', 'grub-efi-amd64']
         assert open(_cfg.livelist_path).read().strip() == 'live-boot'
+
+
+def test_selection_lock_restore_seeds_raw_byte_faithful():
+    """SELECT-01: seeds_raw round-trips the four list files BYTE-FOR-BYTE on
+    restore — operator comments survive and pkg-group order is preserved
+    (the parsed-and-re-rendered form alphabetises groups + strips comments)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    import utils as _u
+    import types
+    with tempfile.TemporaryDirectory() as _root:
+        _cfgdir = os.path.join(_root, 'config')
+        os.makedirs(_cfgdir)
+        _cfg = types.SimpleNamespace(
+            pkglist_path=os.path.join(_cfgdir, 'pkg.list'),
+            livelist_path=os.path.join(_cfgdir, 'live.list'),
+            installerlist_path=os.path.join(_cfgdir, 'installer.list'),
+            poollist_path=os.path.join(_cfgdir, 'pool.list'))
+        # pkg.list: groups in NON-alphabetical order, with comments + a
+        # tasksel description — exactly what the name-render would mangle.
+        _pkg_text = (
+            "# operator notes: desktop must resolve before base\n"
+            "[desktop]\n"
+            "## Description: Desktop environment\n"
+            "xterm\n"
+            "\n"
+            "[base]\n"
+            "coreutils\n"
+            "dpkg\n"
+        )
+        _pool_text = (
+            "# pool.list — shipped in /cdrom/pool, never installed\n"
+            "# both grub flavours intentionally co-exist here\n"
+            "grub-pc\n"
+            "grub-efi-amd64\n"
+        )
+        _u._atomic_write_bytes(_cfg.pkglist_path, _pkg_text.encode('utf-8'))
+        _u._atomic_write_bytes(_cfg.poollist_path, _pool_text.encode('utf-8'))
+        _u._atomic_write_bytes(_cfg.livelist_path, b"live-boot\n")
+        _u._atomic_write_bytes(_cfg.installerlist_path, b"anna\n")
+
+        # Capture exactly what assemble_state would stash.
+        _lock = {
+            'seeds': _sl.seeds_from_config(_cfg),
+            'seeds_raw': _sl.seeds_raw_from_config(_cfg),
+        }
+        assert set(_lock['seeds_raw']) == {'pkg', 'live', 'installer', 'pool'}
+        assert _lock['seeds_raw']['pkg'] == _pkg_text
+
+        # Blow the files away and restore from the lock.
+        for _p in (_cfg.pkglist_path, _cfg.poollist_path,
+                   _cfg.livelist_path, _cfg.installerlist_path):
+            os.remove(_p)
+        _sl.restore_list_files(_cfg, _lock)
+
+        # Byte-for-byte: comments + group order preserved.
+        assert open(_cfg.pkglist_path).read() == _pkg_text
+        assert open(_cfg.poollist_path).read() == _pool_text
+        # group ORDER (desktop before base) survived — the render would invert it
+        assert (open(_cfg.pkglist_path).read().index('[desktop]')
+                < open(_cfg.pkglist_path).read().index('[base]'))
+
+        # Legacy lockfile (no seeds_raw) falls back to the name-render: it still
+        # round-trips the GROUPS but loses comments and alphabetises order.
+        _legacy = {'seeds': _lock['seeds']}
+        for _p in (_cfg.pkglist_path, _cfg.poollist_path):
+            os.remove(_p)
+        _sl.restore_list_files(_cfg, _legacy)
+        _rendered = open(_cfg.pkglist_path).read()
+        assert '# operator notes' not in _rendered          # comments gone
+        assert _u.parse_pkg_list_groups(_cfg.pkglist_path) == {
+            'desktop': ['xterm'], 'base': ['coreutils', 'dpkg']}
+
+
+def _or_resolve_xterm_graph():
+    """The documented SELECT-02 repro as a synthetic graph: xorg Depends
+    `xterm | x-terminal-emulator`; gnome-terminal Provides
+    x-terminal-emulator; xterm drags in libutempter0."""
+    deps = {
+        'xorg': [('xterm', 'x-terminal-emulator')],
+        'xterm': ['libutempter0'],
+        'gnome-terminal': [],
+        'libutempter0': [],
+    }
+    provides = {'gnome-terminal': ['x-terminal-emulator']}
+    return deps, provides
+
+
+def test_or_resolve_greedy_diverges_fixpoint_does_not():
+    """SELECT-02: the greedy (live-resolver) model gives DIFFERENT closures
+    for the two seed orderings, while the order-independent fixpoint gives
+    the same closure (matching the minimal, no-xterm result)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import or_resolve as _or
+    deps, provides = _or_resolve_xterm_graph()
+
+    # Greedy: order decides whether xterm (+ libutempter0) is pulled.
+    _g1 = _or.resolve_closure_greedy(['xorg', 'gnome-terminal'], deps, provides=provides)
+    _g2 = _or.resolve_closure_greedy(['gnome-terminal', 'xorg'], deps, provides=provides)
+    assert 'xterm' in _g1 and 'libutempter0' in _g1, _g1
+    assert 'xterm' not in _g2 and 'libutempter0' not in _g2, _g2
+    assert _g1 != _g2, "expected the greedy model to be order-sensitive"
+
+    # Fixpoint: identical for either ordering; x-terminal-emulator is
+    # satisfied by gnome-terminal's Provides, so xterm is never pulled.
+    _f1 = _or.resolve_closure(['xorg', 'gnome-terminal'], deps, provides=provides)
+    _f2 = _or.resolve_closure(['gnome-terminal', 'xorg'], deps, provides=provides)
+    assert _f1 == _f2 == {'xorg', 'gnome-terminal'}, (_f1, _f2)
+    assert 'xterm' not in _f1
+
+
+def test_or_resolve_fixpoint_invariant_over_all_permutations():
+    """The fixpoint closure is a pure function of the seed SET — identical
+    across EVERY seed ordering — whereas the greedy model produces more than
+    one distinct closure over those same orderings."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import or_resolve as _or
+    import itertools
+    deps, provides = _or_resolve_xterm_graph()
+    _seeds = ['xorg', 'gnome-terminal']
+
+    _fix = {frozenset(_or.resolve_closure(_p, deps, provides=provides))
+            for _p in itertools.permutations(_seeds)}
+    _greedy = {frozenset(_or.resolve_closure_greedy(list(_p), deps, provides=provides))
+               for _p in itertools.permutations(_seeds)}
+    assert len(_fix) == 1, f"fixpoint must be order-invariant, got {_fix}"
+    assert len(_greedy) >= 2, f"greedy expected to diverge, got {_greedy}"
+
+
+def test_or_resolve_first_alt_when_no_alternative_satisfied():
+    """With no satisfying alternative present, the fixpoint pulls the FIRST
+    declared alternative (Debian convention) plus its hard deps."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import or_resolve as _or
+    deps, provides = _or_resolve_xterm_graph()
+    # Only xorg seeded — nothing Provides x-terminal-emulator in the closure.
+    _c = _or.resolve_closure(['xorg'], deps, provides=provides)
+    assert _c == {'xorg', 'xterm', 'libutempter0'}, _c
+
+
+def test_or_resolve_canonical_tiebreak_is_seed_order_free():
+    """Two mirror-image OR groups (a|b and b|a) with no provider: the
+    fixpoint always resolves the canonically-smallest group's first
+    alternative ('a'), regardless of seed order — the greedy model would
+    pick 'a' or 'b' depending on which seed is visited first."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import or_resolve as _or
+    deps = {'p': [('a', 'b')], 'q': [('b', 'a')], 'a': [], 'b': []}
+    assert _or.resolve_closure(['p', 'q'], deps) == {'p', 'q', 'a'}
+    assert _or.resolve_closure(['q', 'p'], deps) == {'p', 'q', 'a'}
+    # greedy diverges: visiting p first pulls 'a', visiting q first pulls 'b'.
+    _ga = _or.resolve_closure_greedy(['p', 'q'], deps)
+    _gb = _or.resolve_closure_greedy(['q', 'p'], deps)
+    assert _ga == {'p', 'q', 'a'} and _gb == {'p', 'q', 'b'}, (_ga, _gb)
 
 
 def test_claim_schema_deprecated_state_and_new_deprecation():
@@ -37302,7 +37342,6 @@ def test_selection_lock_closure_matches_lock_statuses():
     nolock / badlock so ISO + audits can refuse a stale RAM tree."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import selection_lock as _sl
-    import types
     with tempfile.TemporaryDirectory() as _root:
         _cfg = _selection_lock_cfg(_root)
         _cfg.arch = 'amd64'
@@ -39461,6 +39500,7 @@ def main() -> int:
         test_verify_inrelease_tampered_signature_fails,
         test_verify_inrelease_missing_keyring_fails,
         test_verify_inrelease_empty_keyring_fails,
+        test_should_reuse_pinned_release_skip_decision,
         test_buildconfig_security_defaults,
         test_buildconfig_security_disabled_accepts_missing_keyring,
         test_buildconfig_security_enabled_rejects_missing_keyring,
@@ -39704,6 +39744,10 @@ def main() -> int:
         test_conf15_dockerfile_pins_toolchain_to_snapshot,
         test_conf15_buildcontainer_image_tag_carries_snapshot_ts,
         test_mat04_build_container_mounts_source_and_patch_readonly,
+        test_write_iso_md5sum_manifest_mat08,
+        test_iso_builders_write_md5sum_manifest_mat08,
+        test_mat09_live_root_password_randomized_and_sudo_guaranteed,
+        test_mat09_disk_image_locks_root_and_adds_sudo_user,
         test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
         test_sta40_no_shell_interpolation_in_sudo_sites,
         test_sta44_index_verified_against_release_sha,
@@ -40116,12 +40160,16 @@ def main() -> int:
         test_selection_lock_diff_closure_add_remove_and_tier_only,
         # SELECT-LOCK Chunk 3 — pinned-picks plumbing
         test_dependencytree_pins_resolve_silently_and_record_picks,
-        test_persistence_format_version_bumped_for_pins,
         # SELECT-LOCK Chunk 4 — two-stage parse + asymmetric guard
         test_selection_lock_classify_asymmetric_guard,
         test_selection_lock_assemble_state_shape_and_pin_union,
         # SELECT-LOCK Chunk 5 — cache restore / purge-state
         test_selection_lock_restore_roundtrips_lists_with_meta,
+        test_selection_lock_restore_seeds_raw_byte_faithful,
+        test_or_resolve_greedy_diverges_fixpoint_does_not,
+        test_or_resolve_fixpoint_invariant_over_all_permutations,
+        test_or_resolve_first_alt_when_no_alternative_satisfied,
+        test_or_resolve_canonical_tiebreak_is_seed_order_free,
         # SELECT-LOCK Chunk 7 — mirror deprecated claim state
         test_claim_schema_deprecated_state_and_new_deprecation,
         test_claim_from_jsonl_accepts_deprecated_and_v1_lines,
@@ -40394,15 +40442,9 @@ def main() -> int:
         test_update_build_pending_per_mirror_path,
         # UPD-02: index on the remote
         test_index_minimal_stages_nested_subset,
-        # UX-04 persistence
-        test_ux04_sha256_sidecar_round_trip,
-        test_ux04_restore_session_silent_when_no_blob,
-        test_ux04_restore_refuses_on_missing_fingerprint,
-        test_ux04_restore_refuses_on_corrupt_sidecar,
-        test_ux04_fingerprint_diff_detects_changes,
+        # UX-04: BuildFlags JSON autosave
         test_ux04_buildflags_autosave_round_trip,
         test_ux04_buildflags_in_memory_only_reset_on_load,
-        test_ux04_buildflags_restored_summary_excludes_in_memory_flags,
         # CONF-07 SBOM
         test_sbom_emits_valid_cyclonedx_skeleton,
         test_sbom_components_sorted_by_name,

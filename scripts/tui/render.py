@@ -10,14 +10,13 @@ need `initscr()`.
 """
 from __future__ import annotations
 
-from math import floor
 from typing import Any, List, Optional, Tuple
 
 import curses
 import curses.panel
 
 from . import wrap
-from .state import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARNING, State, TabState
+from .state import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARNING, State
 
 
 # ── Color pair indices (mirror legacy Tui.COLOR_*) ───────────────────────

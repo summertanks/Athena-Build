@@ -224,7 +224,7 @@ mirror details: [`docs/remote-build.md`](docs/remote-build.md).
 
 ### Resuming a prior session
 
-Not currently available.  The persistence layer — a fingerprint-gated pickle of `Cache` + `DependencyTree` under `<dir_cache>/` — is still in the tree but dormant: the `resume` command and `--resume` flag that consumed it were removed pending a relook.  Re-run `cache build` + `cache parse` on each launch (the two together take ~40s).
+Not currently available.  A session-persistence layer — a fingerprint-gated pickle of `Cache` + `DependencyTree` under `<dir_cache>/`, with a `resume` command + `--resume` flag — was implemented (UX-04) but **removed** (MAT-06): it hit repeated consistency bugs and was abandoned.  Re-run `cache build` + `cache parse` on each launch (the two together take ~40s).
 
 ### Where logs live
 

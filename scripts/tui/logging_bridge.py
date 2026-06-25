@@ -7,7 +7,7 @@ logger name (`athena.<stage>` -> `<stage>` tab) per P6.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from .events import LogEvent, PrintEvent
 from .state import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARNING

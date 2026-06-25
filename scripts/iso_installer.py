@@ -228,6 +228,17 @@ def build_installer_iso(
                 _staging, signing_pubkey_path, password):
             return False
 
+    # On-media integrity manifest (LAST staging step — covers the apt repo +
+    # signatures too).  d-i's already-staged `cdrom-checker` ("Check disc
+    # integrity") verifies the disc against this md5sum.txt; without it the
+    # checker is inert and a corrupt USB write fails mid-install (MAT-08).
+    # Best-effort: don't block an otherwise-good installer ISO.
+    if utils.write_iso_md5sum_manifest(_staging, password):
+        logger.info("md5sum.txt written (cdrom-checker ready)")
+    else:
+        logger.warning(
+            "md5sum.txt not written — d-i 'Check disc integrity' will be inert")
+
     _iso_path = os.path.join(dir_image, iso_basename)
     if not _run_grub_mkrescue(_staging, _iso_path, container, password):
         return False

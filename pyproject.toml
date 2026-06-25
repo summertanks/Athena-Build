@@ -97,7 +97,6 @@ select = [
     "W",      # pycodestyle warnings — whitespace
 ]
 ignore = [
-    "F401",   # unused imports — many tui re-exports + intentional warm-up imports
     "F841",   # unused local — surfaces in a few defensive try/except blocks
 ]
 
@@ -120,4 +119,4 @@ python_version          = "3.11"
 warn_return_any         = false
 warn_unused_configs     = true
 ignore_missing_imports  = true   # apt_pkg / debian / docker have partial stubs
-check_untyped_defs      = false  # codebase has many untyped funcs; gate-only mode
+check_untyped_defs      = true   # bodies of unannotated funcs are type-checked too

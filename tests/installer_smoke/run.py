@@ -54,7 +54,6 @@ import subprocess
 import sys
 import textwrap
 import time
-from pathlib import Path
 
 # Import the parser as a sibling module — supports both
 # `python3 tests/installer-smoke/run.py` (this dir on sys.path) and

@@ -9,8 +9,6 @@ BuildSession; see commands/base.py for how the mixin shares session state.
 import logging
 import os
 
-import apt_pkg
-import repo_audit
 import tui
 import utils
 from buildlog import BuildLog

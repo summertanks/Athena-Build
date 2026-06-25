@@ -313,7 +313,7 @@ class _DepDriftMixin:
         # upstream Debian sources.  Verifying them here would block the
         # chroot build on deps we never promised to satisfy (real
         # example: ca-certificates → openssl, xauth → libx11-6).
-        _extras = getattr(self._dependencytree, 'extras_pkg_names', set())
+        _extras: set = getattr(self._dependencytree, 'extras_pkg_names', set())
         _violations = []
         for _pkg_name, _pkg_obj in self._dependencytree.canonical_pkgs.items():
             if _pkg_name in _extras:

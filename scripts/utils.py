@@ -17,7 +17,7 @@ import argparse
 import requests
 import tui
 import _version
-from tui import Prompt, Spinner, ProgressBar
+from tui import ProgressBar
 from typing import (
     Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple,
     TYPE_CHECKING)
@@ -974,6 +974,50 @@ def sudo_askpass_env(password: str) -> 'Iterator[Dict[str, str]]':
             os.remove(_path)
         except OSError:
             pass
+
+
+def write_iso_md5sum_manifest(staging_dir: str, password: str) -> bool:
+    """Write a Debian-style ``md5sum.txt`` at the ISO staging ROOT — one
+    ``<md5hex>  ./relative/path`` line per file, sorted (deterministic),
+    excluding the manifest itself.
+
+    This is the on-media integrity manifest that d-i's ``cdrom-checker``
+    ("Check disc integrity") and live-boot's ``live-media-check`` read to verify
+    the burned media, so a corrupt USB/DVD write is caught at boot rather than
+    failing confusingly mid-install (MAT-08).
+
+    Runs under sudo — the staged tree carries root-owned files (the squashfs,
+    the generated apt repo): the hashing runs as root, and the password comes
+    via SUDO_ASKPASS so the ``tee`` write receives ONLY the manifest on stdin
+    (no password/content mixing, no shell-redirection interpolation).  Returns
+    True on success."""
+    if not os.path.isdir(staging_dir):
+        logger.error(f"write_iso_md5sum_manifest: no staging dir {staging_dir}")
+        return False
+    with sudo_askpass_env(password) as _env:
+        # cwd=staging + `find .` → paths are './…' relative to the ISO root.
+        _scan = subprocess.run(
+            ['sudo', '-A', 'find', '.', '-type', 'f', '!', '-name',
+             'md5sum.txt', '-exec', 'md5sum', '{}', '+'],
+            cwd=staging_dir, env=_env, capture_output=True, text=True)
+        if _scan.returncode != 0:
+            logger.error(
+                "write_iso_md5sum_manifest: find/md5sum failed: "
+                f"{(_scan.stderr or '').strip()[:200]}")
+            return False
+        _manifest = '\n'.join(sorted(
+            _l for _l in _scan.stdout.splitlines() if _l.strip()))
+        if _manifest:
+            _manifest += '\n'
+        _tee = subprocess.run(
+            ['sudo', '-A', 'tee', os.path.join(staging_dir, 'md5sum.txt')],
+            input=_manifest, env=_env, capture_output=True, text=True)
+        if _tee.returncode != 0:
+            logger.error(
+                "write_iso_md5sum_manifest: writing md5sum.txt failed: "
+                f"{(_tee.stderr or '').strip()[:200]}")
+            return False
+    return True
 
 
 def _existing_mode(path: str, default: int = 0o644) -> int:

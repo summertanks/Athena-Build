@@ -774,7 +774,6 @@ def fetch_source_versions_at(config: 'BuildConfig',
     import json
     import lzma
     import tempfile
-    import requests
     # The Sources index at a pinned snapshot timestamp is immutable, so cache
     # the parsed {name: version} on disk keyed by the timestamp.  `source audit`
     # calls this every run via _workload_since_snapshot, and re-downloading the
@@ -926,7 +925,6 @@ def audit_nmu_residue(state: RepoState,
     shim-signed / shim-signed-common / shim-helpers-amd64-signed as
     "residue" and `repo repair strip` would have corrupted them.
     """
-    from debian.deb822 import PkgRelation
     _findings: 'list[tuple]' = []
     _tun = tunnel_sources or set()
 

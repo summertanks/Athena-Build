@@ -13,7 +13,6 @@ import logging
 from typing import Optional
 
 import apt_pkg
-import dependencytree
 
 from commands.base import SessionState
 

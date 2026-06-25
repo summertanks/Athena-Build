@@ -17,6 +17,7 @@ import logging
 import os
 import pathlib
 import re
+import secrets
 import shlex
 import subprocess
 import tempfile
@@ -1534,10 +1535,15 @@ class _ChrootMixin:
         # /etc/hostname write above.  This was hardcoded 'athena'
         # (toolchain identity) and silently overwrote the correct file
         # (caught on the disk image serial log, 2026-06-11).
+        # Per-build RANDOM root password (MAT-09) — was the fixed `root`/`root`
+        # default credential, shipped in every live ISO + disk image.  The LIVE
+        # image uses this (surfaced to the operator below); the disk image LOCKS
+        # root and adds a passwordless-sudo user instead (disk_image.py).
+        _root_pw = secrets.token_urlsafe(12)
         _proc = subprocess.run(
             ['sudo', '-S', 'systemd-firstboot',
              f'--root={self._dir_chroot}',
-             '--root-password=root',
+             f'--root-password={_root_pw}',
              f'--hostname={_id}',
              '--timezone=UTC',
              '--locale=C.UTF-8',
@@ -1551,6 +1557,21 @@ class _ChrootMixin:
             logger.warning(f"systemd-firstboot stderr: {_proc.stderr.strip()}")
         else:
             tui.console.print("systemd-firstboot: root password / hostname / machine-id configured")
+            self._announce_root_credential(_root_pw)
+
+        # Guarantee the interactive user can escalate (MAT-09).  With root now
+        # carrying a random password (no default credential), the live user —
+        # which live-config creates at boot and adds to the `sudo` group — MUST
+        # be able to sudo, or the live image is unusable.  A passwordless-sudo
+        # group rule baked into the base chroot guarantees it on BOTH inheriting
+        # surfaces (the live squashfs and the disk image's asgard user); the
+        # installer target is built fresh by d-i and is unaffected.
+        self._write_chroot_file(
+            '/etc/sudoers.d/90-athena-nopasswd',
+            '# Athena (MAT-09): the interactive user (live user via\n'
+            '# live-config; the disk image\'s asgard user) gets passwordless\n'
+            '# sudo — root carries a random password (live) or is locked (disk).\n'
+            '%sudo ALL=(ALL:ALL) NOPASSWD:ALL\n')
 
         # phase 3: install our public signing keyring at the
         # conventional /usr/share/keyrings/ location so a future apt
@@ -1564,6 +1585,21 @@ class _ChrootMixin:
         self._write_athena_apt_sources()
 
         tui.console.print("System configuration files written")
+
+    def _announce_root_credential(self, root_pw: str) -> None:
+        """Surface the per-build random root password (MAT-09): print it and
+        write it to a 0600 ``root-credentials.txt`` next to the build artifacts.
+        Applies to the LIVE image; the disk image locks root + uses asgard."""
+        tui.console.print(f"  root password (random, this build): {root_pw}")
+        try:
+            os.makedirs(self._dir_image, exist_ok=True)
+            _cred = os.path.join(self._dir_image, 'root-credentials.txt')
+            with open(_cred, 'w') as _fh:
+                _fh.write(f"root:{root_pw}\n")
+            os.chmod(_cred, 0o600)
+            tui.console.print(f"  (also at {_cred}, mode 0600)")
+        except OSError as _e:
+            logger.warning(f"root-credentials.txt write failed: {_e}")
 
     def _install_signing_keyring(self):
         """Phase 3: copy the project's exported public signing

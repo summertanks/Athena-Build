@@ -15,7 +15,6 @@ mixin shares session state.
 """
 import logging
 import os
-import re
 import subprocess
 
 import apt_pkg
@@ -23,7 +22,7 @@ import buildcontainer
 import repo_audit
 import tui
 import utils
-from tui import console, Prompt, PROMPT_YESNO, ProgressBar, Spinner
+from tui import console, Prompt, PROMPT_YESNO, ProgressBar
 
 from commands.base import SessionState
 
@@ -521,8 +520,8 @@ class SourceCommandsMixin(SessionState):
         if _verbose and _cleared:
             console.print("")
             console.print(f"Cleared ({len(_cleared)}):")
-            for _n in _cleared:
-                console.print(f"  {_n}")
+            for _name in _cleared:
+                console.print(f"  {_name}")
 
     @staticmethod
     def _is_fork_source(src) -> bool:
@@ -2436,6 +2435,7 @@ class SourceCommandsMixin(SessionState):
                 logger.warning(
                     "SIGINT received during parallel source_build — "
                     "reaping live containers and shutting down workers")
+                assert self.container is not None
                 self.container.request_shutdown()
             _old_sigint = None
             try:
@@ -2509,6 +2509,7 @@ class SourceCommandsMixin(SessionState):
                             else:
                                 _skipped += 1
                             progress_bar.step(1)
+                            assert self.container is not None
                             if self.container.shutdown_event.is_set():
                                 logger.warning(
                                     "shutdown_event set — cancelling "
