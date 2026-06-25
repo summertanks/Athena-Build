@@ -176,7 +176,8 @@ def disk_check(total_size: int, directory: str) -> 'Tuple[bool, int, int]':
 def download(plan_dict: 'Dict[str, Any]', directory: str,
              snapshot_ts: str) -> 'Tuple[int, List[Tuple[str, str]]]':
     """Download every planned binary into *directory* (idempotent — sha256-skip
-    already-present files), then stamp the ``.snapshot`` marker.
+    already-present files), then stamp the ``.snapshot`` marker IFF every file
+    succeeded.
 
     A cumulative bar (count + total bytes, no rate) wraps the loop; each file's
     own bar (with the real per-file rate) comes from ``utils.download_file``.
@@ -223,7 +224,15 @@ def download(plan_dict: 'Dict[str, Any]', directory: str,
         _downloaded += _sz
     if _cum is not None:
         _cum.close(persist=True)
-    _write_marker(directory, snapshot_ts)
+    # Stamp the snapshot marker ONLY when the download is COMPLETE.  is_valid_for
+    # keys "ready" on this marker and _ensure_local_mirror early-returns when
+    # valid — so stamping a PARTIAL mirror would mark it valid-for-snapshot and
+    # skip it forever, never retrying the missing files (they'd stay
+    # snapshot-fallback permanently).  No marker → the next `cache parse` re-runs
+    # (resumably, sha-skipping the files already present) and retries them.
+    # Matches the remote runner, which returns non-zero when `failed`.
+    if not _failures:
+        _write_marker(directory, snapshot_ts)
     return _downloaded, _failures
 
 

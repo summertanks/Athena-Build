@@ -41,9 +41,11 @@ finished directory at /localmirror at actual build time.
 import argparse
 import gzip
 import hashlib
+import http.client
 import json
 import lzma
 import os
+import shutil
 import sys
 import time
 import urllib.error
@@ -96,7 +98,7 @@ def _download(url: str, dest: str, expected_sha: str, expected_size: int,
         if _e.code == 416 and expected_size and _existing >= expected_size:
             return (True, 'already complete')     # range past EOF = done
         return (False, f'HTTP {_e.code}')
-    except (urllib.error.URLError, OSError) as _e:
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as _e:
         return (False, f'{type(_e).__name__}: {_e}')
     # If we asked to resume but the server ignored Range (200, not 206), the
     # body is the WHOLE file → restart from scratch so we don't corrupt it.
@@ -112,7 +114,10 @@ def _download(url: str, dest: str, expected_sha: str, expected_size: int,
                     break
                 _fh.write(_buf)
                 on_bytes(len(_buf))
-    except (urllib.error.URLError, OSError) as _e:
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as _e:
+        # http.client.IncompleteRead (a dropped chunked transfer) subclasses
+        # HTTPException, NOT OSError — without it a mid-stream drop would abort
+        # the whole populate() instead of recording one failure + continuing.
         return (False, f'{type(_e).__name__}: {_e}')
     finally:
         _resp.close()
@@ -175,6 +180,25 @@ def populate(plan: dict, directory: str) -> dict:
     os.makedirs(directory, exist_ok=True)
     _entries = plan.get('entries', [])
     _n = len(_entries)
+    # Disk preflight (mirrors local_mirror.disk_check, 5% headroom): refuse a
+    # multi-GB run we can't finish up front, rather than filling the disk and
+    # failing N files one OSError at a time.  Returns a single __disk__ failure
+    # so main() exits non-zero and the BS1 orchestrator reports it cleanly.
+    _total = int(plan.get('total_size', 0) or 0)
+    if _total:
+        try:
+            _free = shutil.disk_usage(directory).free
+        except OSError:
+            _free = -1
+        _needed = int(_total * 1.05)
+        if 0 <= _free < _needed:
+            _log(f"insufficient disk at {directory}: need ~{_needed} B, "
+                 f"have {_free} B free")
+            return {'downloaded': 0, 'skipped': 0, 'failed': len(_entries),
+                    'indexed': False,
+                    'failures': [['__disk__',
+                                  f'insufficient space: need {_needed}B '
+                                  f'have {_free}B']]}
     _cum_total = int(plan.get('total_size', 0)) or 1
     _cum_done = 0
     _downloaded = _skipped = 0
