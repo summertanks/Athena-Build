@@ -11,7 +11,7 @@ commands/base.py for how the mixin shares session state.
 """
 import logging
 import os
-from typing import Optional
+from typing import Optional, cast
 
 import build_closure
 import dependencytree
@@ -392,6 +392,7 @@ class CacheCommandsMixin(SessionState):
         # parse_dependency follows Recommends transitively so they enter
         # selected_pkgs and get installed in live/target like any Depends —
         # NOT the old soft, pool-only depth-1 'extras' tier.
+        assert self.cache is not None
         self.dep_tree = dependencytree.DependencyTree(
                     self.cache,
                     select_recommended=self.config.include_recommends,
@@ -634,7 +635,9 @@ class CacheCommandsMixin(SessionState):
         _udeb_spiner = Spinner("Resolving udeb dependencies")
         _udeb_view = self.cache.udeb_view()
         self.udeb_dep_tree = dependencytree.DependencyTree(
-            _udeb_view, select_recommended=False,
+            # UdebCacheView is a cache-like view over the udeb world —
+            # DependencyTree consumes it through the same read surface as Cache.
+            cast(Cache, _udeb_view), select_recommended=False,
             arch=self.config.arch,
             build_profiles=self.config.build_profiles,
             # Udeb world commonly has multi-Package-name
@@ -743,21 +746,21 @@ class CacheCommandsMixin(SessionState):
             if _bd_resolvable:
                 self.dep_tree.resolve_packages(
                     _bd_resolvable, check_conflicts=False)
-            _delta = {
+            _bc_delta = {
                 n for n in (set(self.dep_tree.selected_pkgs.keys()) - _pre_bc)
                 if n == self.dep_tree.selected_pkgs[n]['Package']
             }
-            self.dep_tree.build_closure_pkg_names = _delta
-            _adj = {
+            self.dep_tree.build_closure_pkg_names = _bc_delta
+            _adj: dict = {
                 n: list(p.depends_on)
                 for n, p in self.dep_tree.selected_pkgs.items()
                 if n == p['Package']
             }
-            _tiers = build_closure.classify_tiers(_delta, _adj)
+            _tiers = build_closure.classify_tiers(_bc_delta, _adj)
             self.dep_tree.build_closure_tiers = _tiers
             console.print(
                 "BUILD CLOSURE: added "
-                f"{len(_delta)} pkg(s) — toolchain {len(_tiers['toolchain'])}"
+                f"{len(_bc_delta)} pkg(s) — toolchain {len(_tiers['toolchain'])}"
                 f" / language {len(_tiers['language'])}"
                 f" / leaf {len(_tiers['leaf'])} ",
                 tui.COLOR_INFO)
@@ -1273,7 +1276,7 @@ class CacheCommandsMixin(SessionState):
             console.print("Usage: cache info <pkg_name>")
             return
         name = args[0]
-        pkgs = self.cache.get_packages(name)
+        pkgs: list = self.cache.get_packages(name)
         if not pkgs:
             console.print(f'cache info: "{name}" not found in cache')
             return
@@ -1285,7 +1288,8 @@ class CacheCommandsMixin(SessionState):
         import functools
         pkg = max(pkgs, key=functools.cmp_to_key(
             lambda _a, _b: apt_pkg.version_compare(
-                str(_a.get('Version', '')), str(_b.get('Version', '')))))
+                str(cast(dict, _a).get('Version', '')),
+                str(cast(dict, _b).get('Version', '')))))
 
         def _size(p):
             try:

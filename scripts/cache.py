@@ -1069,7 +1069,7 @@ class Cache:
         except (OSError, RuntimeError, ValueError, KeyError):
             # Best-effort load; downstream arch checks fall through to
             # wildcard handling when this is None.  Matches package.py.
-            self._arch_table = None
+            self._arch_table = None  # type: ignore[assignment]  # pickle: rewired on load
 
         # Re-derive _compression_openers (lambdas; never serialised).
         import lzma as _lzma

@@ -1743,7 +1743,7 @@ class MirrorCommandsMixin(SessionState):
                     if not isinstance(_fn, str) or not _fn:
                         continue
                     _bar.label(_fn.split('_', 1)[0])     # binary package name
-                    _claim, _builder = _claim_by_fn.get(_fn, (None, None))
+                    _claim, _builder = _claim_by_fn.get(_fn, (None, ''))
                     if _claim is not None and _claim.get('builder') == _bid:
                         _skip_own += 1                   # a file WE built
                     elif _claim is None:
