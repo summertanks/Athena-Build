@@ -208,6 +208,17 @@ package and an 11-file `scripts/tui/` curses package.  Grouped by role:
   closure into `buildroot/installer/` (no `dpkg --configure`).
 - **`dep_drift.py`** — sync per-package `.shlibs`/`Depends:` constraints
   between cache view and on-disk `.deb`s after a snapshot advance.
+- **`remote_orchestrate.py` / `remote_build.py` / `remote_localmirror.py`** —
+  the ship-to-host remote-build path (`source remotebuild`): the recipe is
+  computed locally (`compose_recipe`), a self-contained bundle is `scp`'d to a
+  remote and run over `ssh` so `docker build`/`run` happen THERE, the `.debs`
+  scp back through the same local post-build pipeline.  A cross-host scheduler
+  fans packages out across all configured remotes (per-host caps, heavy drain,
+  transport re-queue).  See [`docs/remote-build.md`](remote-build.md).
+- **`local_mirror.py`** — snapshot-pinned flat apt mirror of the build closure
+  (Build-Depends), pinned `Origin: AthenaLocalMirror` above the snapshot
+  source, mounted read-only in the container so build-deps resolve from local
+  disk.  Opt-in per machine (`create-local-mirror`) and per remote.
 
 ### ISO + repo
 - **`iso.py`** — `build_iso` masters the live chroot to a squashfs +
@@ -311,6 +322,9 @@ invariants you'll see referenced across the code:
 - [`docs/mirror-setup.md`](mirror-setup.md) — operator guide for
   registering / first-publish / wipe-and-redo on a publish-target
   mirror (MIRROR-01 federation surface).
+- [`docs/remote-build.md`](remote-build.md) — remote build hosts
+  (`source remotebuild` ship-to-host fan-out) + the snapshot-pinned
+  local build mirror.
 - [`docs/branding-methodology.md`](branding-methodology.md) — identity-
   strip + Asgard branding methodology (Patterns A / B / C).
 - [`docs/plans/`](plans/) — per-initiative implementation plans
