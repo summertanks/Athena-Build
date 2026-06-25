@@ -683,6 +683,16 @@ backup of your own work.  Two rules worth internalising:
 - **Canonical config refresh.**  Pull re-applies the owner's verified
   `pkg.list` / `pool.list` (see "Canonical config propagation"), so
   source-select changes propagate to every builder.
+- **Own-claim supersession reconcile (recipient retires, no republish).**
+  When a pulled peer's version supersedes one of OUR own published claims,
+  pull retires our superseded claim in place (emits the obsolescence in our
+  jsonl) so `repo repair cleanup` can prune the old `.deb` WITHOUT us having
+  to re-publish.  A recipient shouldn't have to publish to clean up after a
+  pull — we pulled the source-of-truth state, and ownership of the newer
+  version already sits with the peer.  Publish-before-prune is preserved by
+  construction: a claim is only obsoleted when a strictly-newer version is
+  PRESENT in the live set, so a drift file whose successor isn't built yet
+  stays live.  (Same single emitter as publish Step 6c — see LEDGER-01.)
 
 ## Publish hardening (2026-06-11)
 
@@ -893,7 +903,7 @@ mirror summary [<name>]         per-mirror state + we_own count + neighbours_kno
 mirror status [<name>]          builder identity + halt sentinel + per-mirror PUBLISHED/NEVER PUBLISHED
 mirror reconcile-neighbours     fan-out: align every peer's coord-head.neighbours with local config
 mirror publish [<name>]         per-file .deb push + sign claims + re-sign coord-head (federation-gated + snapshot-base-gated; auto-reindexes a missing/stale local InRelease; warns on snapshot divergence; Mode=build implies --no-iso + owned-only; a blocked publish names the builder holding the lock)
-mirror pull [<name>]            fetch peer sidecar, download missing claim .debs (skip-own; SHA verified; retracted/deprecated/obsolete skipped; reclaimed files refreshed; auto-adopts the mirror's snapshot pin FORWARD; refreshes the canonical pkg.list/pool.list)
+mirror pull [<name>]            fetch peer sidecar, download missing claim .debs (skip-own; SHA verified; retracted/deprecated/obsolete skipped; reclaimed files refreshed; auto-adopts the mirror's snapshot pin FORWARD; refreshes the canonical pkg.list/pool.list; retires our own claims a pulled peer version supersedes so cleanup prunes them without a republish)
 mirror reclaim [<src>|<file>] [<name>] [force]
                                 same-version rebuild: bare = list local-ahead candidates; with target = overwrite published bytes under unchanged filename (sanctioned invariant exception)
 mirror audit [<name>]           federation consistency, claim sigs, hash conflicts, cross-mirror pool drift, on-disk pool ↔ claims integrity
