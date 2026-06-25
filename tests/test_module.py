@@ -26931,7 +26931,7 @@ def test_snapshot_select_syncs_build_conf_at_command_time():
 
         _sess.config = _Cfg()
         _sess._snapshot_current = lambda: '20260602T173733Z'
-        _sess._update_build_pending = lambda: False
+        _sess._has_unpublished_local_builds = lambda: False
 
         class _Yes:
             def __init__(self, *a, **k):
@@ -26956,6 +26956,64 @@ def test_snapshot_select_syncs_build_conf_at_command_time():
         assert 'Timestamp = 20260620T203514Z' in _body, _body
         assert '20260602T173733Z' not in _body, \
             'stale TS must be gone from build.conf at command time'
+
+
+def test_snapshot_select_warns_only_on_unpublished_local_builds():
+    """The advance warning fires ONLY when we hold locally-BUILT, unpublished
+    work (_has_unpublished_local_builds), not on a mere pin>floor difference —
+    which a peer-PULLED delta (already on the mirror) would also trip under the
+    old _update_build_pending guard."""
+    import re
+    _src = _session_source()
+    _body = re.search(r'def _set_snapshot_pin\(self.*?(?=\n    def )',
+                      _src, re.DOTALL).group(0)
+    assert '_has_unpublished_local_builds()' in _body, "guard must use the helper"
+    assert '_update_build_pending()' not in _body, (
+        "the advance warning must NOT key off pin>floor (trips on pulled state)")
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildFlags, BuildSession
+    from commands import cmd_snapshot
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _conf = os.path.join(_cfg_dir, 'build.conf')
+        with open(_conf, 'w') as _f:
+            _f.write("[Snapshot]\nTimestamp = 20260602T173733Z\nEnabled=true\n")
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            snapshot_enabled = True
+            snapshot_timestamp_config = '20260602T173733Z'
+            config_path = _conf
+
+        for _flag in (True, False):
+            _sess = BuildSession.__new__(BuildSession)
+            _sess.flags = BuildFlags()
+            _sess.config = _Cfg()
+            _sess._snapshot_current = lambda: '20260602T173733Z'
+            _sess._has_unpublished_local_builds = (lambda v=_flag: v)
+            _lines: 'list[str]' = []
+
+            class _No:
+                def __init__(_s, *a, **k):
+                    pass
+
+                def get_response(_s):
+                    return 'n'    # abort after the warning prints
+            _sp, _sc = cmd_snapshot.Prompt, build.console.print
+            cmd_snapshot.Prompt = _No
+            build.console.print = lambda *a, _l=_lines, **k: _l.append(
+                ' '.join(str(x) for x in a))
+            try:
+                _sess._set_snapshot_pin('20260620T203514Z')
+            finally:
+                cmd_snapshot.Prompt, build.console.print = _sp, _sc
+            _joined = '\n'.join(_lines)
+            if _flag:
+                assert 'UNPUBLISHED' in _joined, _joined
+            else:
+                assert 'UNPUBLISHED' not in _joined, _joined
 
 
 def test_snapshot_select_current_is_forward_only():
@@ -39941,6 +39999,7 @@ def main() -> int:
         test_list_snapshots_between_filters_range_and_unions_keys,
         test_snapshot_select_interactive_sets_chosen_current,
         test_snapshot_select_syncs_build_conf_at_command_time,
+        test_snapshot_select_warns_only_on_unpublished_local_builds,
         test_snapshot_select_current_is_forward_only,
         test_snapshot_select_force_accepts_backtrack,
         test_snapshot_select_force_cancels_on_empty_or_no,
