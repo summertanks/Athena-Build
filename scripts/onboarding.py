@@ -249,7 +249,7 @@ def _onboard_first(session) -> bool:
     if not _ensure_builder_identity(session):
         return False
     # Origin uses the legacy explicit add (no mirror to validate against yet).
-    return bool(_add_mirror_interactive(session, register=False))
+    return bool(_add_mirror_interactive(session))
 
 
 def _onboard_federation(session) -> bool:
@@ -444,7 +444,7 @@ def _ensure_builder_identity(session) -> bool:
     return True
 
 
-def _add_mirror_interactive(session, *, register: bool) -> str:
+def _add_mirror_interactive(session) -> str:
     """Legacy explicit mirror add (origin branch only — no live mirror to
     validate against yet).  Returns the mirror name, or '' on abort."""
     _name = _ask(PROMPT_INPUT, "Mirror name (e.g. 'origin'):")
@@ -468,9 +468,6 @@ def _add_mirror_interactive(session, *, register: bool) -> str:
         _args += ['--proto', _proto]
     if session.cmd_mirror('add', *_args) is False:
         console.print("✗ mirror add failed", tui.COLOR_ERROR)
-        return ''
-    if register and session.cmd_mirror('builders', 'register', _name) is False:
-        console.print("✗ registration failed", tui.COLOR_ERROR)
         return ''
     console.print(f"✓ mirror '{_name}' added", tui.COLOR_HIGHLIGHT)
     return _name

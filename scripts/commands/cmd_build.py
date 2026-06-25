@@ -1106,7 +1106,7 @@ class BuildCommandsMixin(SessionState):
                 _os_detail = 'present'
         _check('/etc/os-release written',
                _os_ok,
-               _os_detail if _os_ok else 'missing — run build_bootable again')
+               _os_detail if _os_ok else "missing — run 'chroot build' again")
 
         # ── phase 3: signing keyring present? (informational) ──────────
         # Not a check — non-gating because the chroot is still a valid live
@@ -1124,7 +1124,7 @@ class BuildCommandsMixin(SessionState):
         else:
             console.print(
                 '  Athena signing keyring                        absent  '
-                '(run `generate_signing_key` then re-run `build_chroot`)'
+                '(run `key generate` then re-run `chroot build`)'
             )
 
         # ── Summary ──────────────────────────────────────────────────────────────

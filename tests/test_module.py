@@ -18956,14 +18956,14 @@ def test_repo_max_mtime_detects_delete_and_rename():
 
 def test_repo_audit_module_exports():
     """The repo_audit module must export the primitives consumed by
-    build.py: RepoState + AuditResult dataclasses, plus the callables
+    build.py: the RepoState dataclass, plus the callables
     scan_repo_state / audit_dep_closure / audit_conflict_cohort /
     audit_nmu_residue / invalidate_cache."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import repo_audit
     for _name in (
-        'RepoState', 'AuditResult',
+        'RepoState',
         'scan_repo_state', 'audit_dep_closure',
         'audit_conflict_cohort', 'audit_nmu_residue',
         'invalidate_cache',
@@ -37859,10 +37859,12 @@ def test_obsolete_cascade_audits_skip_and_no_findings():
     assert _findings == [], _findings
 
 
-def test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent():
-    """LEDGER-01 Chunk 6: within a (binary, arch) group only the older
+def test_emit_supersession_obsolescence_groups_by_name_arch_and_idempotent():
+    """LEDGER-01: within a (binary, arch) group only the older
     version(s) obsolete; same version across DIFFERENT arches never
-    obsolete each other; once obsoleted the second run emits nothing."""
+    obsolete each other; once obsoleted the second run emits nothing.
+    (Same-owner case of the single obsolescence emitter — the older and
+    newer versions are both ours.)"""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from coord import schema as _sch
     from coord import publish as _pub
@@ -37878,7 +37880,7 @@ def test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent():
     _all_a = _claim(7, '2.0-1', 'bar_2.0-1_all.deb')
     _amd_a = _claim(8, '2.0-1', 'bar_2.0-1_amd64.deb')
     _by = {'b1': [_old, _new, _all_a, _amd_a]}
-    _obs = _pub.emit_obsolescence_claims(
+    _obs = _pub.emit_supersession_obsolescence(
         builder_id='b1', by_builder=_by, snapshot_pin='snap',
         built_at='now', start_seq=8)
     assert len(_obs) == 1, _obs
@@ -37888,11 +37890,11 @@ def test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent():
     # idempotent: append the obsolescence, re-run → nothing new
     _obs[0]['sig'] = 'x'
     _by['b1'].append(_obs[0])
-    assert _pub.emit_obsolescence_claims(
+    assert _pub.emit_supersession_obsolescence(
         builder_id='b1', by_builder=_by, snapshot_pin='snap',
         built_at='now', start_seq=9) == []
     # a peer's claims are never touched
-    assert _pub.emit_obsolescence_claims(
+    assert _pub.emit_supersession_obsolescence(
         builder_id='b2', by_builder=_by, snapshot_pin='snap',
         built_at='now', start_seq=0) == []
 
@@ -39907,7 +39909,7 @@ def main() -> int:
         # LEDGER-01 Chunk 5 — obsolete cascade across consumers
         test_obsolete_cascade_audits_skip_and_no_findings,
         # LEDGER-01 Chunk 6 — publish Step 6c + on_published
-        test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent,
+        test_emit_supersession_obsolescence_groups_by_name_arch_and_idempotent,
         test_emit_supersession_obsolescence_retires_own_when_peer_supersedes,
         test_remote_publish_on_published_only_on_full_success,
         # LEDGER-01 Chunk 7 — coherence audit pending refinement

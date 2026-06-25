@@ -1,6 +1,6 @@
 """Repo state scanner + closure auditor + bump planner.
 
-Shared substrate for `repo audit` and `repo strip`.
+Shared substrate for `repo audit` and `repo repair strip`.
 
 Replaces the per-file DebFile walk in build.py with a single
 `dpkg-scanpackages` subprocess that produces a canonical Packages
@@ -8,16 +8,19 @@ file from repo/, then parses it via `apt_pkg.TagFile`.  ~10x faster
 than the per-file approach on a 5000-pkg repo; lets the audit run as
 a chroot-build pre-flight gate instead of a manual operator command.
 
-Three primitives:
+Primitives:
   scan_repo_state(config) -> RepoState
       Generate + parse + cache.  Cache invalidates on repo/ mtime change.
 
-  audit_repo_closure(state) -> AuditResult
-      Resolve every Depends/Pre-Depends/Conflicts/Breaks against the
-      state.  Returns unresolved, conflicts, weak.
+  audit_dep_closure(state, ...) -> list[(pkg, field, relation, why), ...]
+      Resolve every hard Depends/Pre-Depends against the state
+      (whole-repo — apt can pull transitive deps from any tier).
+
+  audit_conflict_cohort(state, cohort) -> list[(pkg, field, other, rel), ...]
+      Conflicts/Breaks where BOTH ends are in the given install cohort.
 
   audit_nmu_residue(state) -> list[(pkg, field, value, why), ...]
-      Derive what `repo strip` should do: which pkgs need a Version
+      Derive what `repo repair strip` should do: which pkgs need a Version
       bump, which need their Depends `(=)` refs rewritten, and the full
       bumped_pkg_set (already-bumped ∪ to-bump).
 
@@ -58,10 +61,6 @@ _FIELDS_TO_KEEP = (
 _HARD_DEP_FIELDS = ('Depends', 'Pre-Depends')
 _CONFLICT_FIELDS = ('Conflicts', 'Breaks')
 _WEAK_DEP_FIELDS = ('Recommends',)
-_BUMP_REWRITE_FIELDS = (
-    'Depends', 'Pre-Depends', 'Recommends', 'Suggests',
-    'Enhances', 'Provides',
-)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,35 +85,6 @@ class RepoState:
     provides_index: dict
     packages_file: str
     repo_mtime: float
-
-
-@dataclasses.dataclass(frozen=True)
-class AuditResult:
-    """Combined audit output.  Three lists, each populated by a separate
-    primitive:
-
-    unresolved          — [(pkg, field, relation_str, why)]
-        from audit_dep_closure(): hard Depends/Pre-Depends that no pkg
-        in repo/ satisfies.  Resolution is whole-repo because apt at
-        install time can pull transitive deps from any tier (pkg, live,
-        installer-debs, pool) — pool deps are NOT a violation.
-
-    live_conflicts      — [(pkg_a, field, other_pkg, relation_str)]
-        from audit_conflict_cohort(live_set): Conflicts/Breaks where
-        BOTH ends are in the live chroot install set (`dep_tree`'s
-        selected_pkgs minus pool_extras minus installer_exclusive).
-
-    installer_conflicts — same shape, cohort = installer ramdisk
-        (udeb_dep_tree.selected_pkgs).  Conflicts only matter when
-        both sides actually unpack into the d-i ramdisk.
-
-    weak                — [(pkg, 'Recommends', relation_str)]
-        unresolved Recommends (informational; soft per Debian Policy).
-    """
-    unresolved: list
-    live_conflicts: list
-    installer_conflicts: list
-    weak: list
 
 
 # Per-process cache.  Key: repo_dir abs path.  Value: (mtime, RepoState).
@@ -940,7 +910,7 @@ def audit_nmu_residue(state: RepoState,
     field) or a relation field name ('Depends', 'Conflicts', ...) when
     a version constraint inside it has NMU residue.
 
-    Used as a verification pass after `repo strip` (and as a
+    Used as a verification pass after `repo repair strip` (and as a
     standing check that the post-build normaliser actually ran).
     Anything reported here means apt sees a non-normalised version
     constraint — install-time risk if the target ships at a stripped

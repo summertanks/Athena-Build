@@ -25,11 +25,9 @@ What this module deliberately does NOT do:
 - Sign Release files.  That's CONF-01 / CONF-02 phase 2's job; lives
   with the indexing flow once it exists.
 - Auto-generate on first call from another module.  Key generation is
-  a security-relevant action; the operator runs ``generate_signing_key``
+  a security-relevant action; the operator runs ``key generate``
   explicitly (or rejects via prompt), and overwriting an existing key
   needs a ``force`` arg.
-- Import an externally-generated key.  Future BYOK ticket if/when an
-  operator wants to bring an existing GPG identity to Athena.
 """
 import logging
 import os
