@@ -433,29 +433,42 @@ def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
         )
 
 
-def _fork_is_pull_adopted(pkg_name: str,
-                          buildconfig: 'utils.BuildConfig') -> bool:
-    """True when a fork source's binaries were ADOPTED via `mirror pull`
-    rather than built locally.
+def _fork_adoption_status(pkg_name: str,
+                          buildconfig: 'utils.BuildConfig') -> str:
+    """Whether a fork source's binaries were ADOPTED via `mirror pull` rather
+    than built locally — returns one of ``'adopted'`` / ``'not-adopted'`` /
+    ``'unknown'``.
 
-    A federation peer pulls the origin's published fork binaries; its
-    fork source tree is a pristine clone that already matches them.  The
-    adopted state is recognised by the source's build record carrying a
-    `pulled_from` annotation with every recorded output present on disk.
-    Such a fork must NOT be invalidated — wiping it would force a
-    needless local rebuild and make the peer take OWNERSHIP of forks it
-    merely adopted.  This is distinct from an orphan stale artifact (no
-    pull record), which SHOULD still be wiped.  Best-effort: any read
-    error answers False (fall through to the safe wipe).
+      adopted     — the build record carries `pulled_from` AND every recorded
+                    output is present on disk (a federation peer that pulled
+                    the origin's published fork binaries; its fork source tree
+                    is a pristine clone that already matches them).  This fork
+                    MUST NOT be wiped — wiping it forces a needless local
+                    rebuild and makes the peer take OWNERSHIP of forks it merely
+                    adopted (a federation violation).
+      not-adopted — no build record FILE at all, OR a readable record with no
+                    `pulled_from` / no outputs / a missing output.  A genuine
+                    orphan stale artifact; SAFE to wipe.
+      unknown     — the build record FILE exists but is unreadable/unverified
+                    (corrupt, partial write, HMAC-fail) so we CANNOT prove the
+                    fork isn't adopted.  The caller must FAIL SAFE and skip the
+                    wipe: `read_build_record` collapses "absent" and
+                    "exists-but-bad" into None, and a transient read failure
+                    must NOT be allowed to wipe an adopted fork.
     """
     try:
         _buildlog = os.path.join(buildconfig.dir_log, 'build')
         _rec = utils.read_build_record(_buildlog, pkg_name)
-        if not _rec or not _rec.get('pulled_from'):
-            return False
+        if _rec is None:
+            # None conflates "file absent" (safe to wipe) with "file present
+            # but unreadable/HMAC-fail" (uncertain) — disambiguate by existence.
+            _path = utils._build_record_path(_buildlog, pkg_name)
+            return 'unknown' if os.path.exists(_path) else 'not-adopted'
+        if not _rec.get('pulled_from'):
+            return 'not-adopted'
         _outputs = _rec.get('outputs') or []
         if not _outputs:
-            return False
+            return 'not-adopted'
         # Search the same dir set the wipe would target (all_deb_dirs) so
         # "is it present" is symmetric with "what would be removed", and
         # udeb routing (debian-installer/) is covered without re-deriving
@@ -464,13 +477,15 @@ def _fork_is_pull_adopted(pkg_name: str,
         for _fn in _outputs:
             if not any(os.path.isfile(os.path.join(_d, str(_fn)))
                        for _d in _deb_dirs):
-                return False
-        return True
+                return 'not-adopted'
+        return 'adopted'
     except Exception as _e:                       # noqa: BLE001
+        # An unexpected error means we can't confirm NOT-adopted → fail safe
+        # (skip the wipe) rather than risk wiping an adopted fork.
         logger.warning(
             f"fork_mirror: pull-adoption check failed for {pkg_name}: "
-            f"{_e}; treating as not-adopted")
-        return False
+            f"{_e}; treating as UNKNOWN (skipping wipe to be safe)")
+        return 'unknown'
 
 
 def _check_and_invalidate_fork_pkg(pkg_dir: str,
@@ -482,7 +497,8 @@ def _check_and_invalidate_fork_pkg(pkg_dir: str,
     EXCEPTION — federation-peer adoption: when there is no stored hash
     but the fork's binaries were adopted via `mirror pull` (pulled_from),
     the tree is pristine-and-in-sync, NOT orphaned; seed the hash and
-    skip the wipe (see `_fork_is_pull_adopted`).
+    skip the wipe (see `_fork_adoption_status`).  An UNREADABLE build record
+    is treated as uncertain (skip wipe, fail safe) rather than orphan.
 
     Returns True if invalidation happened, False if hash matched
     (no-op, cached artifacts still valid) or the fork is pull-adopted.
@@ -517,14 +533,28 @@ def _check_and_invalidate_fork_pkg(pkg_dir: str,
     # the source is pull-adopted, seed the tree-hash (so the tree reads
     # as in-sync) and skip the wipe.  A genuine LOCAL edit later — a
     # non-empty stored hash that differs — still invalidates normally.
-    if not _stored and _fork_is_pull_adopted(_pkg_name, buildconfig):
-        _persist_tree_hash(pkg_dir, buildconfig)
-        logger.info(
-            f"fork_mirror: {_pkg_name} adopted via mirror pull "
-            f"(pulled_from) — seeding tree-hash, preserving adopted "
-            f"binaries (no rebuild, no ownership)"
-        )
-        return False
+    if not _stored:
+        _status = _fork_adoption_status(_pkg_name, buildconfig)
+        if _status == 'adopted':
+            _persist_tree_hash(pkg_dir, buildconfig)
+            logger.info(
+                f"fork_mirror: {_pkg_name} adopted via mirror pull "
+                f"(pulled_from) — seeding tree-hash, preserving adopted "
+                f"binaries (no rebuild, no ownership)"
+            )
+            return False
+        if _status == 'unknown':
+            # Build record exists but is unreadable/unverified — we CANNOT prove
+            # this fork wasn't pull-adopted, and wiping an adopted fork makes the
+            # peer wrongly take ownership.  Fail SAFE: skip the wipe WITHOUT
+            # seeding the tree-hash, so a future run with a readable record
+            # resolves it properly (adopt-and-seed or genuine-orphan-wipe).
+            logger.warning(
+                f"fork_mirror: {_pkg_name} has an UNREADABLE build record — "
+                f"cannot confirm it isn't pull-adopted; SKIPPING wipe to avoid "
+                f"a false federation ownership grab (re-run once readable)"
+            )
+            return False
 
     logger.info(
         f"fork_mirror: tree-hash mismatch for {_pkg_name} "
