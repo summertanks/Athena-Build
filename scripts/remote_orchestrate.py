@@ -132,7 +132,11 @@ def ensure_remote_image(host: str, image_tag: str, *,
         _save.stdout.close()               # let _load receive SIGPIPE on exit
     _load.wait()
     _save.wait()
-    if _load.returncode == 0:
+    # Require BOTH ends: a failed `docker save` (image pruned mid-flight, disk
+    # error) can close the pipe early and still let `docker load` exit 0 on a
+    # truncated stream — reporting 'transferred' for an image not actually on
+    # the remote, so the first remotebuild fails "image not found".
+    if _load.returncode == 0 and _save.returncode == 0:
         return 'transferred'
     log("LAN image transfer failed — the remote will build the image instead")
     return 'build'

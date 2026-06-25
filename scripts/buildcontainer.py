@@ -519,8 +519,6 @@ class BuildContainer:
         operator confronts the privilege-escalation primitive before
         the build container runs anything against it.
         """
-        from urllib.parse import urlparse
-
         _scheme = urlparse(docker_server).scheme.lower()
         _host   = urlparse(docker_server).hostname or ''
         _safe_loopback = _host in ('127.0.0.1', '::1', 'localhost', '')

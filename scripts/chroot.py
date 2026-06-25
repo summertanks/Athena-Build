@@ -1578,7 +1578,7 @@ class _ChrootMixin:
             deb [signed-by=/usr/share/keyrings/athena-archive-keyring.gpg] ...
 
         Skipped silently (with INFO) when no key exists yet — operator
-        can run ``generate_signing_key`` later and re-run build_chroot
+        can run ``key generate`` later and re-run ``chroot build``
         to pick it up.  Wiring an actual sources.list.d entry pointing
         at the Athena repo is deferred to CONF-02 phase 2 / COMP-02
         (publish_repo) since it needs a real URL the booted system
@@ -1589,7 +1589,7 @@ class _ChrootMixin:
         if not os.path.exists(_src):
             logger.info(
                 f"_install_signing_keyring: no keyring at {_src} — "
-                f"run `generate_signing_key` first; chroot continues "
+                f"run `key generate` first; chroot continues "
                 f"without it"
             )
             return

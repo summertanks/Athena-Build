@@ -871,7 +871,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
     def cmd_generate_signing_key(self, *args):
         """Generate the project's signing keypair (one-time setup).
 
-        Usage: generate_signing_key [force]
+        Usage: key generate [force]
 
           force — overwrite an existing key for the same UID. use with caution,
           it invalidates previously signed repos. Prompts for confirmation in either case;
@@ -925,7 +925,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         console.print(f"  Fingerprint : {_info['fingerprint']}")
         console.print(f"  UID         : {_info['uid']}")
         console.print(f"  Public key  : {signing.signing_pubkey_path(self.config)}")
-        console.print("Run `verify_signing_key` to confirm a sign+verify roundtrip")
+        console.print("Run `key verify` to confirm a sign+verify roundtrip")
 
 
     # ------------------------------------Command: verify_signing_key----------------------
@@ -946,7 +946,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         if _info is None:
             console.print(
                 f"No signing key for '{self.config.signing_key_uid}' — "
-                f"run `generate_signing_key` first",
+                f"run `key generate` first",
                 tui.COLOR_WARNING,
             )
             return
@@ -1263,7 +1263,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         _resp = Prompt(
             PROMPT_YESNO,
             "Generate a new signing key for "
-            "'{self.config.signing_key_uid}' now?",
+            f"'{self.config.signing_key_uid}' now?",
             informational=True,   # pre-chroot gate, OK under --yes
         ).get_response()
 
@@ -1805,8 +1805,11 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             "| xargs -r docker rm -f >/dev/null 2>&1; "
             "docker images --filter reference='athenalinux*' -q "
             "| sort -u | xargs -r docker rmi -f")
-        _res = _sp.run(['ssh', '-o', 'BatchMode=yes', _host, _remote_cmd],
-                       capture_output=True, text=True)
+        # Route through _ssh_base so the per-remote key (config/<name>.key, NOT
+        # ~/.ssh) is passed via -i — otherwise BatchMode=yes auth fails for any
+        # remote registered through the guided `container remote add`.
+        _res = _sp.run(_ro._ssh_base(_host, _rs[0].get('ssh_key') or None)
+                       + [_remote_cmd], capture_output=True, text=True)
         if _res.returncode == 0:
             console.print(f"  purged athenalinux images/containers on {_host}",
                           tui.COLOR_HIGHLIGHT)

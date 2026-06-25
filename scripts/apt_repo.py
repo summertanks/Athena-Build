@@ -1,27 +1,15 @@
 """apt-repo metadata generators — Packages, Sources, Release, InRelease.
 
-Lifted verbatim from iso_installer.py.
-See docs/plans/conf-01-repo-layout-migration.md for the full migration
-plan.
+See docs/plans/conf-01-repo-layout-migration.md for the layout migration.
 
-Stage A scope:
-  - pure code motion (no behavioural change)
-  - iso_installer.py imports from here instead of having locals
-  - exposed surface (called from iso_installer.py):
-        generate_apt_repo
-        sign_release_files
-        export_pubkey_to_staging
-  - module-private helpers (underscore prefix):
-        _scan_packages_to, _scan_sources_to, _compress_index,
-        _count_records, _write_subdir_release, _generate_top_release,
-        _sudo
-
-Later stages:
-  - Stage B: add generate_repo_indexes(repo_root, suites_spec, …)
-    multi-suite orchestrator that supersedes the single-suite
-    generate_apt_repo (which stays as the iso-staging helper).
-  - Stage E: helpers that PARSE indexes (e.g. iter_packages_records())
-    so audits can read the Packages file instead of walking the fs.
+Exposed surface:
+  - generate_repo_indexes(repo_root, suites_spec, …) — the multi-suite
+    orchestrator (called from cmd_repo / mirror publish); the canonical
+    index builder for the published repo.
+  - generate_apt_repo / sign_release_files / export_pubkey_to_staging —
+    the single-suite ISO-staging helpers (called from iso_installer.py).
+  - module-private: _scan_packages_to, _scan_sources_to, _compress_index,
+    _count_records, _write_subdir_release, _generate_top_release, _sudo.
 """
 
 import logging

@@ -2215,7 +2215,7 @@ class MirrorCommandsMixin(SessionState):
             return ''
         _oldest: 'Optional[str]' = None
         for _bid, _claims in _by_builder.items():
-            # / LEDGER-01: fold supersession back-refs so the base
+            # Fold supersession back-refs so the base
             # advances past retracted/deprecated/obsoleted (and reclaimed)
             # snapshots — only LIVE claims pin the oldest snapshot floor.
             _dead = _schema.superseded_seqs(_claims)
@@ -3280,7 +3280,11 @@ class MirrorCommandsMixin(SessionState):
             PROMPT_YESNO,
             f"Revoke builder '{_target_id}' across the federation? Its "
             "claims drop and its packages become no-owner.").get_response()
-        if not _resp:
+        # YESNO get_response() returns 'y'/'n'/'yes'/'no' — ALL truthy, so a
+        # bare `not _resp` only catches a missing TUI backend; answering "n"
+        # would fall straight through to the (irreversible) revoke.  Decline on
+        # anything that isn't an explicit yes (matches every other YESNO site).
+        if _resp.lower() not in ('y', 'yes'):
             console.print("decommission: cancelled.")
             return False
         _names = [args[1]] if len(args) > 1 else _mirror.list_mirrors(self.config)

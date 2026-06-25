@@ -524,7 +524,6 @@ def _rewrite_sibling_idiom_in_text(content: str,
     Returns (new_content, pairs_rewritten_count).  Idempotent: re-running
     on already-rewritten content returns count=0.
     """
-    from debian.deb822 import PkgRelation
     _pairs_total = 0
     _new_lines: 'list[str]' = []
     _lines = content.splitlines(keepends=True)

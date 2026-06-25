@@ -1026,7 +1026,7 @@ def project_post_publish_state(local_state, remote_by_builder: dict):
             # name.  A source emits N binaries → N claims, each with its own
             # filename — derive the binary name from filename (name_ver_arch
             # .(u)deb), the same rsplit('_', 2)[0] parse detect_hash_conflicts
-            # / emit_obsolescence_claims use.  Keying by the source name made
+            # / emit_supersession_obsolescence use.  Keying by the source name made
             # remote-only binaries unfindable (false closure breaks) and let a
             # dep on a name that happened to equal a source name resolve wrong.
             _fn = str(_c.get('filename') or '')

@@ -794,7 +794,6 @@ BUILD_RECORD_SUFFIX = '.build.json'
 # fields) and resolved by roll_prior_build_history at build completion —
 # version superseded → 'obsolete' history roll; same-version rebuild →
 # stash dropped.  Lingers only across an unfinished rebuild.
-_BUILD_RECORD_LEGACY_VERSIONS = frozenset({1, 2, 3})
 _BUILD_RECORD_HMAC_KEY_BASENAME = '.metrics.hmac.key'
 
 # Phase state machine.  Linear progression on the happy path:
@@ -2160,6 +2159,13 @@ def copy_ssh_key(src: str, dst: str) -> bool:
         os.chmod(dst, 0o600)
         return True
     except OSError:
+        # If copyfile succeeded but chmod failed, the key is on disk with the
+        # default (world-readable) umask — remove it so a failed copy never
+        # leaves an exposed private key behind.
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
         return False
 
 
@@ -2200,6 +2206,18 @@ def list_remotes(config: 'BuildConfig') -> 'list[dict]':
     max_parallel_builds, build_cpus, build_memory, local_mirror}.  Declaration
     order."""
     _parser = read_remote_conf(config)
+
+    def _typed(getter: Callable, section: str, key: str, fb: Any) -> Any:
+        # A malformed numeric/boolean (e.g. `MaxParallelBuilds = abc`) in this
+        # UNTRACKED machine-local file raises a bare ValueError — which is NOT
+        # caught by BuildConfig.__init__'s `except (configparser.Error, OSError)`
+        # and would brick EVERY CLI command with a traceback.  Fall back to the
+        # default instead.
+        try:
+            return getter(section, key, fallback=fb)
+        except ValueError:
+            return fb
+
     _out: 'list[dict]' = []
     for _section in _parser.sections():
         if not _section.startswith(_REMOTE_SECTION_PREFIX):
@@ -2210,17 +2228,17 @@ def list_remotes(config: 'BuildConfig') -> 'list[dict]':
             'host':                _parser.get(_section, 'Host', fallback=''),
             'type':                _parser.get(_section, 'Type', fallback='ssh'),
             'ssh_key':             _parser.get(_section, 'SshKey', fallback=''),
-            'max_parallel_builds': _parser.getint(
-                _section, 'MaxParallelBuilds', fallback=1),
-            'build_cpus':          _parser.getfloat(
-                _section, 'BuildCpus', fallback=0.0),
+            'max_parallel_builds': _typed(
+                _parser.getint, _section, 'MaxParallelBuilds', 1),
+            'build_cpus':          _typed(
+                _parser.getfloat, _section, 'BuildCpus', 0.0),
             'build_memory':        _parser.get(
                 _section, 'BuildMemory', fallback=''),
             # Per-remote build-mirror toggle (RMIRROR-01) — whether `container
             # remote init` stages a snapshot-pinned build-closure apt mirror ON
             # this remote.  Defaults off; set at `container remote add`.
-            'local_mirror':        _parser.getboolean(
-                _section, 'LocalMirror', fallback=False),
+            'local_mirror':        _typed(
+                _parser.getboolean, _section, 'LocalMirror', False),
         })
     return _out
 
@@ -3691,22 +3709,6 @@ def download_source(dependency_tree: 'dependencytree.DependencyTree',
 
     tui.console.print(f"Downloading {_total - _skipped} files, Skipped {_skipped} files")
     return _downloaded_size
-
-
-def search(re_string: str, base_string: str) -> str:
-    """
-    Internal function to simplify re.search() execution
-    Args:
-        re_string: the regex to execute
-        base_string: the content on which it is to be executed
-
-    Returns:
-        str: Match group, empty string on no match
-    """
-    _match = re.search(re_string, base_string)
-    if _match is not None:
-        return _match.group(1)
-    return ''
 
 
 def get_md5(filepath: str) -> str:
