@@ -37122,6 +37122,88 @@ def test_selection_lock_restore_seeds_raw_byte_faithful():
             'desktop': ['xterm'], 'base': ['coreutils', 'dpkg']}
 
 
+def _or_resolve_xterm_graph():
+    """The documented SELECT-02 repro as a synthetic graph: xorg Depends
+    `xterm | x-terminal-emulator`; gnome-terminal Provides
+    x-terminal-emulator; xterm drags in libutempter0."""
+    deps = {
+        'xorg': [('xterm', 'x-terminal-emulator')],
+        'xterm': ['libutempter0'],
+        'gnome-terminal': [],
+        'libutempter0': [],
+    }
+    provides = {'gnome-terminal': ['x-terminal-emulator']}
+    return deps, provides
+
+
+def test_or_resolve_greedy_diverges_fixpoint_does_not():
+    """SELECT-02: the greedy (live-resolver) model gives DIFFERENT closures
+    for the two seed orderings, while the order-independent fixpoint gives
+    the same closure (matching the minimal, no-xterm result)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import or_resolve as _or
+    deps, provides = _or_resolve_xterm_graph()
+
+    # Greedy: order decides whether xterm (+ libutempter0) is pulled.
+    _g1 = _or.resolve_closure_greedy(['xorg', 'gnome-terminal'], deps, provides=provides)
+    _g2 = _or.resolve_closure_greedy(['gnome-terminal', 'xorg'], deps, provides=provides)
+    assert 'xterm' in _g1 and 'libutempter0' in _g1, _g1
+    assert 'xterm' not in _g2 and 'libutempter0' not in _g2, _g2
+    assert _g1 != _g2, "expected the greedy model to be order-sensitive"
+
+    # Fixpoint: identical for either ordering; x-terminal-emulator is
+    # satisfied by gnome-terminal's Provides, so xterm is never pulled.
+    _f1 = _or.resolve_closure(['xorg', 'gnome-terminal'], deps, provides=provides)
+    _f2 = _or.resolve_closure(['gnome-terminal', 'xorg'], deps, provides=provides)
+    assert _f1 == _f2 == {'xorg', 'gnome-terminal'}, (_f1, _f2)
+    assert 'xterm' not in _f1
+
+
+def test_or_resolve_fixpoint_invariant_over_all_permutations():
+    """The fixpoint closure is a pure function of the seed SET — identical
+    across EVERY seed ordering — whereas the greedy model produces more than
+    one distinct closure over those same orderings."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import or_resolve as _or
+    import itertools
+    deps, provides = _or_resolve_xterm_graph()
+    _seeds = ['xorg', 'gnome-terminal']
+
+    _fix = {frozenset(_or.resolve_closure(_p, deps, provides=provides))
+            for _p in itertools.permutations(_seeds)}
+    _greedy = {frozenset(_or.resolve_closure_greedy(list(_p), deps, provides=provides))
+               for _p in itertools.permutations(_seeds)}
+    assert len(_fix) == 1, f"fixpoint must be order-invariant, got {_fix}"
+    assert len(_greedy) >= 2, f"greedy expected to diverge, got {_greedy}"
+
+
+def test_or_resolve_first_alt_when_no_alternative_satisfied():
+    """With no satisfying alternative present, the fixpoint pulls the FIRST
+    declared alternative (Debian convention) plus its hard deps."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import or_resolve as _or
+    deps, provides = _or_resolve_xterm_graph()
+    # Only xorg seeded — nothing Provides x-terminal-emulator in the closure.
+    _c = _or.resolve_closure(['xorg'], deps, provides=provides)
+    assert _c == {'xorg', 'xterm', 'libutempter0'}, _c
+
+
+def test_or_resolve_canonical_tiebreak_is_seed_order_free():
+    """Two mirror-image OR groups (a|b and b|a) with no provider: the
+    fixpoint always resolves the canonically-smallest group's first
+    alternative ('a'), regardless of seed order — the greedy model would
+    pick 'a' or 'b' depending on which seed is visited first."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import or_resolve as _or
+    deps = {'p': [('a', 'b')], 'q': [('b', 'a')], 'a': [], 'b': []}
+    assert _or.resolve_closure(['p', 'q'], deps) == {'p', 'q', 'a'}
+    assert _or.resolve_closure(['q', 'p'], deps) == {'p', 'q', 'a'}
+    # greedy diverges: visiting p first pulls 'a', visiting q first pulls 'b'.
+    _ga = _or.resolve_closure_greedy(['p', 'q'], deps)
+    _gb = _or.resolve_closure_greedy(['q', 'p'], deps)
+    assert _ga == {'p', 'q', 'a'} and _gb == {'p', 'q', 'b'}, (_ga, _gb)
+
+
 def test_claim_schema_deprecated_state_and_new_deprecation():
     """SELECT-LOCK Chunk 7: 'deprecated' is a valid + inactive claim state;
     new_deprecation keeps the file identity (unlike a tombstone) + records
@@ -40084,6 +40166,10 @@ def main() -> int:
         # SELECT-LOCK Chunk 5 — cache restore / purge-state
         test_selection_lock_restore_roundtrips_lists_with_meta,
         test_selection_lock_restore_seeds_raw_byte_faithful,
+        test_or_resolve_greedy_diverges_fixpoint_does_not,
+        test_or_resolve_fixpoint_invariant_over_all_permutations,
+        test_or_resolve_first_alt_when_no_alternative_satisfied,
+        test_or_resolve_canonical_tiebreak_is_seed_order_free,
         # SELECT-LOCK Chunk 7 — mirror deprecated claim state
         test_claim_schema_deprecated_state_and_new_deprecation,
         test_claim_from_jsonl_accepts_deprecated_and_v1_lines,
