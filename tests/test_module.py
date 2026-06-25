@@ -9943,6 +9943,21 @@ def test_cmd_package_cleanup_registered_in_repo_dispatcher():
     assert 'def cmd_package_cleanup(' in _body
 
 
+def test_cmd_package_cleanup_reindexes_after_deletion():
+    """After pruning .debs, cleanup regenerates the index (cmd_index_repo) so the
+    on-disk Packages/Release no longer name deleted files — gated on an actual
+    deletion."""
+    import re
+    _body = _session_source()
+    _m = re.search(r'def cmd_package_cleanup\(self.*?(?=\n    def \w)',
+                   _body, re.DOTALL)
+    assert _m, "cmd_package_cleanup not found"
+    _b = _m.group(0)
+    assert 'self.cmd_index_repo()' in _b, (
+        "cleanup must reindex (cmd_index_repo) after pruning")
+    assert 'if _deleted > 0:' in _b, "reindex must be gated on an actual delete"
+
+
 def test_cmd_package_cleanup_dry_run_default_force_flag_required():
     """`repo cleanup` without `force` must NOT delete any files —
     it's a dry-run by default.  Operator opt-in for the destructive
@@ -39250,6 +39265,7 @@ def main() -> int:
         test_cmd_audit_nmu_residue_absorbed_into_cmd_audit,
         test_cmd_strip_repo_registered_in_repo_dispatcher,
         test_cmd_package_cleanup_registered_in_repo_dispatcher,
+        test_cmd_package_cleanup_reindexes_after_deletion,
         test_cmd_package_cleanup_dry_run_default_force_flag_required,
         test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source,
         test_scan_stale_files_covers_main_udeb_and_recovers_malformed,
