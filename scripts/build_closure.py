@@ -6,8 +6,9 @@ source, resolved transitively over the package universe — so the toolchain
 that builds the distro is itself built from and served by our own mirror:
 reproducible builds with no reach-out to snapshot.debian.org.
 
-The added set is segregated into three tiers so it can be built in stages,
-toolchain first:
+The cache-parse path then partitions the expanded closure into three tiers
+(via ``classify_tiers`` — the single tiering path) so it can be built in
+stages, toolchain first:
 
   ``toolchain``  the install closure of ``build-essential`` + ``dpkg-dev`` —
                  the universal base every ``dpkg-buildpackage`` needs (gcc/g++,
@@ -159,9 +160,10 @@ def compute_build_closure(
     src_build_depends: 'Dict[str, str]',
     bin_index: 'Dict[str, dict]',
     provides_index: 'Dict[str, list]',
-    runtime_closure: 'Optional[Iterable[str]]' = None,
 ) -> 'Dict[str, object]':
-    """Compute the tiered build closure.
+    """Compute the full build closure: the transitive install closure (over
+    hard Depends + Pre-Depends edges) of every selected source's Build-Depends,
+    plus the universal toolchain base (build-essential + dpkg-dev).
 
     Args:
       selected_srcs:     source names whose Build-Depends seed the closure.
@@ -169,18 +171,16 @@ def compute_build_closure(
                          Build-Depends-Indep + Build-Depends-Arch, joined).
       bin_index:         {bin_name: {'Depends':.., 'Pre-Depends':..}} universe.
       provides_index:    {virtual_name: [provider_name, ...]}.
-      runtime_closure:   optional set of binaries already shipped — used only
-                         to report the NEW additions (``added``), not to limit
-                         the closure itself.
 
     Returns a dict:
-      'toolchain' / 'language' / 'leaf' : disjoint Set[str] partition of 'all'
-      'all'                              : Set[str] full build closure
-      'added'                            : Set[str] = all - runtime_closure
-      'unsatisfiable'                    : List[(src, group_str)] dropped groups
-    """
-    _runtime: 'Set[str]' = set(runtime_closure or ())
+      'all'           : Set[str] full build closure (toolchain base included).
+      'unsatisfiable' : List[(src, group_str)] Build-Depends groups dropped
+                        because nothing in the universe satisfies them.
 
+    Tier segregation (toolchain / language / leaf) is NOT done here — the
+    cache-parse path expands the closure through the dep-tree resolver and
+    partitions the result with ``classify_tiers``, the single tiering path.
+    """
     # 1. direct build-dep binaries across every selected source
     _direct: 'Set[str]' = set()
     _unsat: 'List[tuple]' = []
@@ -198,17 +198,4 @@ def compute_build_closure(
     _all = _install_expand(_direct | set(TOOLCHAIN_SEEDS),
                            bin_index, provides_index)
 
-    # 3. tier partition (toolchain ⊂ language-seed-closure ⊂ all)
-    _toolchain = _install_expand(TOOLCHAIN_SEEDS, bin_index, provides_index) & _all
-    _language = (_install_expand(LANGUAGE_SEEDS, bin_index, provides_index)
-                 & _all) - _toolchain
-    _leaf = _all - _toolchain - _language
-
-    return {
-        'toolchain': _toolchain,
-        'language': _language,
-        'leaf': _leaf,
-        'all': _all,
-        'added': _all - _runtime,
-        'unsatisfiable': _unsat,
-    }
+    return {'all': _all, 'unsatisfiable': _unsat}
