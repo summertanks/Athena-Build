@@ -37801,6 +37801,54 @@ def test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent():
         built_at='now', start_seq=0) == []
 
 
+def test_emit_supersession_obsolescence_retires_own_when_peer_supersedes():
+    """Pull-side LEDGER-01: when a PEER owns a NEWER version of a binary we still
+    publish an OLDER version of, emit_supersession_obsolescence retires OUR old
+    claim (so `repo repair cleanup` prunes it without a republish).  No successor
+    present → nothing (publish-before-prune); peer owns both → we touch nothing;
+    idempotent."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import publish as _pub
+    from coord import schema as _sch
+
+    def _claim(builder, seq, ver, fn):
+        return _sch.new_claim(
+            builder=builder, seq=seq, package='poppler', intended_version='1',
+            built_version=ver, filename=fn, sha256='aa', size=1,
+            snapshot='s', built_at='t', claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _u1 = 'libpoppler126_22.12.0-2+asg1u1_amd64.deb'
+    _u2 = 'libpoppler126_22.12.0-2+asg1u2_amd64.deb'
+    _by = {'athena-primary': [_claim('athena-primary', 2639,
+                                     '22.12.0-2+asg1u1', _u1)],
+           'BS2': [_claim('BS2', 10, '22.12.0-2+asg1u2', _u2)]}
+    _obs = _pub.emit_supersession_obsolescence(
+        builder_id='athena-primary', by_builder=_by, snapshot_pin='s',
+        built_at='t', start_seq=5000)
+    assert len(_obs) == 1, _obs
+    assert _obs[0]['filename'] == _u1
+    assert _obs[0]['claim_state'] == _sch.CLAIM_STATE_OBSOLETE
+    assert _obs[0]['obsoletes_seq'] == 2639
+    assert _obs[0]['builder'] == 'athena-primary'
+    # idempotent: fold the obsolescence back → no re-emit
+    _obs[0]['sig'] = 'x'
+    _by['athena-primary'].append(_obs[0])
+    assert _pub.emit_supersession_obsolescence(
+        builder_id='athena-primary', by_builder=_by, snapshot_pin='s',
+        built_at='t', start_seq=5001) == []
+    # no successor present (only our u1) → nothing (publish-before-prune)
+    _only = {'athena-primary': [_claim('athena-primary', 1,
+                                       '22.12.0-2+asg1u1', _u1)]}
+    assert _pub.emit_supersession_obsolescence(
+        builder_id='athena-primary', by_builder=_only, snapshot_pin='s',
+        built_at='t', start_seq=1) == []
+    # peer owns BOTH versions → we own nothing → retire nothing
+    _peer = {'BS2': [_claim('BS2', 1, '22.12.0-2+asg1u1', _u1),
+                     _claim('BS2', 2, '22.12.0-2+asg1u2', _u2)]}
+    assert _pub.emit_supersession_obsolescence(
+        builder_id='athena-primary', by_builder=_peer, snapshot_pin='s',
+        built_at='t', start_seq=1) == []
+
+
 def test_remote_publish_on_published_only_on_full_success():
     """on_published fires with the published package set ONLY after pool +
     jsonl + coord-head pushes ALL succeed; any failure path skips it."""
@@ -39680,6 +39728,7 @@ def main() -> int:
         test_obsolete_cascade_audits_skip_and_no_findings,
         # LEDGER-01 Chunk 6 — publish Step 6c + on_published
         test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent,
+        test_emit_supersession_obsolescence_retires_own_when_peer_supersedes,
         test_remote_publish_on_published_only_on_full_success,
         # LEDGER-01 Chunk 7 — coherence audit pending refinement
         test_coherence_audit_pending_deprecation_vs_untracked_drop,
