@@ -685,7 +685,7 @@ class SourceCommandsMixin(SessionState):
                 return True                   # this file's current-gen bump missing
         return False
 
-    def _do_update_build(self):
+    def _do_update_build(self, remote: bool = False):
         """Rebuild the published→current source delta (+asg<R>u<N>-stamped,
         per-file N from the published manifest) AND build any OTHER selected
         source that needs building — forks etc. that aren't part of the upstream
@@ -706,9 +706,10 @@ class SourceCommandsMixin(SessionState):
         _floor = self._mirror_floor()
         _current = self._snapshot_current()
         console.print(
-            f"source build: UPDATE mode — floor {_floor or '(none)'} → current "
-            f"{_current}; rebuilding the changed source delta (+asg-stamped, "
-            f"per-file N) plus any other source needing a build.",
+            f"source build: UPDATE mode{' (remote)' if remote else ''} — floor "
+            f"{_floor or '(none)'} → current {_current}; rebuilding the changed "
+            f"source delta (+asg-stamped on recovery, per-file N) plus any other "
+            f"source needing a build.",
             tui.COLOR_HIGHLIGHT)
         _workload, _err = self._workload_since_snapshot(_floor)
         if _err:
@@ -730,10 +731,11 @@ class SourceCommandsMixin(SessionState):
                     str(self.config.build_version).strip('"').strip("'"))
             except (TypeError, ValueError):
                 pass
+            assert self.dep_tree is not None
             _srcs = dict(self.dep_tree.selected_srcs)
             if self.udeb_dep_tree is not None:
-                for _n, _s in self.udeb_dep_tree.selected_srcs.items():
-                    _srcs.setdefault(_n, _s)
+                for _n, _us in self.udeb_dep_tree.selected_srcs.items():
+                    _srcs.setdefault(_n, _us)
             _wset = set(_workload)
 
             # (1) the snapshot delta: respins rebuilt+stamped, current ones
@@ -790,11 +792,18 @@ class SourceCommandsMixin(SessionState):
             # rebuilds bump-targets) plus the extra needs_build sources.  Ledger
             # loaded → delta respins get +asg-stamped; forks build pristine.
             # _in_update_build=True enables _bump_active inside cmd_source_build
-            # — the bump-target predicate (same-base re-spin → exact
-            # `+asg<R>u<N>` missing) only makes sense in this workflow.
+            # / cmd_source_remotebuild — the bump-target predicate (same-base
+            # re-spin → exact `+asg<R>u<N>` missing) only makes sense in this
+            # workflow.  Dispatch to the remote fan-out when remote=True; the
+            # explicit workload names mean the inner call's _resolve_build_workload
+            # won't re-detect update mode (so no recursion), and the +asg stamp
+            # is applied locally on recovery either way.
             self._in_update_build = True
             try:
-                self.cmd_source_build(*(list(_workload) + _extra))
+                if remote:
+                    self.cmd_source_remotebuild(*(list(_workload) + _extra))
+                else:
+                    self.cmd_source_build(*(list(_workload) + _extra))
             finally:
                 self._in_update_build = False
         finally:
@@ -1707,19 +1716,32 @@ class SourceCommandsMixin(SessionState):
                 tui.COLOR_ERROR)
             return
 
-        # Shared front-half with `source build` (remote=True → update-mode off).
+        # Shared front-half with `source build` — same args, same update-mode
+        # auto-detection.  A pending update delta routes through _do_update_build
+        # (remote=True), which fans the delta out to the remotes and stamps the
+        # recovered .debs locally; the explicit-names recursion guard prevents
+        # re-entry.
         _status, _wl = self._resolve_build_workload(args, remote=True)
         if _status == 'error':
             return
+        if _status == 'update':
+            return self._do_update_build(remote=True)
         assert _wl is not None
         self._remotebuild_fanout(
-            _wl['packages'], _remotes, _wl['profile_override'], _wl['force'])
+            _wl['packages'], _remotes, _wl['profile_override'], _wl['force'],
+            _wl['bump_active'], _wl['bump_release'])
 
     def _remotebuild_one_source(self, _src, _slot, _profile_override, _force,
-                                register_proc=None) -> 'tuple[str, int]':
+                                register_proc=None, bump_active=False,
+                                bump_release=None) -> 'tuple[str, int]':
         """Build ONE source on the remote `_slot` (a dict with ssh_host/ssh_key/
         build_cpus/build_memory) and run the local post-build pipeline.  Returns
         ('built'|'skipped'|'failed'|'transport', 0).
+
+        `bump_active`/`bump_release` carry the LOCALLY-computed update-mode
+        decision (set when reached via `_do_update_build(remote=True)`).  The
+        remote runs no bump logic — it builds pristine bytes; the +asg stamp is
+        applied here on recovery by `_normalize_built_artifacts`.
 
         Thread-safety: per-call scratch + bundle dirs; build records are
         per-package atomic writes; repo dest writes are serialized by
@@ -1735,9 +1757,20 @@ class SourceCommandsMixin(SessionState):
         assert self.container is not None
 
         # Skip-if-built (unless force) — mirror _build_one_source's gate so
-        # `remotebuild all` doesn't rebuild the whole corpus every run.
+        # `remotebuild all` doesn't rebuild the whole corpus every run.  The
+        # `not _bump_target` exception is load-bearing (CONS-10): a same-base
+        # update re-spin's colliding prior-generation file satisfies
+        # check_build, so without it an unforced `remotebuild` would SKIP the
+        # re-spin and the update would never build or ship.  The decision is
+        # computed locally by _needs_bump_build; the remote needs none of it.
         _expected = self._predicted_files_for_source(_src.package)
-        if not _force and self.container.check_build(_src, _expected):
+        _bump_target = (
+            bump_active and bump_release is not None
+            and self._needs_bump_build(
+                _src.package, _src, self.container.asg_ledger or {},
+                bump_release))
+        if (not _force and not _bump_target
+                and self.container.check_build(_src, _expected)):
             logger.info(f"Package {_src.package} already built [SKIPPED]")
             return ('skipped', 0)
 
@@ -1825,6 +1858,17 @@ class SourceCommandsMixin(SessionState):
             _src, _emitted, bool(_recipe['patch_list']))
         if not _final:
             _final = list(_emitted)
+        # Loop guard (mirrors _build_one_source): a bump-target must come out
+        # stamped.  If its +asg uN is still missing, the predicate and the
+        # post-build stamper disagreed — surface it rather than silently
+        # shipping the re-spin unstamped.
+        if _bump_target and self._needs_bump_build(
+                _src.package, _src, self.container.asg_ledger or {},
+                bump_release):
+            logger.warning(
+                f"asg-bump: {_src.package} built on remote but its +asg uN "
+                f"artifact is still absent — bump predicate/stamper mismatch; "
+                f"shipped unstamped this generation")
         _hashes = {}
         for _p in _final:
             _h = utils.get_sha256(_p, use_cache=False)
@@ -1841,7 +1885,8 @@ class SourceCommandsMixin(SessionState):
             f"remotebuild {_src.package} [PASS] — {len(_final)} artifact(s)")
         return ('built', 0)
 
-    def _remotebuild_fanout(self, packages, remotes, profile_override, force):
+    def _remotebuild_fanout(self, packages, remotes, profile_override, force,
+                            bump_active=False, bump_release=None):
         """Distribute `packages` across `remotes` concurrently — each remote
         runs up to its own MaxParallelBuilds — via _remotebuild_one_source.
         Tunneled packages are acquired locally + serial.  A global
@@ -1883,8 +1928,8 @@ class SourceCommandsMixin(SessionState):
         # `source build` uses.
         for _p in _tunnel_pkgs:
             progress_bar.label(_p.package)
-            _res, _ = self._build_one_source(_p, force, False, None,
-                                             profile_override)
+            _res, _ = self._build_one_source(_p, force, bump_active,
+                                             bump_release, profile_override)
             if _res == 'tunneled':
                 _tunneled += 1
             elif _res == 'failed':
@@ -1922,7 +1967,8 @@ class SourceCommandsMixin(SessionState):
         def _worker(_src, _slot):
             return self._remotebuild_one_source(
                 _src, _slot, profile_override, force,
-                register_proc=_register_proc)
+                register_proc=_register_proc,
+                bump_active=bump_active, bump_release=bump_release)
 
         def _heavy_active():
             return any(_s.package in _heavy for _s, _ in _in_flight.values())
@@ -2038,8 +2084,8 @@ class SourceCommandsMixin(SessionState):
 
         Returns one of:
           ('error', None)   — a message was printed; the caller should return.
-          ('update', None)  — the caller should `return self._do_update_build()`
-                              (never returned when ``remote=True``).
+          ('update', None)  — the caller should `return self._do_update_build(
+                              remote=<remote>)`.
           ('ok', workload)  — ``workload`` is a dict with keys ``packages``,
                               ``force``, ``bump_active``, ``bump_release``,
                               ``profile_override``, ``subset``.
@@ -2070,10 +2116,13 @@ class SourceCommandsMixin(SessionState):
             self.container.asg_ledger = repo_audit.published_ledger(
                 self.config)
 
-        # A subset/all/bare invocation AUTO-DETECTS update mode (LOCAL builds
-        # only — remote update builds are out of scope in v1).  Explicit names
-        # or a [profile] override opt out.
-        if (not remote and not _names and _profile_override is None
+        # A subset/all/bare invocation AUTO-DETECTS update mode — for LOCAL and
+        # REMOTE builds alike.  The bump is decided here on the build system and
+        # the +asg stamp is applied locally on artifact recovery
+        # (_normalize_built_artifacts), so a remote update build needs no
+        # remote-side bump logic; the remote only ever builds pristine bytes.
+        # Explicit names or a [profile] override opt out.
+        if (not _names and _profile_override is None
                 and self._update_build_pending()):
             return ('update', None)
 

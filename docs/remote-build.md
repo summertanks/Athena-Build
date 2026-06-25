@@ -92,8 +92,11 @@ falls back to the legacy single `[Build] RemoteBuildHost`.
 **Tunneled packages are acquired LOCALLY** (they are network-bound + repo-
 locked) and never ship to a remote. The local `source build` path is untouched.
 
-> Update-mode (`+asg` delta) builds are local-only today — `source remotebuild`
-> does not yet carry the update path. See `CONS-10` in `TODO.md`.
+> Update-mode (`+asg` delta) builds work on the remote path too: a bare/subset/
+> `all` invocation with a pending delta routes through the same update workflow,
+> the remotes build the changed sources, and the `+asg<R>u<N>` stamp is applied
+> locally on recovery. No bump logic runs on the remote — the decision is
+> computed on the build system and passed through (CONS-10).
 
 ---
 
