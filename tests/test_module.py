@@ -9943,6 +9943,21 @@ def test_cmd_package_cleanup_registered_in_repo_dispatcher():
     assert 'def cmd_package_cleanup(' in _body
 
 
+def test_cmd_package_cleanup_reindexes_after_deletion():
+    """After pruning .debs, cleanup regenerates the index (cmd_index_repo) so the
+    on-disk Packages/Release no longer name deleted files — gated on an actual
+    deletion."""
+    import re
+    _body = _session_source()
+    _m = re.search(r'def cmd_package_cleanup\(self.*?(?=\n    def \w)',
+                   _body, re.DOTALL)
+    assert _m, "cmd_package_cleanup not found"
+    _b = _m.group(0)
+    assert 'self.cmd_index_repo()' in _b, (
+        "cleanup must reindex (cmd_index_repo) after pruning")
+    assert 'if _deleted > 0:' in _b, "reindex must be gated on an actual delete"
+
+
 def test_cmd_package_cleanup_dry_run_default_force_flag_required():
     """`repo cleanup` without `force` must NOT delete any files —
     it's a dry-run by default.  Operator opt-in for the destructive
@@ -37801,6 +37816,54 @@ def test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent():
         built_at='now', start_seq=0) == []
 
 
+def test_emit_supersession_obsolescence_retires_own_when_peer_supersedes():
+    """Pull-side LEDGER-01: when a PEER owns a NEWER version of a binary we still
+    publish an OLDER version of, emit_supersession_obsolescence retires OUR old
+    claim (so `repo repair cleanup` prunes it without a republish).  No successor
+    present → nothing (publish-before-prune); peer owns both → we touch nothing;
+    idempotent."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import publish as _pub
+    from coord import schema as _sch
+
+    def _claim(builder, seq, ver, fn):
+        return _sch.new_claim(
+            builder=builder, seq=seq, package='poppler', intended_version='1',
+            built_version=ver, filename=fn, sha256='aa', size=1,
+            snapshot='s', built_at='t', claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _u1 = 'libpoppler126_22.12.0-2+asg1u1_amd64.deb'
+    _u2 = 'libpoppler126_22.12.0-2+asg1u2_amd64.deb'
+    _by = {'athena-primary': [_claim('athena-primary', 2639,
+                                     '22.12.0-2+asg1u1', _u1)],
+           'BS2': [_claim('BS2', 10, '22.12.0-2+asg1u2', _u2)]}
+    _obs = _pub.emit_supersession_obsolescence(
+        builder_id='athena-primary', by_builder=_by, snapshot_pin='s',
+        built_at='t', start_seq=5000)
+    assert len(_obs) == 1, _obs
+    assert _obs[0]['filename'] == _u1
+    assert _obs[0]['claim_state'] == _sch.CLAIM_STATE_OBSOLETE
+    assert _obs[0]['obsoletes_seq'] == 2639
+    assert _obs[0]['builder'] == 'athena-primary'
+    # idempotent: fold the obsolescence back → no re-emit
+    _obs[0]['sig'] = 'x'
+    _by['athena-primary'].append(_obs[0])
+    assert _pub.emit_supersession_obsolescence(
+        builder_id='athena-primary', by_builder=_by, snapshot_pin='s',
+        built_at='t', start_seq=5001) == []
+    # no successor present (only our u1) → nothing (publish-before-prune)
+    _only = {'athena-primary': [_claim('athena-primary', 1,
+                                       '22.12.0-2+asg1u1', _u1)]}
+    assert _pub.emit_supersession_obsolescence(
+        builder_id='athena-primary', by_builder=_only, snapshot_pin='s',
+        built_at='t', start_seq=1) == []
+    # peer owns BOTH versions → we own nothing → retire nothing
+    _peer = {'BS2': [_claim('BS2', 1, '22.12.0-2+asg1u1', _u1),
+                     _claim('BS2', 2, '22.12.0-2+asg1u2', _u2)]}
+    assert _pub.emit_supersession_obsolescence(
+        builder_id='athena-primary', by_builder=_peer, snapshot_pin='s',
+        built_at='t', start_seq=1) == []
+
+
 def test_remote_publish_on_published_only_on_full_success():
     """on_published fires with the published package set ONLY after pool +
     jsonl + coord-head pushes ALL succeed; any failure path skips it."""
@@ -39202,6 +39265,7 @@ def main() -> int:
         test_cmd_audit_nmu_residue_absorbed_into_cmd_audit,
         test_cmd_strip_repo_registered_in_repo_dispatcher,
         test_cmd_package_cleanup_registered_in_repo_dispatcher,
+        test_cmd_package_cleanup_reindexes_after_deletion,
         test_cmd_package_cleanup_dry_run_default_force_flag_required,
         test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source,
         test_scan_stale_files_covers_main_udeb_and_recovers_malformed,
@@ -39680,6 +39744,7 @@ def main() -> int:
         test_obsolete_cascade_audits_skip_and_no_findings,
         # LEDGER-01 Chunk 6 — publish Step 6c + on_published
         test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent,
+        test_emit_supersession_obsolescence_retires_own_when_peer_supersedes,
         test_remote_publish_on_published_only_on_full_success,
         # LEDGER-01 Chunk 7 — coherence audit pending refinement
         test_coherence_audit_pending_deprecation_vs_untracked_drop,

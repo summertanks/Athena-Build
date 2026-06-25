@@ -1072,10 +1072,28 @@ class RepoCommandsMixin(SessionState):
         repo_audit.invalidate_cache()
 
         console.print(
-            f"\nCleanup complete: {_deleted} deleted, "
-            f"{_delete_failed} failed.  "
-            f"Run `repo audit` to confirm constraints still resolve."
+            f"\nCleanup complete: {_deleted} deleted, {_delete_failed} failed."
         )
+        # Pruning .debs leaves the published index (Packages/Release) naming
+        # files that no longer exist — regenerate it IN-PLACE so the on-disk
+        # index matches the pruned repo.  Best-effort: a reindex failure (no
+        # sudo / signing unavailable) doesn't undo the prune; the operator can
+        # re-index via the next `mirror publish` / chroot build.
+        if _deleted > 0:
+            console.print("Reindexing repo to match the pruned state…",
+                          tui.COLOR_INFO)
+            try:
+                _reindexed = self.cmd_index_repo()
+            except Exception as _e:    # noqa: BLE001
+                logger.error(f"cleanup: reindex failed: {_e}")
+                _reindexed = False
+            if _reindexed is False:
+                console.print(
+                    "  reindex skipped/failed — the on-disk index is stale "
+                    "until the next `mirror publish` / chroot build",
+                    tui.COLOR_WARNING)
+        console.print(
+            "Run `repo audit` to confirm constraints still resolve.")
 
     def cmd_reload_fork(self, *pkgs):
         """Light-touch rebuild of a fork pkg after a content edit.

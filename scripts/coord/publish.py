@@ -373,6 +373,83 @@ def emit_obsolescence_claims(
     return _out
 
 
+def emit_supersession_obsolescence(
+    *,
+    builder_id: str,
+    by_builder: Dict[str, List[dict]],
+    snapshot_pin: str,
+    built_at: str,
+    start_seq: int,
+) -> List[dict]:
+    """Like ``emit_obsolescence_claims``, but the NEWER superseding version may
+    be owned by ANY builder (e.g. pulled from a peer).  Groups (name, arch) over
+    the full LIVE cross-builder set and, for each of OUR OWN published claims
+    that is NOT the newest in its group, emits a ``new_obsolescence``.
+
+    Lets a RECIPIENT retire its own superseded claims after a `mirror pull`
+    WITHOUT a publish round-trip — the asymmetry the operator flagged: we pulled
+    the source-of-truth state, so being forced to re-publish to release our own
+    now-superseded claims is backwards.  UPD-01 publish-before-prune is
+    preserved by construction: a claim is only obsoleted when a strictly-newer
+    version is PRESENT in the live set (a drift file whose successor isn't built
+    yet is the newest in its group → left live).  Only OUR claims are marked;
+    idempotent (an already-obsoleted claim is no longer in PUBLISHED state, so it
+    re-emits nothing).  Versions are compared by the asg-stamped FILENAME version
+    (not built_version, which may be pristine and equal across asg levels).
+    Caller signs + appends, assigning seqs from ``start_seq``."""
+    import functools
+
+    import apt_pkg
+    try:
+        apt_pkg.init_system()
+    except Exception:    # noqa: BLE001
+        pass
+    _owners = _store.project_owners(by_builder)
+    # (name, arch) → list of (filename_version, filename, owner_record)
+    _groups: 'Dict[Tuple[str, str], List[Tuple[str, str, dict]]]' = {}
+    for _fn in sorted(_owners):
+        _base = _fn.rsplit('.', 1)[0]
+        _parts = _base.rsplit('_', 2)
+        if len(_parts) != 3:
+            continue
+        _name, _ver, _arch = _parts
+        _groups.setdefault((_name, _arch), []).append((_ver, _fn, _owners[_fn]))
+    _out: List[dict] = []
+    _seq = start_seq
+
+    def _ver_cmp(_a: 'Tuple[str, str, dict]',
+                 _b: 'Tuple[str, str, dict]') -> int:
+        return int(apt_pkg.version_compare(_a[0], _b[0]))
+
+    for (_name, _arch), _entries in sorted(_groups.items()):
+        if len(_entries) < 2:
+            continue
+        _entries.sort(key=functools.cmp_to_key(_ver_cmp))
+        # every entry but the newest (last) that we OWN + still PUBLISH.
+        for _ver, _fn, _owner in _entries[:-1]:
+            if _owner.get('builder') != builder_id:
+                continue
+            if _owner.get('claim_state') != _schema.CLAIM_STATE_PUBLISHED:
+                continue
+            _claim = _owner.get('claim') or {}
+            _seq += 1
+            _out.append(_schema.new_obsolescence(
+                builder=builder_id,
+                seq=_seq,
+                package=str(_claim.get('package') or ''),
+                intended_version=str(_claim.get('intended_version') or ''),
+                built_version=str(_claim.get('built_version') or _ver),
+                filename=_fn,
+                sha256=str(_claim.get('sha256') or ''),
+                size=int(_claim.get('size') or 0),
+                snapshot=snapshot_pin,
+                built_at=built_at,
+                obsoletes_seq=int(_claim.get('seq') or 0),
+                component=str(_claim.get('component') or 'main'),
+            ))
+    return _out
+
+
 def validate_reclaim_intents(
     *,
     builder_id: str,
