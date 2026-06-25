@@ -76,7 +76,7 @@ def _fmt_dep_group(group) -> str:
 
 
 def _require_dep_check(session) -> bool:
-    """Print 'run parse_dependency first' and return False if not ready."""
+    """Print "run 'cache parse' first" and return False if not ready."""
     if not session.flags.dep_check_ready:
         tui.console.print("Run 'cache parse' first")
         return False
@@ -84,7 +84,7 @@ def _require_dep_check(session) -> bool:
 
 
 def _require_cache(session) -> bool:
-    """Print 'run build_cache first' and return False if not ready."""
+    """Print "run 'cache build' first" and return False if not ready."""
     if not session.flags.cache_ready or session.cache is None:
         tui.console.print("Run 'cache build' first")
         return False
@@ -329,7 +329,7 @@ def _print_stats(session, *_extras) -> None:
         tui.console.print(f"  Cache: required priority : {len(c.required)}")
         tui.console.print(f"  Cache: important priority: {len(c.important)}")
     else:
-        tui.console.print("  Cache                    : not built (run build_cache)")
+        tui.console.print("  Cache                    : not built (run 'cache build')")
     if session.dep_tree is not None and session.flags.dep_check_ready:
         dt = session.dep_tree
         canonical = sum(1 for k, v in dt.selected_pkgs.items()
@@ -353,7 +353,7 @@ def _print_stats(session, *_extras) -> None:
         tui.console.print("  Dep tree: download size  : "
                           f"{getattr(dt, 'download_size', 0) // (2**20)} MB")
     else:
-        tui.console.print("  Dep tree                 : not built (run parse_dependency)")
+        tui.console.print("  Dep tree                 : not built (run 'cache parse')")
 
 
 def _signing_key_present(cfg) -> bool:
@@ -515,8 +515,8 @@ def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
     path), show only the per-stage state snapshot — useful as a diagnostic
     view at any point in the pipeline.
 
-    Surfaces a ``ready for build_iso`` hint at the bottom when chroot is
-    verified.  Build_iso is intentionally not auto-invoked (see README §
+    Surfaces a ``ready for iso build`` hint at the bottom when chroot is
+    verified.  `iso build` is intentionally not auto-invoked (see README §
     Building Image / Intro for the rationale: the operator gets a chance to
     inspect / edit the chroot tree before it is sealed into a squashfs).
     """
@@ -1178,7 +1178,7 @@ def _print_signing(session, *_extras) -> None:
     """Show the project signing key's identity + on-disk state.
 
     No active sign+verify roundtrip — that's what the
-    `verify_signing_key` command does (it actually exercises gpg).
+    `key verify` command does (it actually exercises gpg).
     This view just inspects what's there: configured UID, gnupg
     homedir, and (if a key exists) its fingerprint, primary uid,
     creation/expiration timestamps, and the path of the exported
@@ -1193,7 +1193,7 @@ def _print_signing(session, *_extras) -> None:
     if info is None:
         tui.console.print(
             "  Status         : NOT generated  "
-            "(run `generate_signing_key` to create)"
+            "(run `key generate` to create)"
         )
         return
     tui.console.print(f"  Fingerprint    : {info['fingerprint']}")

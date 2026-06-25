@@ -297,82 +297,6 @@ def emit_deprecation_claims(
     return _out
 
 
-def emit_obsolescence_claims(
-    *,
-    builder_id: str,
-    by_builder: Dict[str, List[dict]],
-    snapshot_pin: str,
-    built_at: str,
-    start_seq: int,
-) -> List[dict]:
-    """Build unsigned `obsolete` claims for every OLD-version
-    file we own+publish that a NEWER version of the same binary (same
-    name + arch) supersedes.
-
-    Grouping is by (binary name, arch) parsed from the filename via
-    rsplit('_', 2) — same-version different-arch files never obsolete
-    each other.  Within a group with >1 distinct version, every claim
-    but the newest (apt_pkg.version_compare, the same convention as
-    filter_pending_by_ownership) gets a new_obsolescence referencing it.
-
-    Only the owner marks; idempotent — once obsoleted, the obsolete
-    claim is the filename winner and fails the PUBLISHED test below.
-    Caller signs + appends, assigning seqs from `start_seq`.
-    """
-    import apt_pkg
-    try:
-        apt_pkg.init_system()
-    except Exception:
-        pass
-    _owners = _store.project_owners(by_builder)
-    # (name, arch) → list of (built_version, filename, claim)
-    _groups: 'Dict[Tuple[str, str], List[Tuple[str, str, dict]]]' = {}
-    for _fn in sorted(_owners):
-        _owner = _owners[_fn]
-        if _owner.get('builder') != builder_id:
-            continue
-        if _owner.get('claim_state') != _schema.CLAIM_STATE_PUBLISHED:
-            continue
-        _base = _fn.rsplit('.', 1)[0]
-        _parts = _base.rsplit('_', 2)
-        if len(_parts) != 3:
-            continue
-        _name, _ver, _arch = _parts
-        _claim = _owner.get('claim') or {}
-        _bv = str(_claim.get('built_version') or _ver)
-        _groups.setdefault((_name, _arch), []).append((_bv, _fn, _claim))
-    _out: List[dict] = []
-    _seq = start_seq
-
-    def _ver_cmp(_a: 'Tuple[str, str, dict]',
-                 _b: 'Tuple[str, str, dict]') -> int:
-        return int(apt_pkg.version_compare(_a[0], _b[0]))
-
-    import functools
-    for (_name, _arch), _entries in sorted(_groups.items()):
-        if len(_entries) < 2:
-            continue
-        _entries.sort(key=functools.cmp_to_key(_ver_cmp))
-        # every entry but the newest (last) gets an obsolescence
-        for _bv, _fn, _claim in _entries[:-1]:
-            _seq += 1
-            _out.append(_schema.new_obsolescence(
-                builder=builder_id,
-                seq=_seq,
-                package=str(_claim.get('package') or ''),
-                intended_version=str(_claim.get('intended_version') or ''),
-                built_version=_bv,
-                filename=_fn,
-                sha256=str(_claim.get('sha256') or ''),
-                size=int(_claim.get('size') or 0),
-                snapshot=snapshot_pin,
-                built_at=built_at,
-                obsoletes_seq=int(_claim.get('seq') or 0),
-                component=str(_claim.get('component') or 'main'),
-            ))
-    return _out
-
-
 def emit_supersession_obsolescence(
     *,
     builder_id: str,
@@ -381,10 +305,15 @@ def emit_supersession_obsolescence(
     built_at: str,
     start_seq: int,
 ) -> List[dict]:
-    """Like ``emit_obsolescence_claims``, but the NEWER superseding version may
-    be owned by ANY builder (e.g. pulled from a peer).  Groups (name, arch) over
-    the full LIVE cross-builder set and, for each of OUR OWN published claims
-    that is NOT the newest in its group, emits a ``new_obsolescence``.
+    """Build unsigned ``obsolete`` claims for every OLD-version file we
+    own+publish that a NEWER version of the same binary (same name + arch)
+    supersedes.  The newer version may be owned by ANY builder — our own
+    newly-built version this publish, OR a version pulled from a peer.  Groups
+    (name, arch) over the full LIVE cross-builder set and, for each of OUR OWN
+    published claims that is NOT the newest in its group, emits a
+    ``new_obsolescence``.  Same-version different-arch files never obsolete each
+    other.  This is the single obsolescence emitter for BOTH paths — publish
+    (Step 6c) and pull-reconcile.
 
     Lets a RECIPIENT retire its own superseded claims after a `mirror pull`
     WITHOUT a publish round-trip — the asymmetry the operator flagged: we pulled
@@ -1432,7 +1361,7 @@ def remote_publish(
         try:
             _view = dict(_by_builder)
             _view[builder_id] = list(_view.get(builder_id, [])) + list(_pending)
-            _obs_claims = emit_obsolescence_claims(
+            _obs_claims = emit_supersession_obsolescence(
                 builder_id=builder_id,
                 by_builder=_view,
                 snapshot_pin=snapshot_pin,

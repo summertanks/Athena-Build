@@ -357,33 +357,6 @@ def _binary_active_for_arch(
     return any(_match(_t) is not False for _t in _terms)
 
 
-def _binary_active_by_convention(
-    binary_name: str, active_profiles: 'frozenset[str]',
-) -> bool:
-    """Naming-convention filter.  No-op by design — kept as a hook
-    for future per-pattern rules but NEVER skip a binary based on
-    name alone.
-
-    Earlier this function applied "*-doc + nodoc → skip" / "*-udeb
-    + noudeb → skip" rules.  Both were WRONG: dh_helper only honors
-    the EXPLICIT `profile=!nodoc` (or `profile=!noudeb`) annotation
-    in the source's Package-List.  When the annotation is absent,
-    real-build emits the binary regardless of DEB_BUILD_PROFILES.
-
-    Verified against real Package-List entries:
-      apt:     `apt-doc ... profile=!nodoc`     → real skips    ✓
-      bind9:   `bind9-doc ... arch=all`         → real EMITS    (no annotation)
-      alsa-lib:`libasound2-doc ... arch=all`    → real EMITS    (no annotation)
-      ffmpeg:  `ffmpeg-doc ... arch=all`        → real EMITS    (no annotation)
-
-    The static-annotation filter (`_binary_active_under_profiles`)
-    correctly handles the apt case.  Convention-based skipping
-    would mis-skip the bind9/alsa-lib/ffmpeg class.
-    """
-    del binary_name, active_profiles
-    return True
-
-
 def _binary_active_under_profiles(
     package_list_entry: str, active_profiles: 'frozenset[str]',
 ) -> bool:
@@ -568,14 +541,12 @@ def synthesize_source_binaries(
     _base_ver_per_binary: Dict[str, str] = {}
     _emit_binaries: List[str] = []
     for _b in _binaries:
-        # Build-Profile gate: STATIC (declarative profile=! in
-        # Package-List entry) AND CONVENTIONAL (Debian dh_helper
-        # naming rules — sources frequently rely on the convention
-        # rather than declaring profile=!nodoc explicitly).
+        # Build-Profile gate: STATIC declarative `profile=!` in the
+        # Package-List entry only.  (Convention-based name skipping —
+        # *-doc+nodoc etc. — was deliberately dropped: real-build emits
+        # those binaries unless the source declares profile=! explicitly.)
         _pl_entry = _pkg_list_idx.get(_b, '')
         if not _binary_active_under_profiles(_pl_entry, active_profiles):
-            continue
-        if not _binary_active_by_convention(_b, active_profiles):
             continue
         # Architecture gate: Package-List entry's arch=... annotation.
         # Catches the linux-source class — declares modules for every
@@ -801,12 +772,6 @@ def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
             if _per_name:
                 _out[_name] = _per_name
     return _out
-
-
-# Module-private regex — left in for potential reuse by future chunks
-# (the bump-rewrite path could share this).  Currently unused by chunk
-# 2 since PkgRelation handles the parse round-trip.
-_PIN_RE = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
 
 
 # ─────────────────────────── Self-validation against build records ──

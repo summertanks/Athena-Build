@@ -16,7 +16,9 @@ Pipeline (all on host, under sudo):
   6. rsync -aHAX the live chroot into root
   7. Generate /etc/fstab from blkid UUIDs
   8. Bind-mount /proc /sys /dev /dev/pts into the chroot, run
-     grub-install (BIOS + EFI) + update-grub via chroot
+     grub-install (BIOS + EFI) + write a hand-rolled minimal grub.cfg
+     (NOT update-grub — it's fragile under a loop-device chroot; see
+     _write_minimal_grub_cfg)
   9. Unmount everything, losetup -d
  10. qemu-img convert -O qcow2 <raw> <qcow2>; rm raw
 
@@ -460,8 +462,7 @@ def build_disk_image(
             # ally guesses wrong when /boot/grub lives on a loop
             # device under a chroot bind-mount, and BOOTX64.EFI
             # then drops straight to `grub>` because its embedded
-            # UUID doesn't match the actual root partition at boot
-            #.
+            # UUID doesn't match the actual root partition at boot.
             if not _write_efi_shim_cfg(_mnt, _root_uuid, password):
                 tui.console.print(
                     "ERROR: ESP shim grub.cfg write failed — "
