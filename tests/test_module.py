@@ -22906,6 +22906,41 @@ def test_remotebuild_shares_workload_resolver_and_fans_out():
     assert '_resolve_build_workload(args, remote=False)' in _sb
 
 
+def test_remotebuild_handles_update_mode_cons10():
+    """CONS-10: `source remotebuild` honours update mode end-to-end.  A pending
+    delta routes through `_do_update_build(remote=True)`, which fans the delta
+    out to the remotes; `_remotebuild_one_source` carries the locally-computed
+    bump decision into a `not _bump_target` skip-gate exception so a same-base
+    re-spin is never wrongly skipped (and so never ships unstamped)."""
+    import re
+    _body = _session_source()
+    # update-mode detection is no longer gated on `not remote`.
+    _rw = re.search(r'def _resolve_build_workload\(self.*?(?=\n    def )',
+                    _body, re.DOTALL).group(0)
+    assert 'not remote and not _names' not in _rw, (
+        "update-mode detection must apply to remote builds too (CONS-10)")
+    # remotebuild routes a pending update to the remote update path.
+    _rb = re.search(r'def cmd_source_remotebuild\(self.*?(?=\n    def )',
+                    _body, re.DOTALL).group(0)
+    assert "_status == 'update'" in _rb and \
+        '_do_update_build(remote=True)' in _rb, (
+        "remotebuild must route a pending update through "
+        "_do_update_build(remote=True)")
+    # _do_update_build dispatches to the remote fan-out when remote=True.
+    assert 'def _do_update_build(self, remote: bool = False)' in _body
+    _du = re.search(r'def _do_update_build\(self.*?(?=\n    def )',
+                    _body, re.DOTALL).group(0)
+    assert 'cmd_source_remotebuild(' in _du, (
+        "_do_update_build(remote=True) must dispatch to the remote fan-out")
+    # the worker carries the bump decision into the skip-gate exception.
+    _one = re.search(r'def _remotebuild_one_source\(self.*?(?=\n    def )',
+                     _body, re.DOTALL).group(0)
+    assert 'bump_active' in _one and 'bump_release' in _one, (
+        "_remotebuild_one_source must accept the bump decision as parameters")
+    assert '_needs_bump_build(' in _one and 'not _bump_target' in _one, (
+        "_remotebuild_one_source must exempt a bump-target from the skip gate")
+
+
 def test_remotebuild_fanout_respects_slot_caps_and_requeues():
     """`_remotebuild_fanout` never runs more concurrent builds on a remote than
     its MaxParallelBuilds, builds every package, and re-queues a transport-failed
@@ -22932,7 +22967,8 @@ def test_remotebuild_fanout_respects_slot_caps_and_requeues():
     _seen: 'list[str]' = []
     _transport_done = {'fired': False}
 
-    def _fake_one(_src, _slot, _po, _force, register_proc=None):
+    def _fake_one(_src, _slot, _po, _force, register_proc=None,
+                  bump_active=False, bump_release=None):
         _name = _slot['name']
         with _lock:
             _cur[_name] += 1
@@ -27300,7 +27336,8 @@ def test_source_build_autodetects_update_mode():
     _body = _session_source()
     # Update-mode DETECTION moved into the shared _resolve_build_workload helper
     # (so `source build` + `source remotebuild` share the front-half); the
-    # ROUTING (calling _do_update_build) stays in cmd_source_build.
+    # ROUTING (calling _do_update_build) stays in cmd_source_build /
+    # cmd_source_remotebuild.
     _m = re.search(r'def cmd_source_build\(self.*?(?=\n    def )', _body, re.DOTALL)
     _b = _m.group(0)
     assert '_do_update_build()' in _b, (
@@ -27312,8 +27349,11 @@ def test_source_build_autodetects_update_mode():
     assert '_update_build_pending()' in _rwb, (
         "the shared workload resolver must auto-detect update mode")
     assert 'not _names' in _rwb, "explicit package names opt out of update mode"
-    # Detection is gated to LOCAL builds only (remote=True skips update mode).
-    assert 'not remote' in _rwb, "update-mode detection must be local-only"
+    # Detection applies to BOTH local and remote builds (CONS-10): the bump is
+    # decided locally and the +asg stamp applied on recovery, so a remote update
+    # build needs no remote-side logic.  It must NOT be gated on `not remote`.
+    assert 'not remote and not _names' not in _rwb, (
+        "update-mode detection must apply to remote builds too (CONS-10)")
     # Bump-awareness lives in _build_one_source after the Phase 4 refactor.
     _w = re.search(r'def _build_one_source\(.*?(?=\n    def )', _body, re.DOTALL)
     assert _w, "_build_one_source not found"
@@ -39149,6 +39189,7 @@ def main() -> int:
         test_copy_ssh_key_copies_with_0600_and_delete_removes_key,
         test_container_remote_add_is_guided_with_probes,
         test_remotebuild_shares_workload_resolver_and_fans_out,
+        test_remotebuild_handles_update_mode_cons10,
         test_remotebuild_fanout_respects_slot_caps_and_requeues,
         test_recipe_only_container_skips_local_docker,
         test_remote_container_init_wired,
