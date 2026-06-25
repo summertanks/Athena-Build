@@ -1529,20 +1529,29 @@ class BuildContainer:
         """
         _retry = '-o Acquire::Retries=5 '
         _flag = '--simulate ' if simulate else ''
+        # --no-install-recommends: a build environment installs ONLY the
+        # declared Build-Depends + their hard Depends — exactly what Debian's
+        # sbuild/pbuilder do.  Without it apt also pulls each build-dep's
+        # Recommends (e.g. imagemagick → fonts-texgyre, dvisvgm, java/perl doc
+        # libs), which compute_build_closure (Depends + Pre-Depends only) does
+        # NOT predict → those land OUTSIDE the localmirror and fall back to
+        # snapshot.  Pinning the build to the Depends closure both leans the env
+        # AND lets the localmirror cover it completely.
+        _norec = '--no-install-recommends '
         _plain = ''
         if plain_deps:
             _plain = (
-                f'sudo DEBIAN_FRONTEND=noninteractive apt -y {_flag}{_retry}'
-                f'install {" ".join(plain_deps)}; '
+                f'sudo DEBIAN_FRONTEND=noninteractive apt -y {_norec}{_flag}'
+                f'{_retry}install {" ".join(plain_deps)}; '
             )
         _ors: 'list[str]' = []
         for _grp in or_groups:
             _chain = (
                 f' || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y '
-                f'{_flag}{_retry}').join(_grp)
+                f'{_norec}{_flag}{_retry}').join(_grp)
             _ors.append(
                 f'{{ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y '
-                f'{_flag}{_retry}{_chain}; }}'
+                f'{_norec}{_flag}{_retry}{_chain}; }}'
             )
         return _plain + ('; '.join(_ors) + '; ' if _ors else '')
 

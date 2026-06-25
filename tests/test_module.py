@@ -1942,6 +1942,27 @@ def _src_with_build_depends(raw_build_depends):
     return package.Source(stanza)
 
 
+def test_render_install_cmd_uses_no_install_recommends():
+    """Build-dep install must pass --no-install-recommends (sbuild/pbuilder
+    behaviour) so the env installs only Build-Depends + hard Depends — matching
+    compute_build_closure (Depends+Pre-Depends) so the localmirror covers it
+    completely.  Applies to both the plain-deps install and the OR-group chains,
+    and to the --simulate preview."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from buildcontainer import BuildContainer
+    _cmd = BuildContainer._render_install_cmd(
+        ['libfoo-dev', 'libbar-dev'], [['libqt5-dev', 'libqt6-dev']],
+        simulate=False)
+    # both the plain-deps install and the OR-group chains carry the flag; no
+    # bare `install -y ` / `install <dep>` without it.
+    assert 'apt -y --no-install-recommends' in _cmd
+    assert 'apt-get install -y --no-install-recommends' in _cmd
+    assert ' install -y -o' not in _cmd and 'install -y libfoo' not in _cmd
+    # preserved under simulate
+    _sim = BuildContainer._render_install_cmd(['libfoo-dev'], [], simulate=True)
+    assert '--no-install-recommends' in _sim and '--simulate' in _sim
+
+
 def test_build_depends_no_cache_leaves_virtuals_unchanged():
     """Without cache, multi-provider virtuals stay as single-name entries
     — caller-driven opt-in keeps the legacy parse a pure transform."""
@@ -3497,8 +3518,10 @@ def test_sec05_render_install_cmd_injects_simulate_flag():
     _sim = BuildContainer._render_install_cmd(
         ['libfoo-dev', 'libbar-dev'], [['gawk', 'mawk']], simulate=True)
     assert '--simulate' not in _real
-    assert _real.count('apt -y -o') >= 1, "plain-dep install present"
-    assert _real.count('apt-get install -y -o') >= 2, "OR-group fallback chain"
+    assert _real.count('apt -y --no-install-recommends -o') >= 1, (
+        "plain-dep install present")
+    assert _real.count('apt-get install -y --no-install-recommends -o') >= 2, (
+        "OR-group fallback chain")
     # --simulate is injected per apt-get install invocation:
     # 1 plain install + 2 OR-alt invocations = 3 occurrences
     assert _sim.count('--simulate') == 3, _sim
@@ -39090,6 +39113,7 @@ def main() -> int:
         test_source_parses_security_stanza_without_files_field,
         test_source_parses_main_stanza_with_both_files_and_sha256,
         # Source.build_depends — virtual-package expansion
+        test_render_install_cmd_uses_no_install_recommends,
         test_build_depends_no_cache_leaves_virtuals_unchanged,
         test_build_depends_expands_multi_provider_virtual,
         test_build_depends_single_provider_virtual_not_expanded,
