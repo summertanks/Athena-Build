@@ -309,6 +309,35 @@ class SnapshotCommandsMixin(SessionState):
             "  cache invalidated — run `cache build` + `cache parse` to "
             "resolve the dep tree at the new pin")
 
+    def _has_unpublished_local_builds(self) -> bool:
+        """True iff we hold LOCALLY-BUILT (not pulled) artifacts that aren't yet
+        published to a mirror — i.e. advancing the pin would skip publishing real
+        local work.  Uses `generate_pending_claims`, which already SKIPS
+        `pulled_from` records, so a peer-pulled delta (already on the mirror)
+        does NOT count.  Best-effort: False (no warning) on any
+        non-federated / IO error — the warning is advisory, never a gate."""
+        import os
+        try:
+            import coord.publish as _publish
+            _bid = self._coord_builder_id()
+            _keys = self._coord_self_keys()
+            if not _bid or _keys is None:
+                return False
+            _pending = _publish.generate_pending_claims(
+                builder_id=_bid,
+                buildlog_dir=os.path.join(self.config.dir_log, 'build'),
+                claims_dir=self.config.dir_coord_claims,
+                public_key_path=_keys[2],
+                snapshot_pin=self._snapshot_current() or '',
+                read_build_record=utils.read_build_record,
+                build_arch=self.config.arch,
+            )
+            return len(_pending) > 0
+        except Exception as _e:    # noqa: BLE001 — advisory; never block select
+            logger.warning(
+                f"snapshot select: unpublished-builds check skipped: {_e}")
+            return False
+
     def _set_snapshot_pin(self, target: str) -> bool:
         """Validate (forward-only) + caution + write the `current` pin.
         Appends to config/snapshot.history on success.  Returns True iff set."""
@@ -327,16 +356,16 @@ class SnapshotCommandsMixin(SessionState):
         console.print(f"snapshot select: {_old or '(unset)'} → {target}",
                       tui.COLOR_WARNING)
         console.print(
-            "  PRODUCTION IMPACT: changes what the next build ships and "
-            "what mirrors will receive on the next publish.")
-        # Warn if any configured mirror is behind the OLD current — that
-        # unpublished delta gets skipped (bump numbers stay correct via
-        # the manifest, but intermediate versions won't be published).
-        if _old and self._update_build_pending():
+            "  PRODUCTION IMPACT: next publish will be on selected snapshot")
+        # Warn ONLY when we have locally-BUILT, unpublished work at the old pin
+        # — advancing would skip publishing it.  A peer-pulled delta (already on
+        # the mirror) is NOT our work to publish and must not trigger this; the
+        # prior pin>floor guard fired on any difference (incl. pulled state), so
+        # a recipient saw a false alarm.
+        if _old and self._has_unpublished_local_builds():
             console.print(
-                f"  WARNING: at least one mirror is BEHIND {_old}.  "
-                "Advancing current leaves that delta unpublished; run "
-                "`mirror publish` first or accept the gap.",
+                f"  WARNING: you have locally-built, UNPUBLISHED packages at "
+                f"{_old}. May run `mirror publish` first.",
                 tui.COLOR_WARNING)
         if Prompt(PROMPT_YESNO,
                   f"Set current pin to {target}?").get_response().lower() \
@@ -363,9 +392,7 @@ class SnapshotCommandsMixin(SessionState):
         self.flags.cache_ready = False
         self.flags.dep_check_ready = False
         console.print(
-            "  cache invalidated — run `cache build` + `cache parse` to "
-            "resolve the dep tree at the new pin, then walk "
-            "`source sync → source build all → mirror publish`")
+            "  cache invalidated — run `cache build` + `cache parse`")
         return True
 
     def _snapshot_select_interactive(self):
