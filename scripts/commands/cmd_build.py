@@ -109,6 +109,7 @@ class BuildCommandsMixin(SessionState):
         if _debug:
             console.print("Debug mode: journald will forward to ttyS0 in built chroot")
 
+        assert self.cache is not None and self.dep_tree is not None
         console.print("Initialising build system...")
         try:
             build_system = buildsystem.BuildSystem(self.dep_tree, self.config)
@@ -239,6 +240,7 @@ class BuildCommandsMixin(SessionState):
         _debug = 'with_debug' in args
 
         console.print("Initialising build system (disk surface)...")
+        assert self.cache is not None and self.dep_tree is not None
         try:
             build_system = buildsystem.BuildSystem(
                 self.dep_tree, self.config,
@@ -624,6 +626,7 @@ class BuildCommandsMixin(SessionState):
             # busybox is in pkg_closure after Pass III; Pass IV's
             # live.list resolution finds it already present and
             # doesn't add it to live_exclusive.
+            assert self.dep_tree is not None
             _live_excl = self.dep_tree.live_exclusive_pkg_names
             _extras    = self.dep_tree.extras_pkg_names
             # phase D follow-up: pool extras (from pool.list,
@@ -773,6 +776,7 @@ class BuildCommandsMixin(SessionState):
             # not in the deb tree and fall out of the closure.
             _manifest_seeds.update(
                 surfaces.read_flat_roots(self.config.installerlist_path))
+            assert self.cache is not None
             _manifest_seeds |= set(self.cache.required)
             _manifest_seeds |= set(self.cache.important)
             _pool_whitelist = surfaces.surface_closure(

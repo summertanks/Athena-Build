@@ -76,6 +76,7 @@ class TunnelCommandsMixin(SessionState):
         # Bulk path.
         self.flags.download_ready = False  # reset before starting
 
+        assert self.dep_tree is not None
         _deb_size  = self.dep_tree.download_size
         _udeb_size = (self.udeb_dep_tree.download_size
                       if self.udeb_dep_tree is not None else 0)
@@ -579,6 +580,7 @@ class TunnelCommandsMixin(SessionState):
         # Validate all names up front before starting any downloads.
         packages = []
         for name in _names:
+            assert self.dep_tree is not None
             src = self.dep_tree.selected_srcs.get(name)
             if src is None:
                 console.print(f"Unknown package: {name}")

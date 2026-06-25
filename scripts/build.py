@@ -463,7 +463,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         _our_containers = []
         try:
             for _c in _client.containers.list(all=True):
-                _img_tags = []
+                _img_tags: list = []
                 try:
                     _img_tags = _c.image.tags or []
                 except docker.errors.APIError:
@@ -560,13 +560,13 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             return
         _ok_live = self._wipe_dir_contents(
             'buildroot/live', self.config.dir_chroot,
-            sudo=True, password=_password, skip_prompt=_force)
+            sudo=True, skip_prompt=_force)
         _ok_inst = self._wipe_dir_contents(
             'buildroot/installer', self.config.dir_chroot_installer,
-            sudo=True, password=_password, skip_prompt=_force)
+            sudo=True, skip_prompt=_force)
         _ok_disk = self._wipe_dir_contents(
             'buildroot/disk', self.config.dir_chroot_disk,
-            sudo=True, password=_password, skip_prompt=_force)
+            sudo=True, skip_prompt=_force)
         if _ok_live:
             self.flags.chroot_ready = False
             self.flags.chroot_verified = False
@@ -617,14 +617,14 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         self._wipe_dir_contents('image',    self.config.dir_image,    sudo=False, skip_prompt=True)
         # Sudo dirs: re-use the unlocked password.
         self._wipe_dir_contents('buildroot/live',
-            self.config.dir_chroot, sudo=True, password=_password, skip_prompt=True)
+            self.config.dir_chroot, sudo=True, skip_prompt=True)
         self._wipe_dir_contents('buildroot/installer',
-            self.config.dir_chroot_installer, sudo=True, password=_password, skip_prompt=True)
+            self.config.dir_chroot_installer, sudo=True, skip_prompt=True)
         # the disk chroot (its own minimal root) is
         # root-owned too — wipe it, else buildroot/disk survives while the
         # flag reset below clears chroot_disk_ready (claiming it's gone).
         self._wipe_dir_contents('buildroot/disk',
-            self.config.dir_chroot_disk, sudo=True, password=_password, skip_prompt=True)
+            self.config.dir_chroot_disk, sudo=True, skip_prompt=True)
         # Docker side: kills running athenalinux containers + removes
         # images so next `container local init` rebuilds from Dockerfile.
         self.cmd_container_purge('force')
@@ -1036,7 +1036,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                                label_width=20)
         _file_bar = ProgressBar(label='', itr_label='B/s', maxvalue=1,
                                 show_rate=True, label_width=24)
-        _st = {'last_cum': 0, 'cur_file': None, 'last_file': 0}
+        _st: dict = {'last_cum': 0, 'cur_file': None, 'last_file': 0}
 
         def _on_progress(_p):
             _cum_bar.label(f"({_p.get('i', 0)}/{_p.get('n', 0)})")
