@@ -55,7 +55,6 @@ import dependencytree
 import buildsystem
 import installer_chroot
 import iso_installer
-import persistence
 import repo_audit
 import signal
 
@@ -101,9 +100,7 @@ class BuildFlags:
     from running on stale or missing state without repeating the earlier work.
 
     When constructed via `BuildFlags.load(path)`, every flag
-    transition autosaves to a JSON sidecar (cheap, ~1 ms).  `restored_summary()`
-    remains (dormant) for a future relook; the startup banner that consumed
-    it was removed alongside the `resume` command 2026-06-08.
+    transition autosaves to a JSON sidecar (cheap, ~1 ms).
     """
 
     # Class-level annotations — mypy uses these to see the attributes that
@@ -205,16 +202,6 @@ class BuildFlags:
         # Enable autosave now that all initial values are settled.
         object.__setattr__(_flags, '_save_path', save_path)
         return _flags
-
-    def restored_summary(self) -> str:
-        """Comma-separated list of persisted-True flags (excluding the
-        in-memory-only ones) for the startup banner."""
-        _kept = [
-            _f.replace('_ready', '')
-            for _f in self._FIELDS
-            if _f not in self._IN_MEMORY_ONLY and getattr(self, _f)
-        ]
-        return ', '.join(_kept)
 
     def __str__(self) -> str:
         """Return a compact one-line status string for display in the TUI."""

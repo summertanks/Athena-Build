@@ -1226,12 +1226,13 @@ class DependencyTree:
             _download_size += self.selected_srcs[_pkg].download_size
         return _download_size
 
-    # ── pickle support ────────────────────────────────────────────
-    # Drop the back-ref to Cache (rewired by persistence.restore_session
-    # after Cache is rebuilt from disk + DT is unpickled) and flatten
-    # __lookahead's defaultdict (lambdas can't pickle).  Both are
-    # restored on __setstate__ — __cache to None (caller rewires),
-    # __lookahead to a fresh defaultdict(dict).
+    # ── pickle support (dormant) ──────────────────────────────────
+    # Kept as correct serialization support though no caller pickles a
+    # DependencyTree today (the session-persistence/`resume` layer that did
+    # was removed — MAT-06).  Drops the back-ref to Cache (a re-loader would
+    # rewire it after rebuilding Cache from disk) and flattens __lookahead's
+    # defaultdict (lambdas can't pickle).  Both restored on __setstate__ —
+    # __cache to None (caller rewires), __lookahead to a fresh defaultdict.
     def __getstate__(self):
         state = self.__dict__.copy()
         state.pop('_DependencyTree__cache', None)
@@ -1248,5 +1249,5 @@ class DependencyTree:
         _la: 'Dict[str, Dict[Version, package.Package]]' = defaultdict(dict)
         _la.update(_la_flat)
         self.__dict__['_DependencyTree__lookahead'] = _la
-        # __cache is rewired by persistence.restore_session.
+        # __cache left None — a re-loader rewires it after rebuilding Cache.
         self.__dict__['_DependencyTree__cache'] = None

@@ -265,15 +265,12 @@ package and an 11-file `scripts/tui/` curses package.  Grouped by role:
 - **`print_commands.py`** — `print state` / `print mirrors` / `print
   extras` / `print build-times` / `print signing` / etc.  Pulls from
   `BuildSession.flags`, `BuildConfig`, `DependencyTree`.
-- **`persistence.py`** — `save_session` / `restore_session` round-trip
-  the parsed `Cache` + `DependencyTree` via pickle protocol 5 + gzip
-  under `<dir_cache>/`; fingerprint-gated (config + mirror InReleases +
-  fork tree-hashes + patch-set hashes + snapshot + arch + profiles)
-  so a `cache parse`-invalidating change refuses restore.  Fully dormant:
-  the `resume` command / `--resume` flag that consumed it were removed
-  pending a relook, and the `save_session` call sites were dropped too, so
-  the blob is no longer written or read — the module is retained intact for
-  a future re-wire.
+  (Session persistence / `resume` — a fingerprint-gated pickle of the
+  parsed `Cache` + `DependencyTree` — was implemented (UX-04) but **removed**
+  2026-06-25 (MAT-06): it hit repeated consistency bugs and was abandoned.
+  Re-run `cache build` + `cache parse` on each launch (~40s).  The pickle
+  `__getstate__`/`__setstate__` hooks on `Cache`/`DependencyTree`/`Package`/
+  `Source` remain as dormant, correct serialization support.)
 - **`select_packages.py`** — curses-only interactive package picker
   behind `cache select`.
 

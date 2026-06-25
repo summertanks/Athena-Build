@@ -17043,7 +17043,6 @@ def test_per_module_logger_names_pin_routing():
         'signing':          'athena',
         'apt_repo':         'athena',
         'repo_audit':       'athena',
-        'persistence':      'athena',
         'cli':              'athena',
     }
 
@@ -28260,154 +28259,6 @@ def test_index_minimal_stages_nested_subset():
             "minimal must NOT use a flat pool/ — unified nested layout")
 
 
-# ─── UX-04: session persistence ──────────────────────────────────────────────
-
-def _ux04_sample_session(dir_cache: str):
-    """Build a minimal session-shape stub for persistence round-trip tests.
-
-    Returns an object with .cache, .dep_tree, .udeb_dep_tree,
-    .last_source_build_counts, and .config attrs.  No real Cache/DT —
-    just enough for save_session / restore_session plumbing.
-    """
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    del persistence  # avoid lint complaints; ensures import succeeds
-
-    class _StubCache:
-        # Mirror Cache's snapshot/mirrors/cache_dir/fork_names surface so
-        # compute_fingerprint reads the right fields.
-        def __init__(self, snapshot_ts='20260101T000000Z', mirrors=()):
-            self.snapshot_ts = snapshot_ts
-            self.mirrors = list(mirrors)
-            self._fork_pkg_names: 'set' = set()
-            self._fork_src_names: 'set' = set()
-            self._fork_udeb_names: 'set' = set()
-            self.package_hashtable: 'dict' = {}
-            self.source_hashtable: 'dict' = {}
-            self.udeb_hashtable: 'dict' = {}
-
-    class _StubDT:
-        def __init__(self):
-            self.selected_pkgs: 'dict' = {}
-            self.selected_srcs: 'dict' = {}
-
-    class _StubSession:
-        cache = _StubCache()
-        dep_tree = _StubDT()
-        udeb_dep_tree = None
-        last_source_build_counts = None
-    return _StubSession()
-
-
-def test_ux04_sha256_sidecar_round_trip():
-    """persistence._sha256_of_file matches hashlib; _write_sha256 +
-    _verify_sha256 round-trip; missing or mismatched sidecar fails."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    import hashlib as _hl
-    with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as _f:
-        _f.write(b'hello UX-04')
-        _path = _f.name
-    try:
-        assert persistence._sha256_of_file(_path) == _hl.sha256(b'hello UX-04').hexdigest()
-        persistence._write_sha256(_path)
-        assert os.path.isfile(_path + '.sha256')
-        assert persistence._verify_sha256(_path) is True
-        # Mutate blob → verify fails
-        with open(_path, 'ab') as _ff:
-            _ff.write(b'!')
-        assert persistence._verify_sha256(_path) is False
-        # Remove sidecar → verify fails
-        os.unlink(_path + '.sha256')
-        assert persistence._verify_sha256(_path) is False
-    finally:
-        os.unlink(_path)
-
-
-def test_ux04_restore_session_silent_when_no_blob():
-    """No session.pkl.gz on disk → restore_session returns None silently
-    (no message to operator)."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    with tempfile.TemporaryDirectory() as _tmp:
-        class _Cfg:
-            dir_cache = _tmp
-        _messages: 'list' = []
-        _result = persistence.restore_session(_Cfg(), _messages.append)
-        assert _result is None
-        assert _messages == [], f"expected no message, got {_messages}"
-
-
-def test_ux04_restore_refuses_on_missing_fingerprint():
-    """Pickle blob present but no fingerprint file → refuse + message."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    with tempfile.TemporaryDirectory() as _tmp:
-        # Write a syntactically-valid but content-irrelevant pickle.
-        import gzip as _gz
-        import pickle as _pk
-        _blob = os.path.join(_tmp, 'session.pkl.gz')
-        with _gz.open(_blob, 'wb') as _fh:
-            _pk.dump({'_format_version': 1, 'cache': None, 'dep_tree': None}, _fh)
-        persistence._write_sha256(_blob)
-        # NO fingerprint file written.
-        class _Cfg:
-            dir_cache = _tmp
-        _messages: 'list' = []
-        _result = persistence.restore_session(_Cfg(), _messages.append)
-        assert _result is None
-        assert any('fingerprint' in _m.lower() for _m in _messages), _messages
-
-
-def test_ux04_restore_refuses_on_corrupt_sidecar():
-    """Pickle's SHA256 doesn't match sidecar → refuse + message."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    with tempfile.TemporaryDirectory() as _tmp:
-        _blob = os.path.join(_tmp, 'session.pkl.gz')
-        with open(_blob, 'wb') as _fh:
-            _fh.write(b'fake gzip content')
-        # Write a sidecar with the WRONG hash.
-        with open(_blob + '.sha256', 'w') as _fh:
-            _fh.write('0' * 64 + '\n')
-        # Also write a fingerprint so we get past the missing-file check.
-        with open(os.path.join(_tmp, 'session.fingerprint.json'), 'w') as _fh:
-            _fh.write('{"_format_version": 1}')
-        class _Cfg:
-            dir_cache = _tmp
-        _messages: 'list' = []
-        _result = persistence.restore_session(_Cfg(), _messages.append)
-        assert _result is None
-        assert any('sha256' in _m.lower() for _m in _messages), _messages
-
-
-def test_ux04_fingerprint_diff_detects_changes():
-    """fingerprint_diff returns named fields when scalars differ; uses
-    'kind.key' when dict entries differ."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    _saved = {
-        'config_hash': 'abc',
-        'snapshot_ts': 'A',
-        'arch': 'amd64',
-        'build_profiles': [],
-        'include_recommends': True,
-        'mirror_inreleases': {'main': 'a1', 'security': 'b1'},
-        'fork_tree_hashes':  {},
-        'patch_set_hashes':  {},
-    }
-    # Identical → no diffs
-    assert persistence.fingerprint_diff(_saved, _saved.copy()) == []
-    # Scalar mismatch
-    _cur = _saved.copy()
-    _cur['config_hash'] = 'xyz'
-    assert 'config_hash changed' in persistence.fingerprint_diff(_saved, _cur)
-    # Dict mismatch
-    _cur = _saved.copy()
-    _cur['mirror_inreleases'] = {'main': 'a1', 'security': 'CHANGED'}
-    _diffs = persistence.fingerprint_diff(_saved, _cur)
-    assert any('mirror_inreleases.security' in _d for _d in _diffs), _diffs
-
 
 def test_ux04_buildflags_autosave_round_trip():
     """BuildFlags.load reads what autosave wrote; persisted-True flags
@@ -28452,43 +28303,6 @@ def test_ux04_buildflags_in_memory_only_reset_on_load():
         _kept = set(BuildFlags._FIELDS) - BuildFlags._IN_MEMORY_ONLY
         for _f in _kept:
             assert getattr(_flags, _f) is True, f"{_f} not preserved"
-
-
-def test_ux04_buildflags_restored_summary_excludes_in_memory_flags():
-    """restored_summary lists persisted-True non-in-memory flags only;
-    the banner shouldn't claim 'cache' restored just because the JSON
-    had it True (the Cache instance hasn't been wired)."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildFlags
-    import json as _json
-    with tempfile.TemporaryDirectory() as _tmp:
-        _path = os.path.join(_tmp, 'buildflags.json')
-        with open(_path, 'w') as _fh:
-            _json.dump({
-                '_format_version': 1,
-                'flags': {
-                    'cache_ready':           True,   # _IN_MEMORY_ONLY
-                    'dep_check_ready':       True,   # _IN_MEMORY_ONLY
-                    'download_ready':        True,   # persists
-                    'build_container_ready': True,   # _IN_MEMORY_ONLY
-                    'source_build_ready':    True,   # persists
-                    'signing_key_verified':  True,   # _IN_MEMORY_ONLY
-                    'chroot_ready':          False,
-                    'chroot_verified':       False,
-                    'chroot_installer_ready': False,
-                    'iso_live_ready':        False,
-                    'iso_installer_ready':   False,
-                    'iso_disk_ready':        False,
-                },
-            }, _fh)
-        _flags = BuildFlags.load(_path)
-        _summary = _flags.restored_summary()
-        assert 'cache' not in _summary, _summary
-        assert 'dep_check' not in _summary, _summary
-        assert 'build_container' not in _summary, _summary
-        assert 'signing_key' not in _summary, _summary
-        assert 'download' in _summary, _summary
-        assert 'source_build' in _summary, _summary
 
 
 def _sbom_test_buildconfig(tmp: str) -> object:
@@ -37151,14 +36965,6 @@ def test_dependencytree_pins_resolve_silently_and_record_picks():
     assert _dt2._pinned_chosen == {'telnet-client': 'telnet'}, _dt2._pinned_chosen
 
 
-def test_persistence_format_version_bumped_for_pins():
-    """A pre-pins (v1) session blob must be refused, not resumed without
-    _pins/_pinned_chosen."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import persistence
-    assert persistence._FORMAT_VERSION >= 2
-
-
 def test_selection_lock_classify_asymmetric_guard():
     """SELECT-LOCK Chunk 4 policy: missing→bootstrap, badsig/malformed→
     hardstop, removal→block, additions-only/unchanged→refresh."""
@@ -40201,7 +40007,6 @@ def main() -> int:
         test_selection_lock_diff_closure_add_remove_and_tier_only,
         # SELECT-LOCK Chunk 3 — pinned-picks plumbing
         test_dependencytree_pins_resolve_silently_and_record_picks,
-        test_persistence_format_version_bumped_for_pins,
         # SELECT-LOCK Chunk 4 — two-stage parse + asymmetric guard
         test_selection_lock_classify_asymmetric_guard,
         test_selection_lock_assemble_state_shape_and_pin_union,
@@ -40479,15 +40284,9 @@ def main() -> int:
         test_update_build_pending_per_mirror_path,
         # UPD-02: index on the remote
         test_index_minimal_stages_nested_subset,
-        # UX-04 persistence
-        test_ux04_sha256_sidecar_round_trip,
-        test_ux04_restore_session_silent_when_no_blob,
-        test_ux04_restore_refuses_on_missing_fingerprint,
-        test_ux04_restore_refuses_on_corrupt_sidecar,
-        test_ux04_fingerprint_diff_detects_changes,
+        # UX-04: BuildFlags JSON autosave
         test_ux04_buildflags_autosave_round_trip,
         test_ux04_buildflags_in_memory_only_reset_on_load,
-        test_ux04_buildflags_restored_summary_excludes_in_memory_flags,
         # CONF-07 SBOM
         test_sbom_emits_valid_cyclonedx_skeleton,
         test_sbom_components_sorted_by_name,
