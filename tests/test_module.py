@@ -38776,10 +38776,11 @@ def test_retract_claim_by_filename_targets_single_file():
         assert not _ok2
 
 
-def test_build_closure_module_partitions_tiers_disjointly():
-    """compute_build_closure: toolchain/language/leaf are a disjoint
-    partition of 'all'; build-essential closure lands in toolchain, the
-    language seed in language, a source-specific -dev lib in leaf."""
+def test_build_closure_compute_returns_all_and_unsatisfiable():
+    """compute_build_closure returns ONLY the full closure ('all', with the
+    build-essential/dpkg-dev toolchain base folded in) and the dropped
+    'unsatisfiable' Build-Depends groups — tier segregation lives solely in
+    classify_tiers (CONS-16)."""
     import build_closure as bc
     bin_index = {
         'build-essential': {'Depends': 'gcc, make'},
@@ -38789,18 +38790,18 @@ def test_build_closure_module_partitions_tiers_disjointly():
         'libfoo-dev': {'Depends': 'libfoo1'}, 'libfoo1': {},
     }
     r = bc.compute_build_closure(
-        ['foo'], {'foo': 'debhelper, cmake, libfoo-dev'},
-        bin_index, {}, runtime_closure={'libfoo1'})
-    assert {'gcc', 'libc6-dev', 'make'} <= r['toolchain']
-    assert {'cmake', 'debhelper'} <= r['language']
-    assert 'libfoo-dev' in r['leaf']
-    # disjoint partition of 'all'
-    assert r['toolchain'] & r['language'] == set()
-    assert r['toolchain'] & r['leaf'] == set()
-    assert r['language'] & r['leaf'] == set()
-    assert r['toolchain'] | r['language'] | r['leaf'] == r['all']
-    # 'added' excludes the already-shipped runtime member
-    assert 'libfoo1' not in r['added']
+        ['foo'], {'foo': 'debhelper, cmake, libfoo-dev'}, bin_index, {})
+    # full closure: direct build-deps + their install closure + toolchain base
+    assert {'build-essential', 'dpkg-dev', 'gcc', 'make', 'libc6-dev',
+            'debhelper', 'cmake', 'libfoo-dev', 'libfoo1'} <= r['all']
+    assert r['unsatisfiable'] == []
+    # tiers are no longer computed here — classify_tiers owns that
+    assert set(r.keys()) == {'all', 'unsatisfiable'}
+    # an unresolvable Build-Depends group is reported (toolchain base still in)
+    r2 = bc.compute_build_closure(
+        ['bar'], {'bar': 'no-such-pkg'}, bin_index, {})
+    assert {'build-essential', 'dpkg-dev'} <= r2['all']
+    assert any('no-such-pkg' in _g for (_s, _g) in r2['unsatisfiable'])
 
 
 def test_build_closure_classify_tiers_uses_adjacency():
@@ -39218,7 +39219,7 @@ def test_local_mirror_is_valid_for_keys_to_snapshot_marker():
 
 def main() -> int:
     tests = [
-        test_build_closure_module_partitions_tiers_disjointly,
+        test_build_closure_compute_returns_all_and_unsatisfiable,
         test_build_closure_classify_tiers_uses_adjacency,
         test_local_mirror_plan_resolves_build_closure_to_snapshot_urls,
         test_local_mirror_plan_include_index_emits_packages_blob,

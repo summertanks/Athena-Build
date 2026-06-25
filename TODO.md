@@ -171,9 +171,9 @@ _All architecture & coding-practice tickets are closed — see [`docs/done.md`](
 > module, all findings hand-verified against source).  Sanity baseline at the
 > time was green (ruff + mypy + 1086-test suite all pass).  CONS-01..09 were
 > FIXED in the same pass (triad-gated); CONS-10..16 were deferred.  CONS-10
-> (P1), CONS-11/12 (P2) + CONS-14/15 (P3) landed later (2026-06-25); CONS-13
-> and CONS-16 remain open (each needs a design decision or a larger change).
-> Close deferred rows here as they land.
+> (P1), CONS-11/12 (P2) + CONS-14/15/16 (P3) landed later (2026-06-25); only
+> CONS-13 (P2 — local/remote build-mirror "valid-on-partial" + remote
+> hardening) remains open.  Close deferred rows here as they land.
 
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
@@ -192,7 +192,7 @@ _All architecture & coding-practice tickets are closed — see [`docs/done.md`](
 | CONS-13 | P2 | todo | **Local vs remote build-mirror semantics drifted + remote hardening.** The LOCAL `local_mirror.download`/`index` path stamps + indexes a *partially-failed* mirror as valid-for-snapshot, while the remote runner correctly gates on `not failed` — align them. Also the remote path lacks the `disk_check` the local path has (no free-space pre-check before a multi-GB download) and its `_download` read loop doesn't catch `http.client.IncompleteRead` (one flaky transfer aborts the whole population instead of recording one failure). (local_mirror.py, remote_localmirror.py, cmd_cache.py.) |
 | CONS-14 | P3 | done | **`repo repair cleanup force` under `--yes` could prune live-claimed files.** The publish-before-prune gate was `informational=True`, which the facade auto-answers "yes" under `--yes` — so an unattended session could delete files a mirror still serves (the ordering hazard). Fixed: the publish-before-prune gate is now **non-informational** (a headless `--yes` run defaults to "n" and aborts there), while the final IRREVERSIBLE-delete prompt STAYS informational — so automated cleanup still works in the CORRECT order (publish first → no live claims → gate skipped → obsolete set pruned). Test: `test_cleanup_publish_before_prune_gate_not_informational_cons14`. |
 | CONS-15 | P3 | done | **Bulk inline ticket-tag comment cleanup.** Stripped the bare Athena ticket IDs (CONF-01 ×20, UPD-01 ×15, MIRROR-01 ×13, STA-*, SEC-05, …) from code comments/docstrings across 47 files — 149 lines — preserving all rationale; Debian/standards tokens (DEP-3, SHA-256, ISO-8601, UTF-8, RSA-*, RFC-822) and live `CONS-N` refs kept. Done via a reviewable strip script + hand-fixed the ~11 grammatical holes (ticket-as-noun, `Pre-<ticket>`, line-wrapped colons). Triad green (1279/1279). Dated-incident narration kept (it's rationale, not a bare tag); a handful of stale line-number refs remain (low value). |
-| CONS-16 | P3 | todo | **`compute_build_closure` tier machinery duplicates `classify_tiers`.** The only production consumer (`local_mirror.py`) reads `compute_build_closure`'s `all`/`unsatisfiable` keys; its `toolchain`/`language`/`leaf`/`added` tiers + `runtime_closure` param are computed but consumed only by tests, while the real build-path tiering is done by the separate adjacency-based `classify_tiers` (cmd_cache.py:758). Two parallel build-closure tier mechanisms — consolidate onto one (consistent with IncludeBuildClosure being off-by-default/test-later). (build_closure.py.) |
+| CONS-16 | P3 | done | **`compute_build_closure` tier machinery duplicated `classify_tiers`.** Its `toolchain`/`language`/`leaf`/`added` tiers + `runtime_closure` param were computed but consumed only by a test, while the only production consumer (`local_mirror.py`) reads just `all`, and the real build-path tiering is the adjacency-based `classify_tiers` (cmd_cache.py). Fixed: `compute_build_closure` now returns only `{all, unsatisfiable}`; `classify_tiers` is the single tiering path. Module docstring + the test repointed (`test_build_closure_compute_returns_all_and_unsatisfiable`); classify_tiers' own test unchanged. |
 
 ---
 
