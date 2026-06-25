@@ -18215,6 +18215,45 @@ def test_fork_invalidation_still_wipes_orphan_without_pull_record():
         assert not os.path.isfile(_deb), "orphan binary should have been wiped"
 
 
+def test_fork_invalidation_skips_wipe_on_unreadable_record():
+    """Maturity-review P1: a fork with a build record FILE that EXISTS but is
+    UNREADABLE/unverified (corrupt or HMAC-fail) and no stored tree-hash must
+    NOT be wiped.  read_build_record returns None for BOTH 'absent' and
+    'corrupt'; treating corrupt as 'orphan' would wipe a possibly-pull-adopted
+    fork on a transient read failure — a false federation ownership grab.  Fail
+    SAFE: skip the wipe WITHOUT seeding the hash so a readable re-run resolves
+    it."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    import utils as _u
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        _pkg = 'athena-installer-data'
+        _pkg_dir = os.path.join(bc.dir_fork_source, _pkg)
+        _fn = _pkg + '_1.0.0+thor1_all.udeb'
+        _deb, _hash_file = _plant_adopted_fork(bc, _pkg, _fn, pulled_from=True)
+        # corrupt the (valid, HMAC'd) record so read returns None but the FILE
+        # still exists → the 'unknown' branch.
+        _buildlog = os.path.join(bc.dir_log, 'build')
+        _rec_path = _u._build_record_path(_buildlog, _pkg)
+        with open(_rec_path, 'w') as fh:
+            fh.write('{ not valid json @@@')
+        assert _u.read_build_record(_buildlog, _pkg) is None
+        assert os.path.exists(_rec_path)
+        assert fork_mirror._fork_adoption_status(_pkg, bc) == 'unknown'
+
+        _wiped = fork_mirror._check_and_invalidate_fork_pkg(_pkg_dir, bc)
+
+        assert _wiped is False, "unreadable record → must skip wipe (fail safe)"
+        assert os.path.isfile(_deb), (
+            "adopted binary wiped on a transient/corrupt read — ownership grab")
+        assert not os.path.isfile(_hash_file), (
+            "hash must NOT be seeded on 'unknown' — a readable re-run must "
+            "re-evaluate (adopt-and-seed or genuine-orphan-wipe)")
+
+
 def test_fork_invalidation_covers_multi_binary_via_control_parse():
     """When a fork ships multiple binaries (athena-tasksel produces
     athena-tasksel + athena-tasksel-data), the wipe must hit each
@@ -39923,6 +39962,7 @@ def main() -> int:
         test_fork_invalidation_wipes_artifacts_on_content_change,
         test_fork_invalidation_no_op_when_hash_matches,
         test_fork_invalidation_preserves_pull_adopted_binaries_on_fresh_peer,
+        test_fork_invalidation_skips_wipe_on_unreadable_record,
         test_fork_invalidation_still_wipes_orphan_without_pull_record,
         test_fork_invalidation_covers_multi_binary_via_control_parse,
         test_binary_names_from_control_extracts_all_package_stanzas,
