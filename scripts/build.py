@@ -1160,15 +1160,33 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             _state = _ro.ensure_remote_image(
                 _host, _tag, ssh_key=_key, log=console.print)
             if _state == 'build':
-                if _ro.build_remote_image(
-                        _host,
-                        os.path.join(self.config.dir_config, 'Dockerfile'),
-                        _tag, self.container._image_build_args(),
-                        ssh_key=_key, log=console.print):
+                # Stream the remote docker-build to a LOG FILE (not the console)
+                # behind a spinner — the build emits hundreds of lines; flooding
+                # the TUI is noise (and raw progress would corrupt curses).
+                _img_log = os.path.join(self.config.dir_log,
+                                        f'remote-image-{_r["name"]}.log')
+                os.makedirs(os.path.dirname(_img_log), exist_ok=True)
+                console.print(
+                    f"    {_r['name']}: building image on remote — streaming to "
+                    f"{_img_log}", tui.COLOR_INFO)
+                _spin = Spinner(f"build image on {_r['name']}")
+                try:
+                    with open(_img_log, 'w') as _ilf:
+                        def _img_to_log(_m, _ilf=_ilf):
+                            _ilf.write(str(_m) + '\n')
+                            _ilf.flush()
+                        _built_ok = _ro.build_remote_image(
+                            _host,
+                            os.path.join(self.config.dir_config, 'Dockerfile'),
+                            _tag, self.container._image_build_args(),
+                            ssh_key=_key, log=_img_to_log)
+                finally:
+                    _spin.done()
+                if _built_ok:
                     _state = 'built on remote'
                 else:
-                    console.print(f"    {_r['name']}: image BUILD FAILED",
-                                  tui.COLOR_ERROR)
+                    console.print(f"    {_r['name']}: image BUILD FAILED "
+                                  f"(see {_img_log})", tui.COLOR_ERROR)
                     _all_ready = False
                     continue
             console.print(f"    {_r['name']}: image {_how.get(_state, _state)}",
