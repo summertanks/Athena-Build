@@ -7298,6 +7298,31 @@ def test_iso_builders_write_md5sum_manifest_mat08():
     assert 'live-media-check' in _iso, "live ISO must offer a Check-media entry"
 
 
+def test_mat09_live_root_password_randomized_and_sudo_guaranteed():
+    """MAT-09: the base chroot no longer ships the fixed `root`/`root` default
+    credential — systemd-firstboot gets a per-build random password, and a
+    `%sudo NOPASSWD` sudoers.d guarantees the live user (added to `sudo` by
+    live-config) can still escalate (else a random root pw would lock it out)."""
+    _src = open(os.path.join(_ROOT, 'scripts', 'chroot.py')).read()
+    assert '--root-password=root' not in _src, "the fixed root/root must be gone"
+    assert 'secrets.token_urlsafe' in _src, "root password must be randomized"
+    assert '--root-password={_root_pw}' in _src, "firstboot must use the random pw"
+    assert '/etc/sudoers.d/90-athena-nopasswd' in _src
+    assert '%sudo ALL=(ALL:ALL) NOPASSWD:ALL' in _src
+
+
+def test_mat09_disk_image_locks_root_and_adds_sudo_user():
+    """MAT-09: the disk image LOCKS root and adds a cloud-style passwordless-sudo
+    user (asgard, in the sudo group) with a per-build random console password —
+    so the qcow2 ships no default credential and stays loginnable."""
+    _src = open(os.path.join(_ROOT, 'scripts', 'disk_image.py')).read()
+    assert "'passwd', '-l', 'root'" in _src, "disk image must lock root"
+    assert "'useradd'" in _src and "'-G', 'sudo'" in _src, "asgard in sudo group"
+    assert 'chpasswd' in _src and 'secrets.token_urlsafe' in _src, \
+        "asgard needs a random console password"
+    assert "'asgard'" in _src
+
+
 def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
     """CONF-15: client.images.build(buildargs=…) MUST pass
     SNAPSHOT_BASEURL / ARCHIVE_NAME / SNAPSHOT_TS so the Dockerfile's
@@ -39762,6 +39787,8 @@ def main() -> int:
         test_mat04_build_container_mounts_source_and_patch_readonly,
         test_write_iso_md5sum_manifest_mat08,
         test_iso_builders_write_md5sum_manifest_mat08,
+        test_mat09_live_root_password_randomized_and_sudo_guaranteed,
+        test_mat09_disk_image_locks_root_and_adds_sudo_user,
         test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
         test_sta40_no_shell_interpolation_in_sudo_sites,
         test_sta44_index_verified_against_release_sha,
