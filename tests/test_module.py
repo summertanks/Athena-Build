@@ -7242,6 +7242,62 @@ def test_mat04_build_container_mounts_source_and_patch_readonly():
     assert not re.search(r"'/patch',\s*'mode':\s*'rw'", _body)
 
 
+def test_write_iso_md5sum_manifest_mat08():
+    """MAT-08: write_iso_md5sum_manifest emits a SORTED Debian-style md5sum.txt
+    (excluding itself) via `sudo -A find … -exec md5sum` → `sudo -A tee`, with
+    the password supplied through SUDO_ASKPASS so tee's stdin is the manifest
+    ONLY (no password/content mixing)."""
+    import types as _types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    with tempfile.TemporaryDirectory() as _stage:
+        _calls = []
+        _tee = {}
+
+        def _fake_run(argv, **kw):
+            _calls.append(argv)
+            if 'find' in argv:                # the hashing pass (unsorted)
+                return _types.SimpleNamespace(
+                    returncode=0, stderr='',
+                    stdout=("bbb  ./live/filesystem.squashfs\n"
+                            "aaa  ./boot/vmlinuz\n"))
+            if 'tee' in argv:
+                _tee['data'] = kw.get('input')
+                _tee['askpass'] = 'SUDO_ASKPASS' in (kw.get('env') or {})
+                return _types.SimpleNamespace(returncode=0, stdout='', stderr='')
+            return _types.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+        _orig = utils.subprocess
+        utils.subprocess = _types.SimpleNamespace(run=_fake_run, DEVNULL=-3)
+        try:
+            _ok = utils.write_iso_md5sum_manifest(_stage, 'pw')
+        finally:
+            utils.subprocess = _orig
+    assert _ok is True
+    _find = next(a for a in _calls if 'find' in a)
+    assert '-A' in _find and 'md5sum' in _find and 'md5sum.txt' in _find, _find
+    # tee receives the SORTED manifest (and only that), password via askpass.
+    assert _tee['data'] == ("aaa  ./boot/vmlinuz\n"
+                            "bbb  ./live/filesystem.squashfs\n"), _tee['data']
+    assert _tee['askpass']
+
+
+def test_iso_builders_write_md5sum_manifest_mat08():
+    """MAT-08 wiring: both ISO builders write md5sum.txt BEFORE grub-mkrescue,
+    and the live ISO offers a `live-media-check` boot entry."""
+    _iso = open(os.path.join(_ROOT, 'scripts', 'iso.py')).read()
+    _inst = open(os.path.join(_ROOT, 'scripts', 'iso_installer.py')).read()
+    assert 'write_iso_md5sum_manifest' in _iso, "live ISO must write the manifest"
+    assert 'write_iso_md5sum_manifest' in _inst, "installer must write the manifest"
+    assert (_iso.index('write_iso_md5sum_manifest')
+            < _iso.index('container.run_grub_mkrescue(')), \
+        "manifest must be written before grub-mkrescue (live)"
+    assert (_inst.index('write_iso_md5sum_manifest')
+            < _inst.index('if not _run_grub_mkrescue(')), \
+        "manifest must be written before grub-mkrescue (installer)"
+    assert 'live-media-check' in _iso, "live ISO must offer a Check-media entry"
+
+
 def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
     """CONF-15: client.images.build(buildargs=…) MUST pass
     SNAPSHOT_BASEURL / ARCHIVE_NAME / SNAPSHOT_TS so the Dockerfile's
@@ -39704,6 +39760,8 @@ def main() -> int:
         test_conf15_dockerfile_pins_toolchain_to_snapshot,
         test_conf15_buildcontainer_image_tag_carries_snapshot_ts,
         test_mat04_build_container_mounts_source_and_patch_readonly,
+        test_write_iso_md5sum_manifest_mat08,
+        test_iso_builders_write_md5sum_manifest_mat08,
         test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
         test_sta40_no_shell_interpolation_in_sudo_sites,
         test_sta44_index_verified_against_release_sha,

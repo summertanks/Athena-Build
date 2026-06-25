@@ -197,6 +197,14 @@ class _IsoMixin:
             f'    linux  /boot/vmlinuz boot=live components username={_live_user} console=tty0 nomodeset\n'
             '    initrd /boot/initrd.img\n'
             '}\n'
+            '\n'
+            # live-media-check verifies the burned media against md5sum.txt
+            # (written at staging root) before booting — catches a corrupt USB
+            # write up front rather than failing confusingly later (MAT-08).
+            f'menuentry "Check media and boot {_name} {_version}" {{\n'
+            f'    linux  /boot/vmlinuz boot=live components live-media-check username={_live_user} console=tty0\n'
+            '    initrd /boot/initrd.img\n'
+            '}\n'
         )
         with open(os.path.join(_staging_grub, 'grub.cfg'), 'w') as fh:
             fh.write(_grub_cfg)
@@ -297,6 +305,16 @@ class _IsoMixin:
 
         _sq_mb = os.path.getsize(_squashfs) // (2 ** 20)
         tui.console.print(f"squashfs created: {_sq_mb} MB")
+
+        # ── Step 5.5: on-media integrity manifest ─────────────────────────────
+        # Write md5sum.txt over the fully-staged tree (incl. the squashfs) so a
+        # `live-media-check` boot can detect a corrupt USB/DVD write.  Best-
+        # effort: a manifest failure must not block an otherwise-good ISO.
+        if utils.write_iso_md5sum_manifest(_staging, self._password):
+            tui.console.print("md5sum.txt written (live-media-check ready)")
+        else:
+            tui.console.print(
+                "WARNING: md5sum.txt not written — live-media-check unavailable")
 
         # ── Step 6: run grub-mkrescue ─────────────────────────────────────────
         logger.info("step 6/6: grub-mkrescue (in build container) → ISO")
