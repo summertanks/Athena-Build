@@ -1741,7 +1741,10 @@ class SourceCommandsMixin(SessionState):
             logger.info(f"Package {_src.package} already built [SKIPPED]")
             return ('skipped', 0)
 
-        _recipe = self.container.compose_recipe(_src)
+        # Per-remote localmirror: emit the file:///localmirror source ONLY when
+        # THIS slot's remote was set up with a build mirror (RMIRROR-01).
+        _slot_lm = bool(_slot.get('local_mirror'))
+        _recipe = self.container.compose_recipe(_src, localmirror=_slot_lm)
         if _recipe is None:
             logger.warning(f"remotebuild: {_src.package} has no .dsc — skipped")
             return ('skipped', 0)
@@ -1765,12 +1768,9 @@ class SourceCommandsMixin(SessionState):
         # console (N workers would interleave).
         _logpath = os.path.join(self.container.buildlog_path, _src.package)
 
-        # Mount the on-remote build mirror only when the recipe actually emits
-        # the file:///localmirror source (set by init after a successful stage).
-        # Keeps mount-presence in lockstep with source-presence.
-        _lm_dir = (_ro.REMOTE_LOCALMIRROR_DIR
-                   if getattr(self.container, '_localmirror_active', False)
-                   else None)
+        # Mount the on-remote build mirror in lockstep with the recipe's
+        # file:///localmirror source — both gated on THIS slot's per-remote flag.
+        _lm_dir = _ro.REMOTE_LOCALMIRROR_DIR if _slot_lm else None
         with _tempfile.TemporaryDirectory() as _bundle:
             _ro.stage_bundle(
                 _bundle,
@@ -1900,6 +1900,7 @@ class SourceCommandsMixin(SessionState):
             'ssh_key':      _r.get('ssh_key') or '',
             'build_cpus':   _r.get('build_cpus') or 0.0,
             'build_memory': _r.get('build_memory') or '',
+            'local_mirror': bool(_r.get('local_mirror')),
             'free':         max(1, int(_r.get('max_parallel_builds', 1) or 1)),
             'alive':        True,
         } for _r in remotes]

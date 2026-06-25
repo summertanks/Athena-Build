@@ -38946,9 +38946,10 @@ def test_stage_bundle_writes_localmirror_dir_into_build_json():
 
 
 def test_init_remote_builds_image_and_gates_localmirror():
-    """container remote init builds the image ON the remote when absent, and —
-    with CreateLocalMirror — populates the mirror per remote, enabling the
-    file:///localmirror source ONLY when ready on every remote (gated)."""
+    """container remote init builds the image ON the remote when absent, and
+    stages the build mirror PER-REMOTE (each remote's own LocalMirror flag),
+    gated on readiness.  No container-wide _localmirror_active for remote builds
+    (per-remote applied at compose time)."""
     with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _f:
         _b = _f.read()
     _m = _b[_b.index('def cmd_init_remote_container'):]
@@ -38956,10 +38957,87 @@ def test_init_remote_builds_image_and_gates_localmirror():
     assert 'build_remote_image' in _m, (
         "init must BUILD the image on the remote when neither side has it")
     assert '_stage_remote_localmirror_bars' in _m, "init populates the mirror"
-    assert '_localmirror_active = bool(_want_lm and _all_ready)' in _m, (
-        "source emitted only when the mirror is ready on EVERY remote")
+    assert "if _r.get('local_mirror'):" in _m, (
+        "localmirror staging is gated PER-REMOTE on that remote's flag")
+    assert '_localmirror_active = False' in _m, (
+        "no container-wide localmirror for remote builds (per-remote at compose)")
     assert 'build_container_ready = _all_ready' in _m, (
         "init is gated on image + mirror readiness")
+
+
+def test_add_remote_persists_per_remote_local_mirror_flag():
+    """RMIRROR-01: add_remote stores a per-remote LocalMirror flag; list_remotes
+    returns it (default off)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfgdir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfgdir)
+
+        class _Cfg:
+            config_path = os.path.join(_cfgdir, 'build.conf')
+        _cfg = _Cfg()
+        assert utils.add_remote(_cfg, name='r1', host='ssh://u@h1',
+                                local_mirror=True)[0]
+        assert utils.add_remote(_cfg, name='r2', host='ssh://u@h2')[0]
+        _rs = {_r['name']: _r for _r in utils.list_remotes(_cfg)}
+        assert _rs['r1']['local_mirror'] is True
+        assert _rs['r2']['local_mirror'] is False
+
+
+def test_write_snapshot_sources_localmirror_override():
+    """_write_snapshot_sources_cmd's `localmirror` override emits/omits the
+    file:///localmirror source independent of the container's own
+    _localmirror_active — the per-remote hook (None falls back to the flag)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+
+    class _M:
+        suite = 'bookworm'
+        component = 'main'
+        url = 'http://snapshot.debian.org/archive/debian/20260101T000000Z'
+
+    def _gen(active, override):
+        _stub = type('S', (), {
+            'config': type('C', (), {
+                'snapshot_baseurl': 'http://snapshot.debian.org/archive'})(),
+            'mirrors': [_M()],
+            '_localmirror_active': active,
+        })()
+        return buildcontainer.BuildContainer._write_snapshot_sources_cmd(
+            _stub, localmirror=override)
+    assert 'file:///localmirror' in _gen(False, True)      # override on
+    assert 'file:///localmirror' not in _gen(True, False)  # override off
+    assert 'file:///localmirror' in _gen(True, None)       # None → flag
+    assert 'file:///localmirror' not in _gen(False, None)
+
+
+def test_remotebuild_composes_recipe_per_slot_localmirror():
+    """The fan-out worker composes the recipe with THIS slot's per-remote
+    localmirror flag (so file:///localmirror + the /localmirror mount only
+    appear for builds dispatched to a remote that has a build mirror)."""
+    import re
+    _body = _session_source()
+    _one = re.search(r'def _remotebuild_one_source\(self.*?(?=\n    def )',
+                     _body, re.DOTALL).group(0)
+    assert "_slot.get('local_mirror')" in _one
+    assert 'compose_recipe(_src, localmirror=_slot_lm)' in _one
+    _fan = re.search(r'def _remotebuild_fanout\(self.*?(?=\n    def )',
+                     _body, re.DOTALL).group(0)
+    assert "'local_mirror': bool(_r.get('local_mirror'))" in _fan
+
+
+def test_ensure_local_mirror_no_per_run_prompt():
+    """The local-container mirror decision is made ONCE (container local init);
+    `_ensure_local_mirror` must NOT re-prompt on every cache parse."""
+    import re
+    with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_cache.py')) as _f:
+        _src = _f.read()
+    _fn = re.search(r'def _ensure_local_mirror\(self.*?(?=\n    def )',
+                    _src, re.DOTALL).group(0)
+    assert 'Download / refresh the local build mirror now?' not in _fn, (
+        "must not re-prompt each cache parse")
+    assert 'PROMPT_YESNO' not in _fn, "no y/n in the per-parse mirror refresh"
 
 
 def test_local_mirror_index_writes_flat_apt_repo_with_origin():
@@ -39028,6 +39106,10 @@ def main() -> int:
         test_remote_build_run_container_mounts_localmirror,
         test_stage_bundle_writes_localmirror_dir_into_build_json,
         test_init_remote_builds_image_and_gates_localmirror,
+        test_add_remote_persists_per_remote_local_mirror_flag,
+        test_write_snapshot_sources_localmirror_override,
+        test_remotebuild_composes_recipe_per_slot_localmirror,
+        test_ensure_local_mirror_no_per_run_prompt,
         test_local_mirror_index_writes_flat_apt_repo_with_origin,
         test_local_mirror_index_failure_leaves_no_valid_mirror,
         test_local_mirror_is_valid_for_keys_to_snapshot_marker,
