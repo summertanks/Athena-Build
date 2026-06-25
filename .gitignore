@@ -32,8 +32,10 @@ config/*.key
 
 # Per-checkout snapshot pins (base + current) — operational state set via
 # `snapshot select`, not shared.  A fresh checkout has none and is prompted
-# to select both on the first `cache build` (UPD-01).
+# to select both on the first `cache build` (UPD-01).  snapshot.history is the
+# per-checkout append-log of selections — same operational category.
 config/snapshot.state
+config/snapshot.history
 
 # Machine-local onboarding sidecar — build Mode, system Role, SetupComplete,
 # builder Name, host build tuning ([Build] MaxParallelBuilds/BuildCpus/
