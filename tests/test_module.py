@@ -37050,6 +37050,78 @@ def test_selection_lock_restore_roundtrips_lists_with_meta():
         assert open(_cfg.livelist_path).read().strip() == 'live-boot'
 
 
+def test_selection_lock_restore_seeds_raw_byte_faithful():
+    """SELECT-01: seeds_raw round-trips the four list files BYTE-FOR-BYTE on
+    restore — operator comments survive and pkg-group order is preserved
+    (the parsed-and-re-rendered form alphabetises groups + strips comments)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    import utils as _u
+    import types
+    with tempfile.TemporaryDirectory() as _root:
+        _cfgdir = os.path.join(_root, 'config')
+        os.makedirs(_cfgdir)
+        _cfg = types.SimpleNamespace(
+            pkglist_path=os.path.join(_cfgdir, 'pkg.list'),
+            livelist_path=os.path.join(_cfgdir, 'live.list'),
+            installerlist_path=os.path.join(_cfgdir, 'installer.list'),
+            poollist_path=os.path.join(_cfgdir, 'pool.list'))
+        # pkg.list: groups in NON-alphabetical order, with comments + a
+        # tasksel description — exactly what the name-render would mangle.
+        _pkg_text = (
+            "# operator notes: desktop must resolve before base\n"
+            "[desktop]\n"
+            "## Description: Desktop environment\n"
+            "xterm\n"
+            "\n"
+            "[base]\n"
+            "coreutils\n"
+            "dpkg\n"
+        )
+        _pool_text = (
+            "# pool.list — shipped in /cdrom/pool, never installed\n"
+            "# both grub flavours intentionally co-exist here\n"
+            "grub-pc\n"
+            "grub-efi-amd64\n"
+        )
+        _u._atomic_write_bytes(_cfg.pkglist_path, _pkg_text.encode('utf-8'))
+        _u._atomic_write_bytes(_cfg.poollist_path, _pool_text.encode('utf-8'))
+        _u._atomic_write_bytes(_cfg.livelist_path, b"live-boot\n")
+        _u._atomic_write_bytes(_cfg.installerlist_path, b"anna\n")
+
+        # Capture exactly what assemble_state would stash.
+        _lock = {
+            'seeds': _sl.seeds_from_config(_cfg),
+            'seeds_raw': _sl.seeds_raw_from_config(_cfg),
+        }
+        assert set(_lock['seeds_raw']) == {'pkg', 'live', 'installer', 'pool'}
+        assert _lock['seeds_raw']['pkg'] == _pkg_text
+
+        # Blow the files away and restore from the lock.
+        for _p in (_cfg.pkglist_path, _cfg.poollist_path,
+                   _cfg.livelist_path, _cfg.installerlist_path):
+            os.remove(_p)
+        _sl.restore_list_files(_cfg, _lock)
+
+        # Byte-for-byte: comments + group order preserved.
+        assert open(_cfg.pkglist_path).read() == _pkg_text
+        assert open(_cfg.poollist_path).read() == _pool_text
+        # group ORDER (desktop before base) survived — the render would invert it
+        assert (open(_cfg.pkglist_path).read().index('[desktop]')
+                < open(_cfg.pkglist_path).read().index('[base]'))
+
+        # Legacy lockfile (no seeds_raw) falls back to the name-render: it still
+        # round-trips the GROUPS but loses comments and alphabetises order.
+        _legacy = {'seeds': _lock['seeds']}
+        for _p in (_cfg.pkglist_path, _cfg.poollist_path):
+            os.remove(_p)
+        _sl.restore_list_files(_cfg, _legacy)
+        _rendered = open(_cfg.pkglist_path).read()
+        assert '# operator notes' not in _rendered          # comments gone
+        assert _u.parse_pkg_list_groups(_cfg.pkglist_path) == {
+            'desktop': ['xterm'], 'base': ['coreutils', 'dpkg']}
+
+
 def test_claim_schema_deprecated_state_and_new_deprecation():
     """SELECT-LOCK Chunk 7: 'deprecated' is a valid + inactive claim state;
     new_deprecation keeps the file identity (unlike a tombstone) + records
@@ -40011,6 +40083,7 @@ def main() -> int:
         test_selection_lock_assemble_state_shape_and_pin_union,
         # SELECT-LOCK Chunk 5 — cache restore / purge-state
         test_selection_lock_restore_roundtrips_lists_with_meta,
+        test_selection_lock_restore_seeds_raw_byte_faithful,
         # SELECT-LOCK Chunk 7 — mirror deprecated claim state
         test_claim_schema_deprecated_state_and_new_deprecation,
         test_claim_from_jsonl_accepts_deprecated_and_v1_lines,
