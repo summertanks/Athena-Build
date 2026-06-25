@@ -148,16 +148,26 @@ def build_remote_image(host: str, dockerfile_path: str, image_tag: str,
     deferring the multi-ten-minute build to the first `source remotebuild`."""
     _flags = [f'--build-arg {shlex.quote(f"{_k}={_v}")}'
               for _k, _v in (build_args or {}).items()]
-    _cmd = (f"docker build -t {shlex.quote(image_tag)} "
+    # --progress=plain → line-based output; BuildKit's default TTY progress uses
+    # carriage-returns + cursor control that corrupt a curses TUI when streamed
+    # back over ssh.  Capture stdout/stderr (Popen, NOT inherited) and route each
+    # line through `log` so it never writes raw to the terminal under the TUI.
+    _cmd = (f"docker build --progress=plain -t {shlex.quote(image_tag)} "
             f"{' '.join(_flags)} -")
     log(f"building image {image_tag} on {host} (this can take a while) …")
     try:
         with open(dockerfile_path, 'rb') as _fh:
-            _r = subprocess.run(_ssh_base(host, ssh_key) + [_cmd], stdin=_fh)
+            _proc = subprocess.Popen(
+                _ssh_base(host, ssh_key) + [_cmd], stdin=_fh,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            assert _proc.stdout is not None
+            for _line in _proc.stdout:
+                log(_line.rstrip('\n'))
+            _proc.wait()
     except OSError as _e:
         log(f"build_remote_image: {_e}")
         return False
-    return _r.returncode == 0
+    return _proc.returncode == 0
 
 
 def stage_remote_localmirror(
