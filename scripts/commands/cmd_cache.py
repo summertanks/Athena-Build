@@ -14,7 +14,6 @@ import os
 from typing import Optional
 
 import build_closure
-import buildcontainer
 import dependencytree
 import local_mirror
 import selection_lock
@@ -22,7 +21,6 @@ import tui
 import utils
 from cache import Cache
 from tui import console, Prompt, PROMPT_YESNO, Spinner
-from utils import BuildConfig
 
 from commands.base import SessionState
 

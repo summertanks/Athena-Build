@@ -9,7 +9,6 @@ commands/base.py for how the mixin shares session state.
 """
 import logging
 import os
-import re
 from typing import Optional
 
 import tui
@@ -1137,7 +1136,6 @@ class MirrorCommandsMixin(SessionState):
         the coord-head with neighbours = local config's mirror URL set.
         """
         import mirror as _mirror
-        import signing
         import coord.publish as _publish
         # Resolve identity
         _keys = self._coord_self_keys()

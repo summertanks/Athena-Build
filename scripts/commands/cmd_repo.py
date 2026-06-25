@@ -9,7 +9,6 @@ BuildSession; see commands/base.py for how the mixin shares session state.
 """
 import logging
 import os
-import re
 import shutil
 
 import apt_pkg
@@ -17,7 +16,6 @@ import arch_filter
 import repo_audit
 import tui
 import utils
-from cache import Cache
 from tui import console, Prompt, PROMPT_YESNO, Spinner, ProgressBar
 
 from commands.base import SessionState

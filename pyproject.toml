@@ -97,7 +97,6 @@ select = [
     "W",      # pycodestyle warnings — whitespace
 ]
 ignore = [
-    "F401",   # unused imports — many tui re-exports + intentional warm-up imports
     "F841",   # unused local — surfaces in a few defensive try/except blocks
 ]
 

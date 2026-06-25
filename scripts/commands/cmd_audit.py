@@ -8,9 +8,7 @@ shares session state.
 """
 import logging
 import os
-import re
 
-import buildcontainer
 import repo_audit
 import tui
 import utils

@@ -668,7 +668,6 @@ def test_configured_summary_reports_state_and_warns_unregistered():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import onboarding
-    import utils
     with tempfile.TemporaryDirectory() as _tmp:
         cfg_path = _write_test_config(
             _tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
@@ -3259,7 +3258,6 @@ def test_ux08_signal_loss_fixes():
     (`tui.COLOR_ERROR`) prints red, not green; the LogEvent default tab is a
     real tab ('log', not the long-gone 'build' that silently dropped logs)."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import io
     from unittest.mock import patch
     import cli
     import tui
@@ -3343,7 +3341,7 @@ def test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits():
     """UX-05e: Cli with one_shot_cmds populated must dispatch each
     in order then exit (no REPL).  Exit code reflects worst outcome."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
     import cli
     _c = object.__new__(cli.Cli)
     _c._cmds = {}
@@ -8361,7 +8359,6 @@ def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
     when force is in args."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     from commands import cmd_cache
     import tui as _tui
     from build import BuildSession, BuildFlags
@@ -8419,7 +8416,6 @@ def test_cmd_parse_dependency_skips_when_already_ready_no_force():
     be instantiated."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     import dependencytree
     from build import BuildSession, BuildFlags
 
@@ -8450,7 +8446,6 @@ def test_cmd_parse_dependency_runs_when_force_passed_even_if_ready():
     (which happens AFTER the guard but BEFORE any heavy work)."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     from commands import cmd_cache
     from build import BuildSession, BuildFlags
 
@@ -8629,7 +8624,6 @@ def test_cmd_container_purge_resets_flag_and_drops_session_ref():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import docker as _docker  # confirm available before running test
-    import build
     from build import BuildSession, BuildFlags
 
     _sess = BuildSession.__new__(BuildSession)
@@ -8658,7 +8652,6 @@ def test_cmd_container_purge_removes_athena_containers_and_images():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import docker as _docker
-    import build
     from build import BuildSession, BuildFlags
 
     _sess = BuildSession.__new__(BuildSession)
@@ -8707,7 +8700,6 @@ def test_cmd_container_purge_handles_docker_connect_failure_gracefully():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import docker as _docker
-    import build
     from build import BuildSession, BuildFlags
 
     _sess = BuildSession.__new__(BuildSession)
@@ -10216,7 +10208,6 @@ def test_scan_stale_files_covers_main_udeb_and_recovers_malformed():
     from unittest.mock import patch
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import utils, repo_audit
-    import build
     from build import BuildSession
 
     assert 'main-udeb' in utils._STALE_SCAN_SUBDIRS, (
@@ -12018,7 +12009,7 @@ def test_derive_extras_src_names_marks_extras_only_sources():
 def test_dep_tree_initialises_subset_exclusive_sets_empty():
     """A fresh DependencyTree has live_exclusive / installer_exclusive
     pkg + src sets that exist and start empty."""
-    import sys, types
+    import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import dependencytree
     # __init__ requires a real Cache; bypass via __new__ and replicate the
@@ -13475,7 +13466,6 @@ def test_parse_dependency_reuses_lookahead_for_multi_version_same_name():
     from collections import defaultdict
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import dependencytree
-    import tui
 
     class _Pkg:
         """Minimal Package surface used by parse_dependency's early
@@ -13903,7 +13893,7 @@ def test_sta24_check_dep_drift_warns_on_lost_selected_dep():
     import sys as _sys, subprocess as _subprocess
     from unittest.mock import patch
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import dep_drift, utils, tui, package
+    import dep_drift, utils, tui
 
     class _CachePkg:
         def __init__(self, depends):
@@ -14937,7 +14927,6 @@ def _stub_session_for_signing_gate():
     + restores tui.tui_instance so the Prompt() construction inside the
     helper can resolve the singleton."""
     import build
-    import tui
 
     class _Cfg:
         signing_key_uid = 'Athena Build <athena@local>'
@@ -16901,7 +16890,6 @@ def test_render_failure_one_shot_capture_writes_post_mortem():
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from tui import dispatcher as _disp
-    from tui.events import PrintEvent
     from tui.state import State
 
     # Renderer that always raises — simulates the silent-render bug.
@@ -17420,7 +17408,6 @@ def test_cmd_cache_info_prints_identity_and_relations():
     relations; missing names report 'not found'."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     from commands import cmd_cache
     from build import BuildSession
 
@@ -21737,7 +21724,6 @@ def test_audit_identity_scan_default_true():
     production builds keep the gate on without operator action."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import BuildConfig
     with tempfile.TemporaryDirectory() as tmp:
         mirror_block = """
     [Mirror.main]
@@ -21756,7 +21742,6 @@ def test_audit_identity_scan_explicit_false_parses():
     """An explicit `[Audit] IdentityScan = false` flips the flag."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import BuildConfig
     mirror_block = """
     [Mirror.main]
     Suffix =
@@ -22122,7 +22107,6 @@ def test_reconstruct_historical_ledger_seeds_prior_generation_from_recorded_n():
     must synthesize the u1 entry from the recorded N so asg_next_n predicts u2."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
-    import utils as _u
     from bump import asg_next_n
     import types
     _src = types.SimpleNamespace(package='python3.11')
@@ -23163,7 +23147,6 @@ def test_remotebuild_fanout_respects_slot_caps_and_requeues():
     import threading
     import time
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     import remote_orchestrate as _ro
     from build import BuildSession
 
@@ -26618,7 +26601,7 @@ def test_local_cleanup_keeps_highest_prunes_superseded_and_flags_orphan():
     if not (_sh.which('dpkg-deb') and _sh.which('dpkg-scanpackages')):
         return
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build, repo_audit
+    import repo_audit
     from build import BuildSession
     with tempfile.TemporaryDirectory() as _tmp:
         # Disable security so BuildConfig.__init__ doesn't early-return on a
@@ -29376,7 +29359,7 @@ def test_normalize_built_artifacts_uses_uniform_n_across_siblings():
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import buildcontainer as _bc
     import utils as _u
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     # Simulate published history: meta has 4 prior asg versions, the
     # ABI sibling is fresh.  Per-file N candidates: meta → 5, sibling → 1.
@@ -30225,8 +30208,6 @@ def test_build_record_v1_legacy_record_reads_tolerantly():
     have no output_hashes field).  Consumers treat absent
     output_hashes as {} — the backfill helper migrates them on demand."""
     _u = _utils_module()
-    import hmac as _hmac
-    import hashlib as _hashlib
     import json as _json
     with tempfile.TemporaryDirectory() as _td:
         # Hand-write a v1 record (no output_hashes field).
@@ -30851,7 +30832,6 @@ def test_mirror_recompute_base_returns_oldest_snapshot_across_claims():
     retracted entries; reads across all builders."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     from build import BuildSession
     import coord.schema as _schema
     import coord.store as _store
@@ -31065,7 +31045,6 @@ def test_mirror_pull_write_build_records_built_pkg_records_pulled_from():
     "we built it" from "we pulled it"."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     import utils as _utils
     from build import BuildSession
 
@@ -31117,7 +31096,6 @@ def test_mirror_pull_write_build_records_tunneled_pkg_records_republished_from()
     pulled_from and stays claimable."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     import utils as _utils
     from build import BuildSession
 
@@ -31219,7 +31197,6 @@ def test_mirror_pull_write_build_records_aggregates_multi_output_pkg():
     outputs listed."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     import utils as _utils
     from build import BuildSession
 
@@ -31277,7 +31254,6 @@ def test_generate_pending_claims_threads_republished_from_per_output():
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import coord.publish as _publish
-    import coord.schema as _schema
 
     # Fake a buildlog dir + custom read_build_record stub
     def _fake_read(_dir, _pkg):
@@ -36118,7 +36094,6 @@ def test_mirror_pull_falls_back_to_live_claims_when_no_ledger():
     live-claim set with NO snapshot-equality filter, so older-snapshot live
     claims (which the old :1541 filter stranded on a mixed-snapshot mirror)
     are downloaded."""
-    import sys as _sys
     import hashlib as _hashlib
     _a = _hashlib.sha256(b'liba').hexdigest()
     _e = _hashlib.sha256(b'libe').hexdigest()
@@ -36439,7 +36414,6 @@ def test_mirror_audit_disk_vs_claims_flags_missing_and_orphan():
     C has no claim (orphan, WARNING).  D is retracted → not counted."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
     from build import BuildSession
     with tempfile.TemporaryDirectory() as _td:
         _pool = os.path.join(_td, 'pool')
@@ -36667,7 +36641,7 @@ def test_remote_publish_drops_claim_when_push_fails():
     import coord.store as _store
     import coord.identity as _identity
     import coord.reconcile as _reconcile
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
 
     with tempfile.TemporaryDirectory() as _td:
         class _Cfg:
@@ -37189,7 +37163,6 @@ def test_selection_lock_closure_matches_lock_statuses():
     nolock / badlock so ISO + audits can refuse a stale RAM tree."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import selection_lock as _sl
-    import types
     with tempfile.TemporaryDirectory() as _root:
         _cfg = _selection_lock_cfg(_root)
         _cfg.arch = 'amd64'

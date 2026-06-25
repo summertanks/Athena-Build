@@ -17,10 +17,8 @@ facade resolution paths keep working.
 from __future__ import annotations
 
 import curses
-import signal
-import sys
 import threading
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from .dispatcher import Dispatcher
 from .events import (
@@ -33,7 +31,7 @@ from .render import (
     COLOR_REVERSE, COLOR_WARNING, MIN_COLS, MIN_LINES, Renderer,
 )
 from .state import (
-    DEFAULT_TABS, SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARNING, State,
+    SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARNING,
 )
 
 

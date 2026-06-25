@@ -14,8 +14,8 @@ enum-tagged record.
 from __future__ import annotations
 
 from concurrent.futures import Future
-from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from dataclasses import dataclass
+from typing import Any, List
 
 
 @dataclass(frozen=True)

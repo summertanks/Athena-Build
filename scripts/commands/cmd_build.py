@@ -9,7 +9,6 @@ mixin shares session state.
 import glob
 import logging
 import os
-import re
 import subprocess
 
 import buildsystem
@@ -17,7 +16,6 @@ import installer_chroot
 import iso_installer
 import tui
 import utils
-from cache import Cache
 from tui import console
 
 from commands.base import SessionState

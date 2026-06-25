@@ -121,7 +121,7 @@ class Package(Packages):
         # synthetic Package objects (e.g. ones built from `dpkg-deb -f` output
         # in BuildSystem._check_dep_drift).  Consumers that need to download
         # this package's .deb must check that _mirror is set.
-        self._mirror = None  # type: 'Optional[utils.Mirror]'
+        self._mirror: 'Optional[utils.Mirror]' = None
 
         # 'depends', 'pre-depends', 'recommends', 'suggests', 'breaks',
         # 'conflicts', 'provides', 'replaces', 'enhances', 'built-using']
@@ -486,7 +486,7 @@ class Source(Sources):
         # Origin mirror (set by Cache.__build_cache after parsing).  Used by
         # download_source to fetch tarballs from the right pool — sources in
         # bookworm-security live under a different baseid than main.
-        self._mirror = None  # type: 'Optional[utils.Mirror]'
+        self._mirror: 'Optional[utils.Mirror]' = None
 
         self.binary: List[str] = []
 

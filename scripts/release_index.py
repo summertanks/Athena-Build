@@ -16,7 +16,7 @@ deterministic.
 
 import html
 import json
-from typing import List, Optional
+from typing import List
 
 # Bump when the releases.json shape changes in a way consumers must notice.
 RELEASES_SCHEMA_VERSION = 1
