@@ -1038,15 +1038,10 @@ class CacheCommandsMixin(SessionState):
             console.print("  insufficient disk space — skipping local mirror",
                           tui.COLOR_WARNING)
             return
-        _resp = Prompt(
-            PROMPT_YESNO,
-            "Download / refresh the local build mirror now?",
-            informational=True,
-        ).get_response()
-        if _resp.lower() not in ('y', 'yes'):
-            console.print("  skipped — containers use snapshot.debian.org",
-                          tui.COLOR_INFO)
-            return
+        # No per-run prompt: the decision to keep a local mirror was made ONCE
+        # (at `container local init` / `set create-local-mirror`).  Here we just
+        # keep it current with the snapshot — refresh is incremental (sha-skip),
+        # so a steady snapshot is a near-no-op.
         if _stale:
             local_mirror.purge(_dir)
         _dl, _fail = local_mirror.download(_pl, _dir, _ts)

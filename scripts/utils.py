@@ -2197,7 +2197,8 @@ def _write_remote_conf(config: 'BuildConfig',
 
 def list_remotes(config: 'BuildConfig') -> 'list[dict]':
     """Every configured remote as a dict: {name, host, type, ssh_key,
-    max_parallel_builds, build_cpus, build_memory}.  Declaration order."""
+    max_parallel_builds, build_cpus, build_memory, local_mirror}.  Declaration
+    order."""
     _parser = read_remote_conf(config)
     _out: 'list[dict]' = []
     for _section in _parser.sections():
@@ -2215,6 +2216,11 @@ def list_remotes(config: 'BuildConfig') -> 'list[dict]':
                 _section, 'BuildCpus', fallback=0.0),
             'build_memory':        _parser.get(
                 _section, 'BuildMemory', fallback=''),
+            # Per-remote build-mirror toggle (RMIRROR-01) — whether `container
+            # remote init` stages a snapshot-pinned build-closure apt mirror ON
+            # this remote.  Defaults off; set at `container remote add`.
+            'local_mirror':        _parser.getboolean(
+                _section, 'LocalMirror', fallback=False),
         })
     return _out
 
@@ -2222,7 +2228,8 @@ def list_remotes(config: 'BuildConfig') -> 'list[dict]':
 def add_remote(config: 'BuildConfig', *, name: str, host: str,
                type: str = 'ssh', ssh_key: str = '',
                max_parallel_builds: int = 1, build_cpus: float = 0.0,
-               build_memory: str = '') -> 'tuple[bool, str]':
+               build_memory: str = '', local_mirror: bool = False
+               ) -> 'tuple[bool, str]':
     """Add/replace a [Remote.<name>] entry in config/remote.conf.  Returns
     (ok, detail)."""
     # Name becomes a config section + (optionally) a key filename component:
@@ -2243,6 +2250,7 @@ def add_remote(config: 'BuildConfig', *, name: str, host: str,
     _parser.set(_section, 'MaxParallelBuilds', str(max_parallel_builds))
     _parser.set(_section, 'BuildCpus', str(build_cpus))
     _parser.set(_section, 'BuildMemory', build_memory)
+    _parser.set(_section, 'LocalMirror', 'true' if local_mirror else 'false')
     _write_remote_conf(config, _parser)
     return (True, f"{'updated' if _replaced else 'added'} remote {name!r} → {host}")
 

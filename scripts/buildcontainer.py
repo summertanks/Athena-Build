@@ -829,7 +829,8 @@ class BuildContainer:
         return utils.get_sha256(
             os.path.join(config_dir, 'Dockerfile'), use_cache=False)
 
-    def _write_snapshot_sources_cmd(self) -> str:
+    def _write_snapshot_sources_cmd(
+            self, localmirror: 'Optional[bool]' = None) -> str:
         """Shell snippet that REPLACES the container's apt sources with
         our snapshot-pinned mirror list AND writes an apt preferences
         pin forcing snapshot versions to win over anything pre-installed
@@ -868,9 +869,13 @@ class BuildContainer:
         # apt fetches build-deps from local disk; snapshot.debian.org stays the
         # fallback for anything the mirror missed.  [trusted=yes] skips the GPG
         # check (the repo is host-owned and bind-mounted read-only).
+        # `localmirror` override (per-remote builds pass the target remote's
+        # flag); None falls back to this container's own _localmirror_active.
+        _lm_on = (getattr(self, '_localmirror_active', False)
+                  if localmirror is None else bool(localmirror))
         _local_src = ''
         _local_pin = ''
-        if getattr(self, '_localmirror_active', False):
+        if _lm_on:
             _local_src = 'deb [trusted=yes] file:///localmirror ./\n'
             _local_pin = (
                 "Package: *\n"
@@ -993,7 +998,8 @@ class BuildContainer:
 
     def compose_recipe(self, src_pkg: Source, *,
                        profiles_override=None,
-                       options_override=None) -> 'Optional[dict]':
+                       options_override=None,
+                       localmirror: 'Optional[bool]' = None) -> 'Optional[dict]':
         """Assemble the full build recipe for one source package WITHOUT running
         anything — image tag + build-args, the container `cmd_str`, and the
         per-package input descriptors (dsc, source-file prefix, patch dir +
@@ -1087,7 +1093,7 @@ class BuildContainer:
             f"-e 's|@BASE_ID@|{self.build_base_id}|g' "
             f"-e 's|@CODENAME@|{self.codename}|g'; "
         )
-        _write_sources = self._write_snapshot_sources_cmd()
+        _write_sources = self._write_snapshot_sources_cmd(localmirror=localmirror)
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'{_write_sources}' \
                   f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
