@@ -38720,6 +38720,52 @@ def test_stage_remote_localmirror_parses_progress_and_result():
     assert len(_seen) == 1 and _seen[0]['basename'] == 'a.deb'
 
 
+def test_stage_remote_localmirror_pushes_fork_files():
+    """file:// (fork / locally-built) closure members can't be fetched by the
+    remote — BS1 scps them into the mirror dir; only snapshot (http) members go
+    in the plan the remote downloads."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as ro
+
+    class _FakePopen:
+        def __init__(self, *a, **k):
+            self.stdout = iter([
+                ro.LM_RESULT_MARKER + ' {"downloaded":1,"skipped":0,'
+                '"failed":0,"indexed":true,"failures":[]}\n'])
+
+        def wait(self):
+            return 0
+
+    class _R:
+        returncode = 0
+
+    _runs = []
+    _orig_run, _orig_popen = ro.subprocess.run, ro.subprocess.Popen
+    ro.subprocess.run = lambda argv, **k: (_runs.append(argv) or _R())
+    ro.subprocess.Popen = _FakePopen
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _fork = os.path.join(tmp, 'base-files_athena2_amd64.deb')
+            open(_fork, 'w').write('x')
+            _runner = os.path.join(tmp, 'remote_localmirror.py')
+            open(_runner, 'w').write('x')
+            _plan = {'snapshot_ts': 'x', 'total_size': 100, 'entries': [
+                {'basename': 'base-files_athena2_amd64.deb',
+                 'url': 'file://' + _fork, 'sha256': '', 'size': 1},
+                {'basename': 'foo.deb',
+                 'url': 'https://snapshot/foo.deb', 'sha256': '', 'size': 99}],
+                'packages_index': 'Package: x\n'}
+            _res = ro.stage_remote_localmirror(
+                'u@h', _plan, _runner,
+                remote_mirror_dir='~/athena-localmirror')
+    finally:
+        ro.subprocess.run, ro.subprocess.Popen = _orig_run, _orig_popen
+    assert _res and _res['indexed'] is True
+    _flat = [' '.join(_a) for _a in _runs]
+    assert any('scp' in _s and _fork in _s and 'athena-localmirror' in _s
+               for _s in _flat), _flat
+
+
 def test_remote_build_run_container_mounts_localmirror():
     """remote_build.run_container bind-mounts an existing localmirror dir at
     /localmirror:ro, and skips the mount (with a warning) when it's absent."""
@@ -38858,6 +38904,7 @@ def main() -> int:
         test_local_mirror_plan_include_index_emits_packages_blob,
         test_remote_localmirror_populate_downloads_skips_indexes,
         test_stage_remote_localmirror_parses_progress_and_result,
+        test_stage_remote_localmirror_pushes_fork_files,
         test_remote_build_run_container_mounts_localmirror,
         test_stage_bundle_writes_localmirror_dir_into_build_json,
         test_init_remote_builds_image_and_gates_localmirror,
