@@ -2398,6 +2398,32 @@ def test_sta25_cleanup_guards_live_published_claims():
     assert 'publish-before-prune' in _src.lower(), _src
 
 
+def test_cleanup_publish_before_prune_gate_not_informational_cons14():
+    """CONS-14: the publish-before-prune gate in `repo repair cleanup force` is
+    NOT informational — `--yes` must not auto-confirm pruning a LIVE-claimed file
+    (an ordering hazard); a headless run defaults to 'n' and aborts there.  The
+    final IRREVERSIBLE-delete prompt STAYS informational (the gate above already
+    aborts any live-claimed target, so an in-order `--yes` prune may proceed)."""
+    import inspect as _inspect
+    import re as _re
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _src = _inspect.getsource(BuildSession.cmd_package_cleanup)
+    # the publish-before-prune Prompt block (LIVE mirror claim → get_response)
+    _gate = _re.search(r'LIVE mirror claim.*?\.get_response\(\)',
+                       _src, _re.DOTALL)
+    assert _gate, "publish-before-prune prompt not found"
+    assert 'informational=True' not in _gate.group(0), (
+        "publish-before-prune gate must NOT be informational — under --yes it "
+        "would auto-prune live-claimed files (CONS-14)")
+    # the final IRREVERSIBLE-delete confirm stays informational
+    _delete = _re.search(r'DELETE .*?IRREVERSIBLE.*?\.get_response\(\)',
+                         _src, _re.DOTALL)
+    assert _delete and 'informational=True' in _delete.group(0), (
+        "the final delete confirm stays informational (in-order --yes prune)")
+
+
 def test_sta37_build_chroot_gates_on_incomplete_set():
     """STA-37: build_chroot must RETURN FALSE when a planned package is
     broken or never-installed (the authoritative pass/fail gate the docstring
@@ -22568,10 +22594,17 @@ def test_remote_orchestrate_run_remote_flow():
         _marker = (f"{_ro.RESULT_MARKER} "
                    + json.dumps({'exit_code': 0,
                                  'outputs': ['adduser_3.134_all.deb']}))
+        _out_dir = os.path.join(_t, 'out')
         _calls = []
 
         def _fake_run(cmd, **_kw):
             _calls.append(cmd)
+            # Simulate the scp-DOWN delivering the artifact so the CONS-11
+            # recovery-reconcile (every marker output must land) is satisfied.
+            if any('out/*.deb' in str(_c) for _c in cmd):
+                os.makedirs(_out_dir, exist_ok=True)
+                open(os.path.join(_out_dir, 'adduser_3.134_all.deb'),
+                     'w').close()
             return mock.Mock(returncode=0)
 
         class _FakeProc:
@@ -22584,7 +22617,7 @@ def test_remote_orchestrate_run_remote_flow():
                 mock.patch.object(_ro.subprocess, 'Popen',
                                   return_value=_FakeProc()):
             _exit, _outputs = _ro.run_remote(
-                'user@h', _bundle, '/tmp/rd', os.path.join(_t, 'out'),
+                'user@h', _bundle, '/tmp/rd', _out_dir,
                 log=lambda *_a: None)
         assert _exit == 0 and _outputs == ['adduser_3.134_all.deb']
         _joined = [' '.join(c) for c in _calls]
@@ -22814,6 +22847,51 @@ def test_orchestrator_ssh_key_threads_into_argv():
     finally:
         _sp.run = _orig
     assert '-i' in _seen['argv'] and '/k' in _seen['argv']
+
+
+def test_run_remote_reconciles_partial_recovery_cons11():
+    """CONS-11: run_remote treats a SHORT scp recovery (fewer artifacts than the
+    remote's marker reported) as a TRANSPORT failure (exit 12, no outputs) so the
+    fan-out re-queues — never a `done` record claiming more .debs than landed.  A
+    COMPLETE recovery returns the marker's exit + outputs unchanged."""
+    import sys as _sys
+    import types as _types
+    import tempfile
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+
+    _marker = (_ro.RESULT_MARKER
+               + ' {"exit_code": 0, "outputs": ["a.deb", "b.deb"]}\n')
+
+    class _FakeProc:
+        def __init__(_s):
+            _s.stdout = iter([_marker])
+            _s.returncode = 0
+
+        def wait(_s):
+            return 0
+
+    def _run_remote_with(local_out_files):
+        with tempfile.TemporaryDirectory() as _bundle, \
+                tempfile.TemporaryDirectory() as _out:
+            for _f in local_out_files:
+                open(os.path.join(_out, _f), 'w').close()
+            _fake = _types.SimpleNamespace(
+                run=lambda *a, **k: _types.SimpleNamespace(returncode=0),
+                Popen=lambda *a, **k: _FakeProc(),
+                PIPE=-1, STDOUT=-2, DEVNULL=-3)
+            _orig = _ro.subprocess
+            _ro.subprocess = _fake
+            try:
+                return _ro.run_remote('h', _bundle, '/tmp/rd', _out,
+                                      log=lambda *a: None)
+            finally:
+                _ro.subprocess = _orig
+
+    # partial: only a.deb landed → transport failure
+    assert _run_remote_with(['a.deb']) == (12, [])
+    # complete: both landed → marker result passes through
+    assert _run_remote_with(['a.deb', 'b.deb']) == (0, ['a.deb', 'b.deb'])
 
 
 def test_probe_remote_build_host_parses_and_gates():
@@ -31992,7 +32070,7 @@ def test_filter_pending_by_ownership_blocks_frozen_byte_mismatch():
     """STA-47: an existing owner record means the remote pool already
     holds FROZEN bytes under this filename.  If our rebuilt bytes differ
     (builds aren't bit-reproducible) and this isn't a sanctioned reclaim,
-    publishing must be BLOCKED — push_single_deb(--ignore-existing) would
+    publishing must be BLOCKED — push_single_deb(--size-only) would
     skip the upload, so the remote keeps the old bytes while our new claim
     pins a sha the pool doesn't serve (claim_apt_sha_mismatch + peer
     delete-on-mismatch).  Covers the keep-despite-existing-owner cases:
@@ -37798,10 +37876,11 @@ def test_validate_reclaim_intents_constructs_and_skips():
 
 
 def test_push_single_deb_overwrite_drops_ignore_existing():
-    """RECLAIM-01 Chunk 4: push_single_deb keeps --ignore-existing by
-    default (immutable filenames make re-publish cheap) and drops it
-    under overwrite=True — a reclaim's remote file exists with the OLD
-    bytes, and skipping the transfer would publish a claim whose bytes
+    """push_single_deb skips an unchanged file by SIZE (`--size-only`) by
+    default — a correct immutable .deb skips, but a wrong-size (truncated)
+    remote file is re-sent instead of being trusted by name (CONS-12) — and
+    drops the flag under overwrite=True, where a reclaim's remote file exists
+    with OLD bytes and skipping the transfer would publish a claim whose bytes
     never shipped."""
     import sys as _sys
     import types as _types
@@ -37821,11 +37900,12 @@ def test_push_single_deb_overwrite_drops_ignore_existing():
         with tempfile.NamedTemporaryFile(suffix='.deb') as _f:
             _ok, _ = _tr.push_single_deb(
                 local_path=_f.name, remote_spec='u@h:/p/x.deb')
-            assert _ok and '--ignore-existing' in _argvs[-1]
+            assert _ok and '--size-only' in _argvs[-1]
+            assert '--ignore-existing' not in _argvs[-1]
             _ok, _ = _tr.push_single_deb(
                 local_path=_f.name, remote_spec='u@h:/p/x.deb',
                 overwrite=True)
-            assert _ok and '--ignore-existing' not in _argvs[-1]
+            assert _ok and '--size-only' not in _argvs[-1]
     finally:
         _tr.subprocess = _orig
 
@@ -39185,6 +39265,7 @@ def main() -> int:
         test_container_two_level_command_surface_wired,
         test_remotebuild_command_wired,
         test_orchestrator_ssh_key_threads_into_argv,
+        test_run_remote_reconciles_partial_recovery_cons11,
         test_probe_remote_build_host_parses_and_gates,
         test_copy_ssh_key_copies_with_0600_and_delete_removes_key,
         test_container_remote_add_is_guided_with_probes,
@@ -39268,6 +39349,7 @@ def main() -> int:
         test_compute_install_batches_external_deps_filtered,
         test_compute_install_batches_dpkg_dash_closure_scheduled_first,
         test_sta25_cleanup_guards_live_published_claims,
+        test_cleanup_publish_before_prune_gate_not_informational_cons14,
         test_sta37_build_chroot_gates_on_incomplete_set,
         test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds,
         test_configure_chroot_final_pass_counts_stderr_failures,

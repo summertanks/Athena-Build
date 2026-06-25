@@ -516,8 +516,9 @@ def filter_pending_by_ownership(
         # an existing owner record means the remote pool already
         # holds bytes under this filename (frozen).  If our rebuilt bytes
         # differ and this isn't a sanctioned reclaim, we must NOT publish:
-        # Step 5b's push_single_deb uses --ignore-existing for non-reclaim
-        # files, so the remote keeps the OLD bytes while our new claim
+        # Step 5b's push_single_deb uses --size-only for non-reclaim files,
+        # so a same-size remote file is kept (and a differing-size push
+        # would clobber a peer's frozen bytes) — either way our new claim
         # would pin a sha the pool doesn't serve → claim_apt_sha_mismatch
         # CRITICAL + delete-on-mismatch in every peer's pull.  (Reclaims
         # are injected AFTER this filter and carry reclaims_seq; the guard
@@ -1143,8 +1144,9 @@ def remote_publish(
         # (sibling tree of the coord root).  A push failure drops the
         # claim from the publish set (partial = converge on retry; we
         # never claim a file we didn't successfully ship).
-        # `--ignore-existing` (in push_single_deb) makes the re-publish
-        # cheap: unchanged files skip transfer entirely.
+        # `--size-only` (in push_single_deb) makes the re-publish cheap:
+        # same-size files skip; a wrong-size (truncated) remote file is
+        # healed by re-sending.
         _pushed_count = 0
         _push_fail_count = 0
         if pool_remote_spec is not None and _pending:
@@ -1180,9 +1182,9 @@ def remote_publish(
                     local_path=_local_path, remote_spec=_remote_file,
                     ssh_key=ssh_key,
                     # a reclaim's remote file exists with the
-                    # OLD bytes — --ignore-existing would silently skip
-                    # the transfer and publish a claim whose bytes never
-                    # shipped.  Overwrite for reclaim claims only.
+                    # OLD bytes — --size-only would skip the transfer when
+                    # old and new bytes match in size, publishing a claim
+                    # whose bytes never shipped.  Overwrite for reclaims only.
                     overwrite=isinstance(_claim.get('reclaims_seq'), int),
                     on_bytes=on_bytes,
                 )
@@ -1209,7 +1211,7 @@ def remote_publish(
             # the mirror after push gaps over a slow link).  List the remote
             # pool once, diff against the local repo, and push anything missing
             # (we own it — it's in our index but never landed).
-            # --ignore-existing keeps a complete pool a cheap no-op.
+            # --size-only keeps a complete pool a cheap no-op (same-size skips).
             if pool_remote_spec is not None:
                 _remote_debs = _transport.list_remote_debs(
                     pool_remote_spec, ssh_key)
