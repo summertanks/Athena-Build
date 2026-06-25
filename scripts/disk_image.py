@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import subprocess
 import tempfile
 from typing import TYPE_CHECKING, Optional
@@ -348,6 +349,46 @@ def build_disk_image(
             'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:'
             '/usr/bin:/sbin:/bin'
         )
+
+        # ── Step 8a: lock root + add a cloud-style passwordless-sudo user ──
+        # MAT-09: the disk image must not ship the base chroot's root account
+        # as a login.  Lock root and add `asgard` (in the `sudo` group → the
+        # %sudo NOPASSWD rule baked into the chroot gives it passwordless sudo,
+        # like a cloud image's default user).  asgard gets a per-build RANDOM
+        # console password (printed + written) so the VM is still loginnable.
+        _asgard_pw = secrets.token_urlsafe(12)
+        _r = _sudo(['env', _chroot_env, 'chroot', _mnt, 'useradd', '-m',
+                    '-s', '/bin/bash', '-G', 'sudo', 'asgard'], password)
+        if _r.returncode not in (0, 9):     # 9 = already exists (idempotent)
+            tui.console.print(f"WARNING: useradd asgard rc={_r.returncode}: "
+                              f"{_r.stderr.strip()[:160]}")
+        # chpasswd reads the credential on stdin → askpass keeps sudo's stdin
+        # free (no password/credential mixing).
+        with utils.sudo_askpass_env(password) as _env:
+            _cp = subprocess.run(
+                ['sudo', '-A', 'env', _chroot_env, 'chroot', _mnt, 'chpasswd'],
+                input=f'asgard:{_asgard_pw}\n', env=_env,
+                capture_output=True, text=True)
+        if _cp.returncode != 0:
+            tui.console.print(
+                f"WARNING: set asgard password rc={_cp.returncode}: "
+                f"{(_cp.stderr or '').strip()[:160]}")
+        _r = _sudo(['env', _chroot_env, 'chroot', _mnt,
+                    'passwd', '-l', 'root'], password)
+        if _r.returncode != 0:
+            tui.console.print(f"WARNING: lock root rc={_r.returncode}: "
+                              f"{_r.stderr.strip()[:160]}")
+        else:
+            tui.console.print(
+                f"disk image: root LOCKED; login asgard / {_asgard_pw} "
+                "(passwordless sudo)")
+        try:
+            _cred = os.path.join(_img_dir, 'disk-credentials.txt')
+            with open(_cred, 'w') as _fh:
+                _fh.write(f"# root: LOCKED\nasgard:{_asgard_pw}\n")
+            os.chmod(_cred, 0o600)
+        except OSError as _e:
+            logger.warning(f"disk-credentials.txt write failed: {_e}")
 
         # regenerate the initramfs now that /etc/fstab (step 7) holds
         # the real root (ext4) + ESP (vfat) entries.  The kernel's postinst
