@@ -1050,8 +1050,17 @@ class CacheCommandsMixin(SessionState):
                 f"  {len(_fail)} file(s) failed — apt falls back to snapshot "
                 "for those", tui.COLOR_WARNING)
         if local_mirror.index(_dir):
-            console.print(f"  local build mirror ready ({_hs(_dl)} indexed)",
-                          tui.COLOR_INFO)
+            if _fail:
+                # download() withheld the .snapshot marker (not valid-for-
+                # snapshot), so the next `cache parse` re-attempts the failures.
+                console.print(
+                    f"  local build mirror PARTIAL ({_hs(_dl)} indexed; "
+                    f"{len(_fail)} file(s) retried next run)",
+                    tui.COLOR_WARNING)
+            else:
+                console.print(
+                    f"  local build mirror ready ({_hs(_dl)} indexed)",
+                    tui.COLOR_INFO)
         else:
             console.print("  local mirror index failed — see logs",
                           tui.COLOR_WARNING)

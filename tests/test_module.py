@@ -38949,6 +38949,74 @@ def test_remote_localmirror_populate_downloads_skips_indexes():
         assert _r3['failed'] == 1
 
 
+def test_local_mirror_download_withholds_marker_on_failure_cons13():
+    """CONS-13: local_mirror.download stamps the .snapshot marker ONLY on a
+    COMPLETE run.  A partial download (any failure) leaves no marker, so a
+    partial mirror is never marked valid-for-snapshot — _ensure_local_mirror
+    re-runs and retries the missing files (vs skipping them forever)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import local_mirror as lm
+    with tempfile.TemporaryDirectory() as _target:
+        _entries = [
+            {'basename': 'good.deb', 'url': 'g', 'sha256': '', 'size': 10},
+            {'basename': 'bad.deb', 'url': 'b', 'sha256': '', 'size': 10},
+        ]
+        _marker = os.path.join(_target, lm.MARKER)
+
+        def _dlf(url, dest):
+            if 'good' in dest:
+                open(dest, 'wb').close()
+                return (10, 'ok')
+            return (-1, 'simulated failure')
+        _orig = lm.utils.download_file
+        lm.utils.download_file = _dlf
+        try:
+            _dl, _fail = lm.download(
+                {'entries': _entries, 'total_size': 20}, _target, 'TS1')
+            assert len(_fail) == 1, _fail
+            assert not os.path.isfile(_marker), \
+                "a partial download must NOT stamp the valid-for-snapshot marker"
+            # a complete run (only the good file) stamps it
+            _dl2, _fail2 = lm.download(
+                {'entries': [_entries[0]], 'total_size': 10}, _target, 'TS2')
+            assert _fail2 == []
+            assert os.path.isfile(_marker)
+            with open(_marker) as _f:
+                assert _f.read().strip() == 'TS2'
+        finally:
+            lm.utils.download_file = _orig
+
+
+def test_remote_localmirror_hardening_cons13():
+    """CONS-13: populate does a disk-space preflight (refuse a run we can't
+    finish) returning a clean __disk__ failure, and _download catches
+    http.client.HTTPException so a dropped chunked transfer (IncompleteRead)
+    records ONE failure instead of aborting the whole population."""
+    import inspect as _inspect
+    import types as _types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_localmirror as rlm
+    # _download catches HTTPException (http.client.IncompleteRead subclasses it)
+    assert 'http.client.HTTPException' in _inspect.getsource(rlm._download), (
+        "_download must catch HTTPException so IncompleteRead → one failure")
+    # disk preflight: free < total*1.05 → refuse up front
+    with tempfile.TemporaryDirectory() as _target:
+        _plan = {'snapshot_ts': 'TS', 'total_size': 10 ** 9,
+                 'entries': [{'basename': 'a.deb', 'url': 'x',
+                              'sha256': '', 'size': 10 ** 9}],
+                 'packages_index': 'Package: a\n'}
+        _orig = rlm.shutil.disk_usage
+        rlm.shutil.disk_usage = lambda _p: _types.SimpleNamespace(
+            total=0, used=0, free=1000)
+        try:
+            _r = rlm.populate(_plan, _target)
+        finally:
+            rlm.shutil.disk_usage = _orig
+        assert _r['indexed'] is False and _r['failed'] == 1, _r
+        assert any(_f[0] == '__disk__' for _f in _r['failures']), _r
+        assert not os.path.isfile(os.path.join(_target, '.snapshot'))
+
+
 def test_stage_remote_localmirror_parses_progress_and_result():
     """remote_orchestrate.stage_remote_localmirror streams the runner's PROGRESS
     markers to on_progress and returns the parsed RESULT dict."""
@@ -39224,6 +39292,8 @@ def main() -> int:
         test_local_mirror_plan_resolves_build_closure_to_snapshot_urls,
         test_local_mirror_plan_include_index_emits_packages_blob,
         test_remote_localmirror_populate_downloads_skips_indexes,
+        test_local_mirror_download_withholds_marker_on_failure_cons13,
+        test_remote_localmirror_hardening_cons13,
         test_stage_remote_localmirror_parses_progress_and_result,
         test_local_mirror_plan_excludes_fork_file_urls,
         test_remote_build_run_container_mounts_localmirror,
