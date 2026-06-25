@@ -2757,6 +2757,31 @@ def test_verify_inrelease_empty_keyring_fails():
         assert 'no keys imported' in detail, detail
 
 
+def test_should_reuse_pinned_release_skip_decision():
+    """PERF-01: a snapshot-pinned InRelease is reused from cache only when
+    pinned, remote (not file://), and a non-empty cached copy exists."""
+    from cache import Cache
+    with tempfile.TemporaryDirectory() as tmp:
+        cached = os.path.join(tmp, 'InRelease')
+        with open(cached, 'w') as fh:
+            fh.write('signed release bytes\n')
+        empty = os.path.join(tmp, 'empty')
+        with open(empty, 'wb') as fh:
+            fh.write(b'')
+        missing = os.path.join(tmp, 'nope')
+
+        # Reuse ONLY in the fully-pinned, remote, cached, non-empty case.
+        assert Cache._should_reuse_pinned_release('20260622T000000Z', False, cached)
+        # Floating mirror (no pin) → always re-fetch (file may have moved).
+        assert not Cache._should_reuse_pinned_release(None, False, cached)
+        # file:// fork mirror is regenerated each build → never reuse.
+        assert not Cache._should_reuse_pinned_release('20260622T000000Z', True, cached)
+        # No cached copy yet → must download.
+        assert not Cache._should_reuse_pinned_release('20260622T000000Z', False, missing)
+        # Zero-byte cached copy (truncated/aborted) → must re-download.
+        assert not Cache._should_reuse_pinned_release('20260622T000000Z', False, empty)
+
+
 def test_buildconfig_security_defaults():
     """Without an explicit [Security] section, defaults kick in and (if the
     debian-archive-keyring is installed on the test host) validation passes."""
@@ -39321,6 +39346,7 @@ def main() -> int:
         test_verify_inrelease_tampered_signature_fails,
         test_verify_inrelease_missing_keyring_fails,
         test_verify_inrelease_empty_keyring_fails,
+        test_should_reuse_pinned_release_skip_decision,
         test_buildconfig_security_defaults,
         test_buildconfig_security_disabled_accepts_missing_keyring,
         test_buildconfig_security_enabled_rejects_missing_keyring,
