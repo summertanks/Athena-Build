@@ -1045,22 +1045,74 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 "  local build mirror disabled — `set create-local-mirror "
                 "true` to enable later", tui.COLOR_INFO)
 
-    def cmd_init_remote_container(self):
-        """Set up the build container for `source remotebuild` and ENSURE the
-        toolchain image for the SELECTED snapshot is on the remote host.
+    def _stage_remote_localmirror_bars(self, host, plan, ssh_key):
+        """Run remote_orchestrate.stage_remote_localmirror with a live two-bar
+        display — cumulative (total bytes, no rate) + per-file (with rate),
+        driven by the runner's PROGRESS markers.  Returns the RESULT dict."""
+        import remote_orchestrate as _ro
+        _cum_total = max(1, int(plan.get('total_size', 0)))
+        _cum_bar = ProgressBar(label='local mirror', itr_label='',
+                               maxvalue=_cum_total, show_rate=False,
+                               label_width=20)
+        _file_bar = ProgressBar(label='', itr_label='B/s', maxvalue=1,
+                                show_rate=True, label_width=24)
+        _st = {'last_cum': 0, 'cur_file': None, 'last_file': 0}
 
-        Locally it builds no image (the build runs on the remote) — it just
-        provides compose_recipe() + the post-build pipeline (config-derived +
-        file ops).  Then it ensures the remote's image: confirms if present,
-        streams it over the LAN if this host has it cached, else reports that
-        the first `source remotebuild` will build it on the remote.  Like
-        `container local init`, requires `cache build` first.
+        def _on_progress(_p):
+            _cum_bar.label(f"({_p.get('i', 0)}/{_p.get('n', 0)})")
+            _cd = int(_p.get('cum_done', 0))
+            if _cd > _st['last_cum']:
+                _cum_bar.step(_cd - _st['last_cum'])
+                _st['last_cum'] = _cd
+            _bn = _p.get('basename', '')
+            if _bn != _st['cur_file']:
+                _file_bar.set_max(max(1, int(_p.get('file_total', 1))))
+                _file_bar.reset()
+                _file_bar.label(_bn)
+                _st['cur_file'] = _bn
+                _st['last_file'] = 0
+            _fd = int(_p.get('file_done', 0))
+            if _fd > _st['last_file']:
+                _file_bar.step(_fd - _st['last_file'])
+                _st['last_file'] = _fd
+
+        _logs: 'list[str]' = []
+        try:
+            _result = _ro.stage_remote_localmirror(
+                host, plan, os.path.join(
+                    self.config.working_dir, 'scripts', 'remote_localmirror.py'),
+                ssh_key=ssh_key, on_progress=_on_progress, log=_logs.append)
+        finally:
+            _file_bar.close(persist=False)
+            _cum_bar.close(persist=True)
+        for _ln in _logs:
+            if any(_k in _ln for _k in ('FAIL', 'done:', 'WARNING', 'cannot')):
+                console.print(f"    {_ln}", tui.COLOR_INFO)
+        return _result
+
+    def cmd_init_remote_container(self):
+        """Prepare every configured remote for `source remotebuild`: ensure the
+        toolchain image for the SELECTED snapshot is present (transfer it over
+        the LAN if this host has it cached, else BUILD it on the remote), and —
+        when CreateLocalMirror is enabled — populate + index the build-closure
+        apt mirror ON the remote (resumable; init is GATED on it completing).
+
+        Locally it builds no image (builds run on the remote) — the container
+        only provides compose_recipe() + the post-build pipeline.  Requires
+        `cache build`; with CreateLocalMirror also `cache parse` (for the
+        closure).
         """
         self.flags.build_container_ready = False
         if not self.flags.cache_ready:
             console.print(
                 "container remote init: requires `cache build` first "
                 "(the recipe expands virtual Build-Depends from the cache)")
+            return
+        _want_lm = bool(getattr(self.config, 'create_local_mirror', False))
+        if _want_lm and self.dep_tree is None:
+            console.print(
+                "container remote init: CreateLocalMirror is on but the build "
+                "closure isn't computed — run `cache parse` first")
             return
         # Every configured remote (fan-out targets); fall back to the legacy
         # single remote_build_host when the registry is empty.
@@ -1083,23 +1135,70 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 f"  ERROR: remote build container init failed — {e}")
             logger.error(f"BuildContainer(connect=False) raised: {e}")
             return
-        self.flags.build_container_ready = True
-        # Eagerly stage the build image for the selected snapshot on EACH
-        # remote: confirm if present, LAN-transfer if this host has it cached,
-        # else note it builds on the first `source remotebuild`.
+        import local_mirror
         import remote_orchestrate as _ro
         _tag = self.container._image_tag
         _how = {'present':     'present on remote',
-                'transferred': 'transferred over the LAN',
-                'build':       'absent — builds on first remotebuild'}
-        console.print(f"  Staging image {_tag} on {len(_remotes)} remote(s):",
-                      tui.COLOR_HIGHLIGHT)
+                'transferred': 'transferred over the LAN'}
+        _plan = None
+        if _want_lm:
+            _plan = local_mirror.plan(self.cache, self.dep_tree, self.config,
+                                      include_index=True)
+            console.print(
+                f"  local build mirror: {len(_plan['entries'])} pkg(s), "
+                f"~{local_mirror.human_size(_plan['total_size'])} closure",
+                tui.COLOR_INFO)
+        console.print(
+            f"  Initialising {len(_remotes)} remote(s) for image {_tag}"
+            + (" + local mirror" if _want_lm else "") + ":",
+            tui.COLOR_HIGHLIGHT)
+        _all_ready = True
         for _r in _remotes:
+            _host = _ro.parse_ssh_host(_r['host'])
+            _key = _r.get('ssh_key') or None
+            # 1. image: present | LAN-transferred | build-it-now-on-the-remote.
             _state = _ro.ensure_remote_image(
-                _ro.parse_ssh_host(_r['host']), _tag,
-                ssh_key=_r.get('ssh_key') or None, log=console.print)
-            console.print(f"    {_r['name']}: {_how.get(_state, _state)}",
+                _host, _tag, ssh_key=_key, log=console.print)
+            if _state == 'build':
+                if _ro.build_remote_image(
+                        _host,
+                        os.path.join(self.config.dir_config, 'Dockerfile'),
+                        _tag, self.container._image_build_args(),
+                        ssh_key=_key, log=console.print):
+                    _state = 'built on remote'
+                else:
+                    console.print(f"    {_r['name']}: image BUILD FAILED",
+                                  tui.COLOR_ERROR)
+                    _all_ready = False
+                    continue
+            console.print(f"    {_r['name']}: image {_how.get(_state, _state)}",
                           tui.COLOR_HIGHLIGHT)
+            # 2. local build mirror (gated — resumable; re-run init to continue).
+            if _want_lm:
+                _result = self._stage_remote_localmirror_bars(_host, _plan, _key)
+                if not (_result and _result.get('indexed')
+                        and not _result.get('failed')):
+                    console.print(
+                        f"    {_r['name']}: local mirror INCOMPLETE — re-run "
+                        "`container remote init` to resume", tui.COLOR_ERROR)
+                    _all_ready = False
+                    continue
+                console.print(
+                    f"    {_r['name']}: local mirror ready "
+                    f"({_result['downloaded']} fetched, "
+                    f"{_result['skipped']} cached)", tui.COLOR_HIGHLIGHT)
+        # The recipe emits the file:///localmirror source ONLY when the mirror is
+        # ready on EVERY remote (else a build routed to a mirror-less remote
+        # would reference a missing source).  Override __init__'s BS1-dir-based
+        # value: for remote builds only the remote mirror matters.
+        self.container._localmirror_active = bool(_want_lm and _all_ready)
+        self.flags.build_container_ready = _all_ready
+        if _all_ready:
+            console.print("  Remote build container ready.", tui.COLOR_HIGHLIGHT)
+        else:
+            console.print(
+                "  container remote init: one or more remotes not fully ready "
+                "(see above)", tui.COLOR_WARNING)
 
 
     # ------------------------------------Command: build_bootable------------
@@ -1492,6 +1591,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             console.print("container remote add: an SSH key (key=<path>) is "
                           "required", tui.COLOR_ERROR)
             return
+        _keysrc = os.path.expanduser(_keysrc)     # accept ~/.ssh/… paths
         _keydst = os.path.join(self.config.dir_config, f"{_name}.key")
         if not utils.copy_ssh_key(_keysrc, _keydst):
             console.print(f"container remote add: cannot read SSH key {_keysrc}",
@@ -1546,6 +1646,20 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                           "number", tui.COLOR_ERROR)
             return
         _mem = _mem_s
+
+        # 5b. Local build mirror — a machine-wide toggle (CreateLocalMirror)
+        # that governs LOCAL builds' localmirror AND, for remote builders, the
+        # on-remote build-closure mirror populated at `container remote init`.
+        # Offer it here (guided only) since it's part of "set up a build host";
+        # skip if already enabled.  Built later, at init — not now.
+        if _guided and not getattr(self.config, 'create_local_mirror', False):
+            _lm_resp = Prompt(
+                PROMPT_YESNO,
+                "Enable a local build mirror?").get_response()
+            if _lm_resp.strip().lower() in ('y', 'yes'):
+                self.config.create_local_mirror = True
+                utils.write_local_conf(self.config, create_local_mirror=True)
+                console.print("  local build mirror ENABLED", tui.COLOR_INFO)
 
         # 6. Persist + summary.
         _ok, _detail = utils.add_remote(

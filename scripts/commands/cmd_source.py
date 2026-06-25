@@ -1765,6 +1765,12 @@ class SourceCommandsMixin(SessionState):
         # console (N workers would interleave).
         _logpath = os.path.join(self.container.buildlog_path, _src.package)
 
+        # Mount the on-remote build mirror only when the recipe actually emits
+        # the file:///localmirror source (set by init after a successful stage).
+        # Keeps mount-presence in lockstep with source-presence.
+        _lm_dir = (_ro.REMOTE_LOCALMIRROR_DIR
+                   if getattr(self.container, '_localmirror_active', False)
+                   else None)
         with _tempfile.TemporaryDirectory() as _bundle:
             _ro.stage_bundle(
                 _bundle,
@@ -1776,6 +1782,7 @@ class SourceCommandsMixin(SessionState):
                 build_memory=_slot.get('build_memory') or None,
                 remote_build_py=os.path.join(
                     self.config.working_dir, 'scripts', 'remote_build.py'),
+                localmirror_dir=_lm_dir,
             )
             try:
                 with open(_logpath, 'w') as _lf:
