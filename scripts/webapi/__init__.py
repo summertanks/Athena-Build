@@ -115,7 +115,7 @@ def create_app(*, buildlog_dir: str, flags_path: str,
 
     @app.get('/api/v1/builds/{package}/buildlog', dependencies=_authed,
              tags=['artifacts'],
-             summary='OBS-04 build narrative (actual emissions)')
+             summary='build narrative (actual emissions)')
     def buildlog(package: str) -> 'Any':
         _doc = _artifact(package, 'buildlog', tail=0)
         return PlainTextResponse(_doc.get('text', ''))

@@ -1,4 +1,4 @@
-"""Pure char-based line wrap helpers (port of ARCH-14 P7 from tui.py).
+"""Pure char-based line wrap helpers (port of P7 from tui.py).
 
 Split out into its own module so:
   1. The renderer (render.py) and state (state.py) can both use them

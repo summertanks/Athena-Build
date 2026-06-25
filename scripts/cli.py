@@ -1,4 +1,4 @@
-"""Headless CLI backend — Path B of UX-05.
+"""Headless CLI backend — Path B of.
 
 Mirrors the Tui surface that ``Console``, ``Spinner``, ``ProgressBar``,
 and ``Prompt`` (all in ``tui.py``) reach for via the module-level
@@ -88,7 +88,7 @@ class Cli:
     SEVERITY_INFO    = 3
 
     # ANSI color codes for stdout when running attached to a TTY
-    # and the operator hasn't set NO_COLOR.  UX-08(c): these MUST match
+    # and the operator hasn't set NO_COLOR. these MUST match
     # tui.render's COLOR_* numbering — command handlers pass the render
     # constants (`tui.COLOR_ERROR` etc.) opaquely into print(), and the
     # `_ANSI` map below is keyed on these names.  A prior off-by-one
@@ -207,7 +207,7 @@ class Cli:
         sees that a long-running staged operation has begun.  Spinner is
         silent here — it already prints its own `… done` line when it
         finishes (see Spinner.done() in tui.py).  Throttled intermediate
-        progress is deferred (see UX-05 Path B "out of scope" notes).
+        progress is deferred (see Path B "out of scope" notes).
         """
         wid = self._next_widget_id
         self._next_widget_id += 1

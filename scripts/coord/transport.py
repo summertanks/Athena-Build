@@ -145,7 +145,7 @@ def push_single_deb(
     Uses `--ignore-existing` so a re-publish never re-uploads an
     unchanged file by name — .deb filenames are immutable per (pkg,
     version, arch), so name-match is the right key.  Single-file
-    semantics so MIRROR-01 Phase 3b can tick a ProgressBar one notch
+    semantics so Phase 3b can tick a ProgressBar one notch
     per .deb and report failures precisely.
 
     overwrite=True: drop --ignore-existing so the
@@ -260,7 +260,7 @@ def pull_single_file(
     """Rsync one remote file → `local_path`.  `remote_spec` MUST point to
     the source FILE (with filename), not a directory.
 
-    Used by MIRROR-01 Phase 3 `mirror pull` for per-`.deb` downloads:
+    Used by Phase 3 `mirror pull` for per-`.deb` downloads:
     one rsync invocation per file so progress can be ticked, individual
     file failures can be surfaced precisely, and a hash mismatch on
     one file aborts only that file (not the whole batch).
@@ -336,7 +336,7 @@ def push_dist_tree(
 
     This pass syncs INDEX files only (Release/InRelease/Packages/
     Sources/by-hash).  Pool ``.deb``/``.udeb`` artifacts — which live
-    inside dists/<codename>/ since CONF-01 Stage D — are owned solely
+    inside dists/<codename>/ since Stage D — are owned solely
     by ``push_single_deb`` (additive, ``--ignore-existing``, or
     ``overwrite=True`` for a sanctioned reclaim) and are EXCLUDED here.
     """
@@ -354,12 +354,12 @@ def push_dist_tree(
     # overwrites any .deb whose size/mtime differs, so a local-ahead
     # rebuild (same filename, new bytes) silently rewrote the FROZEN
     # remote bytes on every publish, with no reclaim claim (the whole
-    # invariant bypassed; STA-47 masked).  `--exclude` removes
+    # invariant bypassed; masked). `--exclude` removes
     # pool artifacts from the transfer set entirely AND (since they're
     # excluded, not just protected) keeps `--delete` from reaping them —
     # so this pass never overwrites NOR deletes a pool file.  Pool bytes
     # are pushed only by push_single_deb; pruning stays an explicit
-    # operator action (UPD-01 publish-before-prune).  `--delete` still
+    # operator action (publish-before-prune). `--delete` still
     # reaps stale index files + removed-component dirs.
     _argv = list(_RSYNC_BASE) + [
         '--delete',

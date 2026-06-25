@@ -184,7 +184,7 @@ class _IsoMixin:
             # NO nomodeset on the default entry: GNOME requires KMS — with
             # nomodeset there is no DRM device, gdm's Wayland AND Xorg
             # attempts both die and the screen just flashes (caught live
-            # 2026-06-11, SURFACES-01 first GNOME boot).  VMs get KMS via
+            # 2026-06-11, first GNOME boot). VMs get KMS via
             # virtio-gpu/qxl/vmwgfx/bochs-simpledrm; the era this flag
             # protected (console-only live image) is over.  The
             # safe-graphics entry below keeps nomodeset for hardware with

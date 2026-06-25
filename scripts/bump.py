@@ -249,7 +249,7 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
     segment.  Reconciles the pristine filename the predictor computes
     (normalize_repo_filename) with a stamped on-disk .deb so the post-build
     existence checks (check_build / _source_state) don't loop forever the way
-    the CONF-13 exact-filename match did.
+    the exact-filename match did.
 
     Requires identical package name, architecture, and extension; the on-disk
     version must equal the predicted version OR predicted+asg<R>u<N>.
@@ -278,7 +278,7 @@ def find_matching_artifact(dst_dir: str,
 
     Reconciles the dep-tree's pristine filename prediction with a possibly
     stamped artifact so the post-build existence checks (check_build /
-    _source_state) don't loop the way the CONF-13 exact-filename match did.
+    _source_state) don't loop the way the exact-filename match did.
     The exact-name fast path avoids a listdir in the common pristine case;
     only a missing exact file triggers the (single-version, single-snapshot
     local) directory scan."""
@@ -792,7 +792,7 @@ def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
         to `(= <this binary's version>)`  → `(= <…+asg<R>u<N>>)`
 
     No changelog entry is created (that would walk the kernel ABI counter —
-    the CONF-13 cascade); this is a pure binary relabel.  Returns
+    the cascade); this is a pure binary relabel. Returns
     {'status': 'rewritten'|'malformed'|'skipped', 'new_path', 'version'}.
     """
     import subprocess

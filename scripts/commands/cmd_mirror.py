@@ -823,7 +823,7 @@ class MirrorCommandsMixin(SessionState):
         _claimed: set = set()
         _state_marked: set = set()
         for _bid, _claims in by_builder.items():
-            _dead_seqs = _schema.superseded_seqs(_claims)  # STA-29
+            _dead_seqs = _schema.superseded_seqs(_claims)
             for _c in _claims:
                 _fn = _c.get('filename')
                 if not (isinstance(_fn, str) and _fn):
@@ -1478,7 +1478,7 @@ class MirrorCommandsMixin(SessionState):
         # The published.manifest is the bump ledger (published_ledger reads
         # it); without this it stays frozen and N can never advance past its
         # last value — the regression that left every asg package stuck at
-        # u2 after MIRROR-01 removed the old repo-publish finalize path
+        # u2 after removed the old repo-publish finalize path
         # (commit 8cc803b).  Sign failure is loud: a silent/empty manifest
         # corrupts the next publish's N derivation.
         if _published_any:

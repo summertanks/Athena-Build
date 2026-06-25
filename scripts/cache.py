@@ -181,7 +181,7 @@ class Cache:
         # Fork supersede tracking — populated during the FORK mirror walk
         # (which runs first since fork is prepended to self.mirrors), then
         # consulted during upstream walks to drop same-named records and
-        # warn the operator.  Per the FORK-01 plan Q1: tracks BINARY
+        # warn the operator. Per the plan Q1: tracks BINARY
         # Package: names only — NOT Provides:.  Virtual-package bridging
         # is the operator's responsibility (declare needed Provides: in
         # fork debian/control); a missing virtual will fail loudly at
@@ -592,7 +592,7 @@ class Cache:
 
             # Fork supersede: fork mirror walks first (it's prepended in
             # __init__), so by the time any upstream mirror walks here,
-            # _fork_pkg_names is populated.  See FORK-01 plan Step 2 Q1.
+            # _fork_pkg_names is populated. See plan Step 2 Q1.
             _is_fork = (_mirror.id == 'fork')
 
             progress_bar_pkg = ProgressBar(
@@ -691,7 +691,7 @@ class Cache:
                 # supersede above).  Fork sources are walked first; upstream
                 # sources of the same name get dropped.  Track the dropped
                 # upstream version so _audit_fork_source_drift can warn
-                # when upstream has advanced past the fork (CONF-11
+                # when upstream has advanced past the fork
                 # follow-up 2026-05-31).
                 if _is_fork:
                     self._fork_src_names.add(_src.package)
@@ -950,7 +950,7 @@ class Cache:
                     continue
 
                 # Fork supersede for udebs (separate namespace from debs).
-                # Per FORK-01 Step 2 Q1: track by Package: name only.
+                # Per Step 2 Q1: track by Package: name only.
                 if _is_fork:
                     self._fork_udeb_names.add(_udeb.package)
                 elif _udeb.package in self._fork_udeb_names:
@@ -1058,7 +1058,7 @@ class Cache:
         _uuc.update(self._upstream_udeb_collisions)
         self._upstream_udeb_collisions = _uuc
 
-        # Same shape for the source-side dict (CONF-11 follow-up).  Restore
+        # Same shape for the source-side dict (follow-up). Restore
         # safely even on pickles produced before this attr was added.
         _usc: 'Dict[str, List[Tuple[str, str]]]' = defaultdict(list)
         _usc.update(getattr(self, '_upstream_source_collisions', {}))

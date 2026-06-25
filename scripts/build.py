@@ -640,7 +640,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             self.config.dir_chroot, sudo=True, password=_password, skip_prompt=True)
         self._wipe_dir_contents('buildroot/installer',
             self.config.dir_chroot_installer, sudo=True, password=_password, skip_prompt=True)
-        # the disk chroot (its own minimal SURFACES-01 root) is
+        # the disk chroot (its own minimal root) is
         # root-owned too — wipe it, else buildroot/disk survives while the
         # flag reset below clears chroot_disk_ready (claiming it's gone).
         self._wipe_dir_contents('buildroot/disk',
@@ -1120,7 +1120,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 "container remote init: no remote build host configured — add "
                 "one with `container remote add <name> <ssh://user@host>`")
             return
-        # Per-remote build mirror (RMIRROR-01): each remote opts in at
+        # Per-remote build mirror: each remote opts in at
         # `container remote add`; computing the closure needs the dep tree.
         _want_any_lm = any(_r.get('local_mirror') for _r in _remotes)
         if _want_any_lm and self.dep_tree is None:
@@ -1667,7 +1667,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             return
         _mem = _mem_s
 
-        # 5b. Local build mirror — a PER-REMOTE toggle (RMIRROR-01): whether
+        # 5b. Local build mirror — a PER-REMOTE toggle: whether
         # THIS remote stages a snapshot-pinned build-closure apt mirror at
         # `container remote init` so its builds serve build-deps off local disk.
         # Asked once here (guided); persisted on this remote's entry; never
@@ -2105,7 +2105,7 @@ def main(banner: str) -> None:
             print(f"FATAL: TUI initialisation failed: {e}")
             Exit(1)
 
-    # UX-05a/e: thread the parsed flags onto the backend.  Both Cli and
+    #/e: thread the parsed flags onto the backend. Both Cli and
     # Tui accept auto_yes; one_shot_cmds is Cli-only (Tui ignores).
     tui_inst.auto_yes = _auto_yes
     if hasattr(tui_inst, 'one_shot_cmds'):

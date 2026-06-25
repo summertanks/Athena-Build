@@ -206,7 +206,7 @@ def generate_cdx(buildconfig: Any,
         if _parent:
             os.makedirs(_parent, exist_ok=True)
         # Atomic write so a crash mid-write can't leave a truncated SBOM
-        # (STA-43; low stakes — the SBOM is a regenerable artifact).
+        # (low stakes — the SBOM is a regenerable artifact).
         utils._atomic_write_bytes(
             out_path,
             (json.dumps(_bom, indent=2) + '\n').encode('utf-8'),

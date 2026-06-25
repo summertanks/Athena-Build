@@ -539,7 +539,7 @@ class SourceCommandsMixin(SessionState):
     def _workload_current_to_target(self, target_ts: str):
         """Sources whose upstream SOURCE version at `target_ts` is NEWER than
         the current pin's selected source version — what you'd rebuild
-        advancing current → target (UPD-01 `snapshot workload` driving
+        advancing current → target (`snapshot workload` driving
         `source build all` + `mirror publish`).
 
         Detection is by FULL source version (epoch-stripped, NMU-INTACT), NOT
@@ -1143,7 +1143,7 @@ class SourceCommandsMixin(SessionState):
                         console.print(f"    {_n}  ({_subset_for(_n)})")
 
         # Next-run rebuild queue (matches `source build all`).  The static
-        # classifier above (needs_build / stale_pass) misses the UPD-01
+        # classifier above (needs_build / stale_pass) misses the
         # bump-target predicate that fires for NMU-suffixed sources whose
         # current-generation +asg<R>u<N> file isn't yet on disk; those
         # rebuild even though check_build returns True for the pristine.
@@ -1224,7 +1224,7 @@ class SourceCommandsMixin(SessionState):
         if _bump_targets:
             console.print(
                 f"  {len(_bump_targets):5d}  bump-target "
-                "(UPD-01 +asg<R>u<N> stamp pending for current generation)")
+                "(+asg<R>u<N> stamp pending for current generation)")
         _delta_non_bump = sorted(set(_delta_to_build) - set(_bump_targets))
         if _delta_non_bump:
             console.print(
@@ -1654,7 +1654,7 @@ class SourceCommandsMixin(SessionState):
         if _build_result:
             # Guard B: the build reported PASS but check_build
             # still can't find/match the predicted artifacts — non-
-            # convergence (CONF-13 cross-run rebuild-loop shape).  Fail
+            # convergence (cross-run rebuild-loop shape). Fail
             # loudly NOW.
             logger.error(
                 f"Building Package {_src_pkg.package} [FAIL] — built but "
@@ -1775,7 +1775,7 @@ class SourceCommandsMixin(SessionState):
             return ('skipped', 0)
 
         # Per-remote localmirror: emit the file:///localmirror source ONLY when
-        # THIS slot's remote was set up with a build mirror (RMIRROR-01).
+        # THIS slot's remote was set up with a build mirror.
         _slot_lm = bool(_slot.get('local_mirror'))
         _recipe = self.container.compose_recipe(_src, localmirror=_slot_lm)
         if _recipe is None:
@@ -2546,7 +2546,7 @@ class SourceCommandsMixin(SessionState):
             _resp = Prompt(
                 PROMPT_YESNO,
                 "There are source build failures, Proceed?",
-                informational=True,   # UX-05f
+                informational=True,
             ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return

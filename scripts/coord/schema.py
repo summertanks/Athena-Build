@@ -102,7 +102,7 @@ CLOSURE_LEDGER_SCHEMA_VERSION = 1
 # superseded by a newer version of the same binary published by the SAME
 # owner.  Natural aging, not abandonment: ownership is RETAINED
 # (project_owners keeps the builder, unlike deprecated), the file stays
-# in the append-only pool as a LABELED prune candidate (UPD-01
+# in the append-only pool as a LABELED prune candidate
 # publish-before-prune), and presence/index audits skip it because the
 # old file may legitimately drop out of the local repo and the apt
 # index.  References `obsoletes_seq`.
@@ -137,7 +137,7 @@ PRESENCE_SKIP_CLAIM_STATES = frozenset({
 
 # The back-ref fields a superseding record carries to name the seq it
 # replaces.  A retraction/deprecation/obsolescence marker, AND a reclaim
-# (a LIVE published claim, not a marker — RECLAIM-01), all point at the
+# (a LIVE published claim, not a marker), all point at the
 # prior claim's seq.  Collected unconditionally: a `*_seq` field only ever
 # appears on the record that owns it, so no state-gating is needed.
 SUPERSESSION_BACKREF_FIELDS = (
@@ -529,7 +529,7 @@ def new_coord_head(
       detected by reading a max(seq) lower than this.
     - head_time: ISO8601 UTC.  Compared against InRelease `Date:` —
       a head older than InRelease is refused.
-    - neighbours: MIRROR-01 Phase 7.  Canonical federation membership
+    - neighbours: Phase 7. Canonical federation membership
       records — every mirror's coord-head carries the same
       ``list[{url, public_url, public_proto}]`` set, signed by tier-1
       GPG.  Accepts either a list of URL strings (auto-promoted to

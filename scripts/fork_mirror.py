@@ -56,7 +56,7 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
 
     Returns True if at least one fork pkg was discovered and its metadata
     written; False if fork/source/ is empty (no Mirror should be
-    registered — skip-if-empty per FORK-01 plan Q6).
+    registered — skip-if-empty per plan Q6).
 
     Side effects (on True return):
         - fork/source/repo/*.dsc + *.tar.* generated via dpkg-source -b
@@ -118,7 +118,7 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
                 f"{_f['file']}:{_f['line_no']} → '{_f['source']}' "
                 f"({_f['reason']})")
 
-    # / AUDIT-01: identity-residue scan across the entire fork
+    # identity-residue scan across the entire fork
     # tree.  Catches Debian-name leakage in operator-facing prose
     # (debconf templates, task descriptions, menu entries, shipped
     # /etc files) AT BUILD TIME instead of after-the-fact on a fresh
@@ -401,7 +401,7 @@ def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
     )
 
     # Per-binary artifacts across all repo/ subdirs (covers multi-binary
-    # forks that emit a mix of main/dev/doc/dbgsym/tests).  CONF-01
+    # forks that emit a mix of main/dev/doc/dbgsym/tests).
     # Stage D: artifacts now live nested under
     # dists/<codename>/<comp>/binary-<arch>/ (.debs) or main/
     # debian-installer/binary-<arch>/ (.udebs).  Walk config.

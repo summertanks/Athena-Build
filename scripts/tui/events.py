@@ -142,7 +142,7 @@ class ConsoleTrim:
 
 @dataclass(frozen=True)
 class TabRemove:
-    """Remove a tab by name (COMP-06 selector teardown).  If the
+    """Remove a tab by name (selector teardown). If the
     removed tab was active, the dispatcher activates the first
     remaining tab.  Default tabs can be removed too — caller's
     responsibility not to orphan the UI."""

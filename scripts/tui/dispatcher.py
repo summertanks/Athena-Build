@@ -173,7 +173,7 @@ class Dispatcher:
         self._last_status: float = 0.0
         self._net0: Any = None
         self._net_t0: Optional[float] = None
-        # ── Per-tab key interceptor (COMP-06 package selector) ───────────
+        # ── Per-tab key interceptor (package selector) ───────────
         # When an interactive controller (e.g. SelectPackages) owns a
         # tab, it registers a key handler here.  The interceptor gets
         # first crack at every keystroke — but ONLY while its tab is the
@@ -444,7 +444,7 @@ class Dispatcher:
             self.post(Shutdown(0))
             return
 
-        # ── Per-tab key interceptor (COMP-06 selector) ───────────────────
+        # ── Per-tab key interceptor (selector) ───────────────────
         # Consulted FIRST, but only while its owner tab is active.
         # Returns True to swallow; False falls through to normal
         # dispatch (so F-keys still switch tabs, letting the operator

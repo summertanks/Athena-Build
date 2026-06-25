@@ -2,7 +2,7 @@
 
 Deliberately fastapi-free so key generation/verification is importable
 and testable on hosts without python3-fastapi installed.  Pattern
-mirrors the OBS-01 HMAC metrics key: auto-generated secret, mode 0600,
+mirrors the HMAC metrics key: auto-generated secret, mode 0600,
 lives under config/ and is never committed (config/*.key is the
 established secret-material shape — see the gnupg/key denylist in
 docs/plans/api-01-web-api.md).

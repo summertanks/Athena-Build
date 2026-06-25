@@ -18,7 +18,7 @@ import sys
 from typing import Dict, List, Tuple
 
 
-# Stock-seed udebs added by COMP-02 phase B (config/installer.list).
+# Stock-seed udebs added by phase B (config/installer.list).
 # Excludes virtual-package names (fat-modules etc.) — those resolve to
 # kernel-ABI-specific real packages whose names we don't know until
 # build time.

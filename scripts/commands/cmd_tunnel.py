@@ -103,7 +103,7 @@ class TunnelCommandsMixin(SessionState):
             _resp = Prompt(
                 PROMPT_YESNO,
                 "Download size mismatch, continue?",
-                informational=True,   # UX-05f
+                informational=True,
             ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return

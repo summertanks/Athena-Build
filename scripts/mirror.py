@@ -74,7 +74,7 @@ def _normalize_url(url: str) -> Optional[str]:
     ``/abs/path`` is auto-prefixed with ``file://`` for ergonomics).
 
     The earlier permissive shape (``http(s)://``, ``user@host:/path``
-    rsync shorthand) was retired with MIRROR-01 Phase 6: HTTP(S) is
+    rsync shorthand) was retired with Phase 6: HTTP(S) is
     the READ surface (`public_url`, written into
     `sources.list.d/athena-<name>.list`), never the PUBLISH surface;
     the rsync shorthand is too easy to fat-finger into a malformed
@@ -1267,7 +1267,7 @@ def audit_packages_chain(
 
 def _superseded_seqs(claims: 'list[dict]') -> 'set[int]':
     """Per-builder supersession fold — thin alias for the canonical
-    `coord.schema.superseded_seqs` (STA-29 centralised the fold so every
+    `coord.schema.superseded_seqs` (centralised the fold so every
     consumer applies identical semantics).  Kept as a name for this
     module's callers."""
     from coord import schema as _schema

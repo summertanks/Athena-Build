@@ -334,7 +334,7 @@ def select_latest_kernel(boot_dir: str) -> 'Optional[Tuple[str, str]]':
     Returns None if ``boot_dir`` is unreadable, has no ``vmlinuz-*``, or
     the matching ``initrd.img-<suffix>`` is absent — callers MUST treat
     None as a hard failure rather than ship a kernel without its initrd
-    (or a mismatched pair).  STA-31."""
+    (or a mismatched pair)."""
     try:
         _names = os.listdir(boot_dir)
     except OSError:
@@ -1137,7 +1137,7 @@ def archive_build_record(buildlog_dir: str, record: 'Optional[dict]') -> None:
     existing build.json tooling reads them unchanged).  The current run lives
     in ``<pkg>.build.json``; every PRIOR run lives in the journal — so each run
     is stored exactly once, no duplication.  Append-only; rotation deferred per
-    the UPD-01 publish-before-prune discipline.
+    the publish-before-prune discipline.
 
     Best-effort and never raises: observability must never break a build."""
     try:
@@ -1861,7 +1861,7 @@ def snapshot_iso_tag(config: 'BuildConfig') -> str:
     """The effective snapshot timestamp as a filesystem-safe tag for ISO
     filenames and the .disk/snapshot marker — e.g. '20260514T083402Z'.
 
-    Lets an operator tell ISOs built from different snapshots apart (UPD-01:
+    Lets an operator tell ISOs built from different snapshots apart (
     build base → step the snapshot → build again; the two ISOs must be
     distinguishable).  Returns '' when snapshots are disabled (no pin to tag).
     Reads the already-resolved pin (cheap when the cache file exists); never
@@ -1946,7 +1946,7 @@ def append_snapshot_history(config: 'BuildConfig', ts: str) -> None:
 def read_snapshot_state(config: 'BuildConfig') -> dict:
     """Read config/snapshot.state → {'current': ts}; {} if absent or
     malformed.  Legacy fields (`base`, `published`, `external`) from
-    pre-MIRROR-01 files are returned as-is by the reader for one
+    pre files are returned as-is by the reader for one
     cycle — `write_snapshot_state` drops them on the next write so
     the file shrinks to just `current` automatically."""
     import json
@@ -2019,14 +2019,14 @@ def write_snapshot_state(config: 'BuildConfig',
                          external: 'Optional[bool]' = None) -> None:
     """Write `current` to config/snapshot.state; clear the resolve memo.
 
-    `current` is the only field that drives live code in MIRROR-01:
+    `current` is the only field that drives live code:
     the operator-selected snapshot pin every build runs against.
     Legacy kwargs `base`, `published`, `external` are accepted for
     back-compat with old callers (so the function signature doesn't
     break) but **silently dropped** — per-mirror state files own the
     publish-target pins now; nothing reads these fields anymore.
 
-    Pre-MIRROR-01 snapshot.state files carrying base / published /
+    Pre snapshot.state files carrying base / published
     external get rewritten cleanly on the next write (the merge-then-
     write logic from the old shape was removed in Phase 8)."""
     import json
@@ -2234,7 +2234,7 @@ def list_remotes(config: 'BuildConfig') -> 'list[dict]':
                 _parser.getfloat, _section, 'BuildCpus', 0.0),
             'build_memory':        _parser.get(
                 _section, 'BuildMemory', fallback=''),
-            # Per-remote build-mirror toggle (RMIRROR-01) — whether `container
+            # Per-remote build-mirror toggle — whether `container
             # remote init` stages a snapshot-pinned build-closure apt mirror ON
             # this remote.  Defaults off; set at `container remote add`.
             'local_mirror':        _typed(
@@ -2420,7 +2420,7 @@ class BuildConfig:
     dir_source: str
     dir_repo: str
     # The dir_repo_* attrs point at the *.deb / *.udeb dirs in the
-    # unified apt-repo layout (CONF-01 Stage D, 2026-05-22).  Each
+    # unified apt-repo layout (Stage D, 2026-05-22). Each
     # binary-<arch>/ subdir is also the location of its corresponding
     # Packages index (co-located per Q1).  See
     # docs/plans/conf-01-repo-layout-migration.md.
@@ -2471,7 +2471,7 @@ class BuildConfig:
             parser.add_argument('--live-list', type=str, help='Specify live-only pkg list', required=False, default=livelist_path)
             parser.add_argument('--installer-list', type=str, help='Specify installer-only pkg list', required=False, default=installerlist_path)
             parser.add_argument('--pool-list', type=str, help='Specify pool-only pkg list (ship in apt pool, never installed)', required=False, default=poollist_path)
-            parser.add_argument('--build-pkg-list', type=str, help='Specify build-mode pkg list (MIRROR-02; flat names, only consumed when [Build] Mode = build)', required=False, default=build_pkg_list_path)
+            parser.add_argument('--build-pkg-list', type=str, help='Specify build-mode pkg list (flat names, only consumed when [Build] Mode = build)', required=False, default=build_pkg_list_path)
             args = parser.parse_args()
 
             # if paths are specified, they are absolute
@@ -2939,7 +2939,7 @@ class BuildConfig:
             self.dir_build_stage = os.path.join(self.dir_temp, 'build-stage')
             self.dir_source = os.path.join(self.working_dir, config_parser.get('Directories', 'Source'))
             self.dir_repo = os.path.join(self.working_dir, config_parser.get('Directories', 'Repo'))
-            # repo/ uses the apt-conformant unified layout (CONF-01
+            # repo/ uses the apt-conformant unified layout
             # Stage D, 2026-05-22).  classify_repo_subdir's labels
             # ('main' / 'doc' / 'dbgsym' / 'tests') still apply but now
             # map to nested paths:
@@ -3032,7 +3032,7 @@ class BuildConfig:
             self.dir_patch_preinstall = os.path.join(self.dir_patch, 'pre-install')
             self.dir_patch_postinstall = os.path.join(self.dir_patch, 'post-install')
             self.dir_patch_empty = os.path.join(self.dir_patch, 'empty')
-            # / MIRROR-01: staging tree for the minimal-publish
+            # staging tree for the minimal-publish
             # workflow (pool/ + dists/).  Derived (not a [Directories]
             # entry) — regenerated by `repo index minimal`, intended as
             # the source tree for a future `mirror publish --minimal`.
@@ -3207,7 +3207,7 @@ class BuildConfig:
         return self._config_valid
 
     def deb_dir_for(self, label: str) -> str:
-        """Map a repo subdir label to its on-disk dir under the CONF-01
+        """Map a repo subdir label to its on-disk dir under the
         Stage D unified apt-repo layout.
 
         Recognised labels:
@@ -3223,7 +3223,7 @@ class BuildConfig:
         added so `repo_audit.scan_repo_state` can produce a RepoState
         for the udeb side (used by `source verify`).
 
-        Replaces the pre-CONF-01 idiom of
+        Replaces the pre idiom of
         `os.path.join(config.dir_repo, label)` — which constructed
         flat paths like repo/main/.
         """
@@ -3274,7 +3274,7 @@ class BuildConfig:
         walks (cmd_strip_repo, cmd_package_cleanup, cmd_audit_nmu,
         etc.) that need to find every binary artifact.
 
-        Replaces the pre-CONF-01 idiom of `for sub in _REPO_SUBDIRS:
+        Replaces the pre idiom of `for sub in _REPO_SUBDIRS:
         join(dir_repo, sub)`.  Order is stable (binaries first, udebs
         next, then doc/dbgsym/tests).
 
@@ -3397,7 +3397,7 @@ def download_file(url: str, filename: str) -> tuple:
                     current_max  = expected_size
 
                     # build the bar ONCE; on a retry reuse + reset it
-                    # (set_max un-freezes via UX-08(a)) so each failed attempt
+                    # (set_max un-freezes via) so each failed attempt
                     # doesn't leak a permanent widget row + its 10 Hz polling.
                     if progress_bar is None:
                         progress_bar = tui.ProgressBar(

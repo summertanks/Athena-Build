@@ -145,7 +145,7 @@ def _scan_packages_with_progress(
     *, label_subdir: str = '',
     sudo_password: 'Optional[str]' = None,
 ) -> bool:
-    """Thin wrapper around `apt_repo._run_dpkg_scan` (STA-22 consolidation).
+    """Thin wrapper around `apt_repo._run_dpkg_scan` (consolidation).
 
     Kept under this name because `scan_repo_state` calls it; signature
     simplified — the five "Reserved (kept for caller stability)" params

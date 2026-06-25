@@ -69,7 +69,7 @@ class _ChrootMixin:
             debug: When True, generate_system_configs() also writes a
                 journald drop-in to forward all entries to /dev/console.
                 Off by default — opt in for serial-debug builds only.
-            install_set: SURFACES-01 — explicit canonical package set for
+            install_set: — explicit canonical package set for
                 THIS surface (a surfaces.surface_closure result).  When
                 given it replaces the legacy internal exclusion math in
                 _compute_install_batches; None keeps the historic
@@ -156,7 +156,7 @@ class _ChrootMixin:
             # that contains a real SCC; in that case dpkg gets
             # --force-depends scoped to that batch only.
             #
-            # UNPACK-RETRY (SURFACES-01 live debug, 2026-06-11): inside a
+            # UNPACK-RETRY (live debug, 2026-06-11): inside a
             # forced cycle batch dpkg processes archives in argv order,
             # and a package whose Pre-Depends sits LATER in the same
             # batch fails to unpack ("pre-dependency problem") — caught
@@ -1112,7 +1112,7 @@ class _ChrootMixin:
             _filename = os.path.basename(_entry['Filename'])
             _filename = self.normalize_repo_filename(_filename)
             # The index Filename is the PRISTINE name; the on-disk .deb may
-            # carry a +asg<R>u<N> stamp (UPD-01 update layer).
+            # carry a +asg<R>u<N> stamp (update layer).
             # find_matching_artifact accepts the pristine name OR its stamped
             # variant — without it, every stamped .deb (openssl, glibc, … from a
             # security delta) is "not found" and dropped from the chroot.
@@ -1362,7 +1362,7 @@ class _ChrootMixin:
             if not files:
                 continue
 
-            # Mirror the source directory structure into the chroot.  STA-53(a):
+            # Mirror the source directory structure into the chroot.:
             # by post_install time the chroot is root-owned, so the dir-create
             # and patch must run under sudo like the cp branch below — an
             # unprivileged mkdir/patch raises PermissionError after the build.
@@ -1580,7 +1580,7 @@ class _ChrootMixin:
         Skipped silently (with INFO) when no key exists yet — operator
         can run ``key generate`` later and re-run ``chroot build``
         to pick it up.  Wiring an actual sources.list.d entry pointing
-        at the Athena repo is deferred to CONF-02 phase 2 / COMP-02
+        at the Athena repo is deferred to phase 2
         (publish_repo) since it needs a real URL the booted system
         can reach.
         """

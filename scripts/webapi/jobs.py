@@ -17,7 +17,7 @@ only three behaviours change:
   * ``prompt()`` NEVER blocks — interactive input cannot transit HTTP,
     so a command that needs a prompt fails fast with a structured
     ``prompt_required`` error (sudo flows use ATHENA_SUDO_PASSWORD on
-    the server process per UX-05b; ``--yes`` informational prompts are
+    the server process per ``--yes`` informational prompts are
     inherited from Cli untouched);
   * ``wait()`` runs the job loop instead of a stdin REPL.
 """

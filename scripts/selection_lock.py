@@ -418,7 +418,7 @@ def audit_selection_coherence(
 
     For a file we still OWN+PUBLISH whose SOURCE is no longer selected:
 
-      * LEDGER-01 — when the source's build record says
+      * — when the source's build record says
         ``selection='deprecated'`` (the operator accepted the removal at
         `cache select accept`, intent recorded locally), this is the
         EXPECTED window before the next publish propagates it →

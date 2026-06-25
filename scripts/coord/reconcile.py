@@ -1,6 +1,6 @@
 """Reconciliation — 3-way audit (local, repo, cross).
 
-Three audit modes (per the COORD-01 plan):
+Three audit modes (per the plan):
 
   local   pool ↔ this builder's own jsonl
           - every owned .deb present in pool with claim hash matching
