@@ -7,127 +7,41 @@
 # Athena-Build
 
 ## Introduction
-Athena Build system is(trying to be) a (mostly) hands off 'build system' to build and install custom Debian Linux distribution. The distinction is that  sources are built rather than using the prepared packages. It is aimed to be the more transparent and flexible version of debbootstrap and live-build.
+Athena Build system is (trying to be) a (mostly) hands off 'build system' to build and install custom Debian Linux distribution from source (the catch). The distinction is that  sources are built rather than using the prepared packages. The differential here being toolchain system that you can derive a full fledged independent custom linux distro from the upstream debian that you can support with your own repo. Post this build the running system should look to your own repository, not Debian's, for updates — runtime independence is the aim, even if the build itself still draws its source from upstream Debian. 
 
-The genesis of this project came from the conversation - while the Linux ecosystem as part of the FOSS world, but as the platform matured, can we really build the solution from source? As the build systems are becoming more complex, sparsely documented and obfuscated (personal opinion).
+The genesis of this project came from the conversation - while the Linux ecosystem as part of the FOSS world, can we really build the distro from source? As that wild idea took some roots it got convoluted into an idea - if we can do that then why cannot we have a public toolchain that allows me to build a Ubuntu from Debian or CentOS from RedHat. Why not let people build and maintain their own distro. The question as to why a sane person would even do that was conveniently sidestepped in the said conversation.
 
-## FYI
- - This will be a maturing solution and not immediately suitable to building production system. Currently, best used for tinkering. See **Project maturity** below for a calibrated honest assessment of where the code actually is.
+Athena is not reinventing the wheel, it's just repackaging the car. Other projects own individual links of this chain, and often own them better — Linux From Scratch builds a system from source by hand, Yocto does industrial source builds for embedded targets, the Open Build Service publishes signed packages at scale, live-build composes Debian ISOs, Devuan selectively rebuilds a few dozen packages to hold an identity. Athena's identity is to do the whole chain at once, for a complete Debian derivative: 
+- Build the entire package closure from source, 
+- Hold a clean fork identity, pin every input to a snapshot so the result is reproducible,
+- Publish it as a signed, append-only, federated mirror that multiple builders can extend. 
+
+To our knowledge no other open-source tool does that entire chain, transparently, end to end. As a product it is still young, infant to be exact, and the road from here to something you would run on real hardware in anger is, candidly, only for the brave. Many more real builds, more community adoption on real machines and real environments will help mitigate some of that pain.
+
+### Reality Check
+ - This will be a maturing solution and not immediately suitable to go to your boss and pitch your custom distro for the company (but it won't stop you). Currently, best used for tinkering. See Project maturity below.
  - Can this be faster, YES. Is it worth making it faster (e.g. shifting to C, trading space with time, etc.) NO
  - It is NOT currently (or ever may be) supported by any of Debian Linux Houses (e.g. debian, ubuntu, etc)
- - Does it have Bugs - YES / MANY, please reach out to me and lets fix what you find.
- - REMEMBER, and this is especially important is that, it is a source build platform, it does nothing to upstream source packages. What you get is what you get. You will (rather quickly) realise as I have that just because source code is available doesnt mean it is ammeniable to being built. Fixing that is completely on you. You will learn to embrace a whole new level of 'oh, but it builds on my system'.
+ - Does it have Bugs? - Yes. Many?? Maybeeee. Please reach out to me and lets fix what you find.
+ - Remember, and this is especially important: it is a source build toolchain, it does nothing to upstream source packages. What you get is what you get. You will (rather quickly) realise as I have that just because source code is available doesn't mean it is amenable to being built. Fixing that is completely on you. You will learn to embrace a whole new level of 'oh, but it builds on my system'.
+ - A practical note for anyone coming from RHEL: this project will be largely incomprehensible for the first afternoon. Conventions are different, assumed reading is different. Stick with it; the underlying ideas are the same.
 
-## Project maturity
+### Background
+The first question always is - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a 'System V compatible' kernel inspired by a UNIX operating system clone called 'Minix', what we now ubiquitously call Ver 0.1 of the **Linux Kernel**. 
 
-> **TL;DR:** ~70–75% of a v1.0 derivative-distribution toolchain. The full pipeline (cache → parse → source build → chroot → ISO) works end-to-end on VMware BIOS + EFI and produces signed, incrementally-publishable apt repositories pushed to one-or-more configured peers via a federation-gated `mirror publish` umbrella (MIRROR-01).  Real-hardware coverage, reproducibility verification, and multi-arch are the largest gates between here and "I would ship this to a paying customer." Last calibrated by a 7-phase consolidation audit on 2026-05-28; spot-refreshed 2026-06-12 after SURFACES-01 (per-surface closures + boot-verified live/installer/disk images), LEDGER-01 (per-source lifecycle + claim aging), and RECLAIM-01 (filename-immutability invariant + `mirror reclaim`).
-
-The README's older self-assessment ("best used for tinkering") undersells where the code actually is — the pipeline produces verified bootable ISOs from source with signed metadata, an incremental update story (`+asg<R>u<N>` versioning, append-only multi-version publish), and a from-source debian-installer rebuilt through a parallel udeb dep tree. But it isn't yet at the operational maturity of an OBS or Yocto either.
-
-### Where the code is, by dimension
-
-| Dimension | Score | What works | What's missing |
-|---|---:|---|---|
-| Functional completeness | 80% | Live ISO + installer ISO + qcow2 disk image, end-to-end on VMware BIOS + EFI. Installer reaches `finish-install.d/20final-message` cleanly.  Federated publish (MIRROR-01): `mirror publish` to one-or-more configured peers with per-file `.deb` push + Ed25519-signed claims + tier-1 GPG-signed `coord-head`. | Real-hardware coverage (COMP-01h); installer i18n / a11y / guided-partition (INST-01..04). |
-| Architecture | 85% | 13-flag BuildFlags FSM, per-surface reachability closures (SURFACES-01: live / disk / installer-pool composed from one closure helper, never per-group deltas), 3 autorun pipelines (`live` / `installer` / `disk`), parallel deb/udeb dep trees over a shared source corpus, parallel `source build` via ThreadPoolExecutor with per-worker scratch dirs + HeavyPackages serialisation (COMP-03), 5 audit-cohort scopes, idempotency guards on every long-running stage, MIRROR-01 federation umbrella with first-publish bootstrap + reconcile-neighbours fan-out. | Multi-arch (COMP-04) and multi-distro (COMP-11) remain cross-cutting. |
-| Code quality | 80% | ruff-clean, mypy-clean, comments explain *why* with date-stamped incident notes, structured `(ok, detail)` error returns, clear data-plane separation, signed `<pkg>.build.json` per source build replaces legacy `.result`/`.patchhash` sidecars. | Closed-source-distribution path (private toolchain, GPL caveat) deferred for later. |
-| Tests | 80% | 1086 tests, single file by policy, policy-enforcer tests pin invariants (read-only-named commands can't call destructive helpers, stage-D path bans, fork helper-prefix shape, every-defined-test-is-registered, etc.). 1086/1086 pass under `python3 tests/test_module.py`; pre-push triad is ruff + tests + mypy. | ~10–15% silently no-op when host tools (dpkg-deb, gpg) are absent; ~22 `time.sleep` calls in TUI tests are timing-fragile. |
-| Reproducibility | 70% | Snapshot pinning via snapshot.debian.org, Docker image tagged + Dockerfile-hashed, post-build NMU strip yields pristine versions, sources.list rewritten in-container with `[check-valid-until=no]`, CycloneDX 1.5 SBOM per build with per-source provenance (CONF-07). | No `reprotest` / `diffoscope` gate yet (CONF-06, AUDIT-02). |
-| Security | 85% | InRelease GPG verified per mirror against debian-archive-keyring; project signing-key with sign+verify roundtrip gate before any chroot work; signed `Release`/`InRelease` on every published mirror; Ed25519-signed per-builder claim ledger + tier-1 GPG-signed `coord-head` (federation-gated, replay-resistant); manifest reader fail-closed (STA-21); HMAC-signed build records (OBS-01); Docker daemon URL guard; sudo password scrubbed after use. | Signing key uses `%no-protection` (no passphrase) — documented but operator-exposed. |
-| Operability | 85% | Curses TUI + headless `--headless` backend share one console facade; 12 top-level commands with `_group_help` tables; rich `print state/config/extras/…` views; per-build timestamped log files; structured autorun summary; `--yes` + `--cmd <cmd>` one-shot + `ATHENA_SUDO_PASSWORD` env-var + ANSI colour in TTY mode + graceful Ctrl+C BuildFlags integrity. | Localization; session-resume (dormant — persistence layer present, command removed pending relook). |
-| Identity / branding | 85% | Three-layer model (Athena toolchain / Asgard distribution / thor codename) enforced through `@DISTRIBUTION@/@BASE_ID@/@CODENAME@` token-subst in fork content. Collision gate FAILS the cache when upstream would dominate a fork. 8 forks audited clean.  Identity-residue audit (CONF-10) wired into fork-content + chroot-hook + staged-ISO stages. | A few Debian-named packages (`debian-faq`, `reportbug`) intentionally kept in pool for `[standard]` task. |
-| Documentation | 80% | This README, `TODO.md`, `docs/done.md`, 9+ plan docs, `docs/architecture.md` (DOC-02), `docs/patching.md` (DOC-03), `docs/release.md` (DOC-04), `docs/mirror-setup.md` (MIRROR-01 operator howto), `docs/branding-methodology.md`, `docs/pseudocode.md`, `docs/security.md`, `docs/diagrams/build-fsm.{dot,png}`. | README maintenance cadence (DOC-06) is the live discipline. |
-| Scale / portability | 50% | Single-arch (amd64). Single-distro derivation (Debian bookworm). | COMP-04 (arm64), COMP-07 (per-release containers), COMP-11 (`Distro = ubuntu`). |
-
-### Comparative landscape
-
-The Linux distro build/composition tooling sits in two broad camps. Athena is squarely in the second.
-
-**Prebuilt-binary composers** (faster, narrower, NOT what Athena is):
-
-| Tool | Comparison |
-|---|---|
-| **debootstrap** | Bootstraps a minimal Debian root from a mirror. Mature, narrow, used as a building block — not a comparator. |
-| **live-build (Debian Live)** | Closest *shape* comparator. Pulls prebuilt `.debs` into a chroot, wraps in squashfs + GRUB. Athena's pipeline structure is similar but **Athena builds every package from source**; live-build trades that 30–60 min build time away for upstream-current binaries. |
-| **simple-cdd / mkarchiso / ubuntu-cdimage** | Distro-specific equivalents of live-build. Canonical's tooling is the most operationally mature; closed/internal. |
-| **Kickstart / anaconda (RHEL/Fedora)** | rpm/dnf side equivalent of d-i + simple-cdd combined. Different ecosystem, same camp. |
-
-**Source builders** (slower, more ambitious, what Athena is):
-
-| Tool | Comparison |
-|---|---|
-| **Yocto / OpenEmbedded** | Closest in *spirit*. Industrial-strength, ~15 years mature, multi-arch by design, parallel by default, infamous learning curve. Yocto targets embedded; Athena targets a Debian-faithful desktop/server derivative. Yocto is several orders of magnitude larger as a codebase + community. |
-| **buildroot** | Embedded Linux from source, simpler than Yocto. Same spirit, smaller surface. |
-| **Gentoo's catalyst** | Builds Gentoo stage tarballs from source via portage. Mature but Gentoo-specific. |
-| **Open Build Service (openSUSE/SUSE)** | Industrial multi-distro package build service with web UI + build farm. Builds *packages*; Athena builds *distribution compositions* on top of building packages. Different scope. |
-| **NixOS / Nix** | Different paradigm — declarative, content-addressed, no FHS. Not a direct comparator. |
-| **Devuan's build process** | Closest *ideological* neighbor. Devuan rebuilds ~50 systemd-tainted packages; Athena rebuilds the whole `pkg.list` closure (~800–900 sources). "Devuan but more total." |
-| **Pop!\_OS / elementary / LMDE** | Same end-state ambition as Asgard; build tooling private/opaque. Athena is the tooling you'd write if you wanted to be one of these but transparent. |
-| **Lunar / Sorcery / Frugalware** | Hobbyist source-built distros. Lower activity, less rigorous. Athena is meaningfully more current. |
-
-### Where Athena is unusually strong
-
-- **Inline incident archeology.** Comments explain *why* with date-stamped notes pointing at the original failure. Most peers don't document at this depth.
-- **Append-only multi-version publish.** The `+asg<R>u<N>` versioning + signed-manifest authority is more rigorous than live-build's "rebuild and overwrite" model.
-- **Fork collision gate.** The cache build FAILS when an upstream version would dominate a fork's version. Most derivatives silently ship the regression.
-- **Fail-loud identity policy.** No Debian residue allowed without an explicit allowlist; tested by source-grep policy enforcers.
-- **Snapshot pinning to `snapshot.debian.org`.** Full reproducibility across runs in a way live-build is not by default.
-
-### Where Athena is unusually weak
-
-- **Single-host, single-operator.** No build farm, no CI matrix, no per-PR build validation.
-- **Single arch.** Multi-arch is a significant cross-cutting refactor (COMP-04).
-- **Builds are not bit-reproducible.** Same source + same version can hash differently across rebuilds (no build-path normalization or verify-by-double-build). The publish layer compensates with the filename-immutability invariant + `mirror reclaim` escape hatch, but independent verification (CONF-06 / AUDIT-02) stays open.
-- **Real-hardware testing depends on the operator** having access to varied hardware. Yocto has YP-CI; Canonical has hardware-enabled labs; Athena has the operator's local machines + VMware.
-
-### Honest bottom line
-
-For a derivative-distribution project, today's maturity is at the point where it **could ship a v1.0 to early adopters** — the pipeline is correct, the metadata is signed, the update story works, and `mirror publish` carries the federated multi-target story.  The largest gates to genuine production use are COMP-01h (real-hardware), CONF-06 / AUDIT-02 (reproducibility verification), COMP-04 (multi-arch), the INST-01..04 installer UX gaps, and an enlarged test matrix (CI-01).  Operators with a tolerance for build time and a willingness to fix the occasional upstream-source-doesn't-build problem will find the tool more capable than the README's "tinkering" framing suggests.
-
-### Linux
-The first question always is - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a clone of UNIX operating system called 'Minix' and was supposed to be compatible to ***System V***. 
-
-Accordingly, We ended up with the Ver 0.1 of the **Linux Kernel**. Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU and gave it purpose. They brought the application stack that gave Linux Kernel purpose, and hence was born the Linux Distribution, or more colloquially just called **Linux Distribution**. The conversation of distinction between 'Linux Distribution' and 'Linux OS' is a petridish for violence amongst geeks, but for the purpose of this project lets assert debian is a 'Linux Distribution' and stay away from the phrase OS as puch as possible.
+Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU and gave it purpose. They brought the application stack that gave Linux Kernel purpose, and hence was born the Linux Distribution, or more colloquially just called **Linux Distribution**. The conversation of distinction between 'Linux Distribution' and 'Linux OS' is a petridish for violence amongst geeks, but for the purpose of this project lets assert debian is a 'Linux Distribution' and stay away from the phrase OS as much as possible.
 
 The first Linux distribution, called "Softlanding Linux System" (SLS), was released by 1992. and within the next three years we saw the advent of Slackware, Red Hat and Debian. The rest as they say is history.
 
-PS: Red Hat vs Debian - Red Hat was founded with the goal of creating a commercial distribution of Linux that could be sold and supported. Red Hat's approach was to take the existing Linux codebase, add value in the form of support, services, and tools, and sell it to enterprise customers. On the other hand, Debian was founded  with the goal of creating a community-driven Linux distribution that was completely free, open-source and built from scratch, with a focus on stability, security, and ease of use. 
+PS: Red Hat vs Debian - Red Hat was founded with the goal of creating a commercial distribution of Linux that could be sold and supported. On the other hand, Debian was founded  with the goal of creating a community-driven Linux distribution that was completely free, open-source and built from scratch. 
 
-We are currently only looking at Debian & Debian based distributions
+A **package** is akin to SKU (Stock Keeping Unit) of software that can be installed and managed by the operating system's package manager. This is important - packages may intrinsically also define other packages as dependencies and it is usually the package manager's headache to install everything together. In this context Debian identifies an application, wraps the application's build system to produce the installables as a package construct, i.e. deb - debian package file, test it, patch it, and publish it in a repository.
 
-### Linux Distribution
-A Linux distribution is a complete set of packages included (but not limited to) the Linux kernel, system utilities, applications, and software libraries, along with a package management system and other tools for managing and configuring the system. A Linux distribution is typically designed and packaged by a community or organization, and is intended to provide a complete, ready-to-use OS that can be installed and configured on a variety of hardware platforms.
+If you can collect a set of packages that work together in a manner that makes the computer usable even if it's to play minesweeper, you have a distribution. If you can support it with updates via a online / offline repository you have a more mature practically usable distro. If you can ship it with packages or UX other distros don't usually ship you have a custom distro with (maybe) some unique appeal. 
 
-### Packages and Package Manager
-In a Linux distribution, a package is akin to SKU (Stock Kepping Unit) of software that can be installed and managed by the operating system's package manager. A package may include one or more applications, libraries, along with configuration files required to run the software on the system. 
+***Athena enables you to create this distro of 'unique appeal' without having to hit your head on how to manage the distro but to focus on what to put in it.***
 
-The packages may intrensicly also define other packages as dependencies and it is usually the package manager which checks to ensure that all required dependencies are present and installs any missing dependencies as needed. THe package manager abstracts away the complexity of installing, managing, updating, and removing software packages.
-
-Packages in a Linux distribution may be maintained by the distribution's own developers or by third-party contributors. In this context Debian. They (Debian) identify application, wrap the application's build system to produce the installables as a package construct, i.e. deb - debian package file, test it, patch it, abd publish it in a repository.
-
-Dpkg is a low-level package manager that is used by the Debian and Ubuntu distributions. It is responsible for managing the installation and removal of individual software packages on a system. Dpkg works by maintaining a database of installed packages and their dependencies, and it uses this information to ensure that all required packages are present and properly configured when a package is installed.
-
-Apt, or Advanced Package Tool, is a higher-level package manager that builds on top of dpkg. It is used to manage the entire software repository for a distribution, including all official packages and any third-party repositories that have been added. Apt provides a more user-friendly interface than dpkg, with features such as automatic dependency resolution, automatic package updating, and easy installation of packages from remote repositories.
-
-### Repositories
-
-Debian's package repositories are organized into several official repositories, including "main", "contrib", and "non-free", as well as a "backports" repository for newer software versions. The "main" repository contains packages that are completely free and open-source, while the "contrib" and "non-free" repositories contain packages that may have non-free or proprietary components. 
-
-
-
-### RHEL/Debian/Ubuntu
-
-The Linux distribution world (broadly) splits into two camps that have agreed on package format: the dpkg/apt camp (Debian and its many descendants), and the rpm/dnf camp (Red Hat and its descendants — RHEL, CentOS, Rocky, AlmaLinux, Fedora). They look superficially the same from a user's seat — kernel, userland, init, package manager — but the *philosophies* are different, and the philosophy bleeds into how you build.
-
-Red Hat optimises for a controlled commercial pipeline. Packages are RPMs, the policy is set by the vendor, and the source for any given binary goes through the distribution's own build farm. Signing and release cadence is tighter and slower, which is exactly what enterprise customers buying support contracts wanted.
-
-Debian sits at the other end of the same axis. Packaging is community-driven, every package has a *maintainer* (a real person, who has signed a social contract), the source is downloadable and rebuildable by anyone, and the Free Software requirements are taken seriously enough that an entire `non-free` archive exists to keep `main` clean. The cost is that Debian moves at the pace of consensus — stable releases land when they land.
-
-Ubuntu (Canonical) is the pragmatic middle. It takes Debian's package format, source policy, and most of its archive, then adds a more predictable six-month release cadence, an opinionated default install, paid LTS support, and a willingness to ship `non-free` bits in `main` (drivers, firmware) where Debian wouldn't. From a *build* perspective Ubuntu and Debian are very close — same `apt`/`dpkg`/`dpkg-buildpackage` toolchain, same source-package layout — which is why this project's design choices port to either. (See COMP-11 in `TODO.md` for the day Athena gains a `Distro = ubuntu` switch.)
-
-A practical note for anyone coming from RHEL: this project will be largely incomprehensible for the first afternoon. Conventions are different, assumed reading is different. Stick with it; the underlying ideas are the same.
-
-### Stiched together
+### Stitched together
 
 So we have a kernel, a libc, a userland, a package manager, mirrors that hand out signed metadata, source archives that build into binary packages — what does it actually take to *stitch* this into a working system?
 
@@ -135,7 +49,7 @@ Roughly: bootstrap a minimal root filesystem, teach it to find packages, install
 
 Done by hand this is a long week. `debootstrap` automates the bootstrap step. `live-build` automates the live-ISO bit. `debian-installer` automates the installer-ISO bit. Each tool does one piece well, and gluing them together for a *custom* distribution — your own package set, your own patches, your own branding — is where the friction usually shows up.
 
-Athena-Build is one attempt at that glue, with the additional constraint that everything ships from source. The chapters that follow walk through what that looks like in practice — what to install on the host before you start, how to drive the build, where to look when something breaks (and it will).
+Athena-Build is one attempt in one user interactable TUI, with the additional constraint that everything ships from source. The sections that follow walk through what that looks like in practice — what to install on the host before you start, how to drive the build, where to look when something breaks (and it will).
 
 
 ## Building Image
@@ -449,6 +363,31 @@ in CI for the same reason.
 - [`docs/pseudocode.md`](docs/pseudocode.md) — natural-English walkthrough of every module.
 - [`TODO.md`](TODO.md) — open work, with severity + status + history preserved.
 
+## Project maturity
+
+Athena-Build is pre-1.0 and moving toward a specific goal: a fully from-source
+Debian derivative you can build, trust, and run. The build toolchain (**Athena**)
+is the mature half — hand it Debian source packages and it returns signed,
+snapshot-reproducible live, installer, and disk images, end to end. The
+distribution it produces (**Asgard**) is the younger half: it boots and installs
+cleanly under virtualisation, but has yet to meet real hardware, publish its own
+source, or speak any architecture other than amd64. Put plainly, it builds on our
+machines — making it build on everyone's, on real iron, is the rest of the road.
+
+| Track | Where it's headed | Done | The short version |
+|---|---|:--:|---|
+| **Athena** — the build toolchain | a complete, trustworthy from-source build system | **~80%** | Full pipeline runs end to end; signed, reproducible, on tagged releases. Multi-arch and reproducibility proofs remain. |
+| **Asgard** — the distribution it builds | a Debian derivative you'd daily-drive | **~55%** | Boots and installs on VMs (BIOS + EFI). Still needs real hardware, published source, and more than one CPU architecture. |
+| **Federation** — multi-builder publishing | many builders, one mirror you can trust | **~70%** | Signed, append-only, multi-builder publishing works. Builder-trust hardening comes next. |
+
+Overall the project sits at roughly **70% of a v1.0 we'd trust on real hardware**,
+and the missing 30% is enumerated rather than mysterious. Bug reports are welcome
+and, at this stage, confidently expected.
+
+For the full per-dimension breakdown, see [`docs/maturity.md`](docs/maturity.md).
+
+*Maturity calibrated 2026-06-26.*
+
 ---
 
-*A note to future-me (and anyone landing patches): this README is meant to track the state of the project, not just the day it was written. If you add a pipeline stage, change a default in `config/build.conf`, rename a command, retire a failure mode (or discover a new one), update this file in the same change. A README that lies is worse than a README that's missing — see `DOC-06` in `TODO.md`.*
+*A note to future-me (and anyone landing patches): this README is meant to track the state of the project, not just the day it was written. If you add a pipeline stage, change a default in `config/build.conf`, rename a command, retire a failure mode (or discover a new one), update this file in the same change. A README that lies is worse than a README that's missing.*
