@@ -71,7 +71,7 @@ class _DepDriftMixin:
     # assignment here.
     _dependencytree: 'dependencytree.DependencyTree'
     _dir_repo: str
-    _dir_repo_main: str   # D
+    _dir_repo_main: str
     _config: 'utils.BuildConfig'
     strip_build_version: Callable[[str], str]
     normalize_repo_filename: Callable[[str], str]

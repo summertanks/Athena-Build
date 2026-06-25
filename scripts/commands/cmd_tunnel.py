@@ -177,7 +177,7 @@ class TunnelCommandsMixin(SessionState):
         # rename after download.
         _upstream_files = self._tunnel_filenames_for_source(src_pkg.package)
         if not _upstream_files:
-            logger.error(f"tunnel {src_pkg.package}: no binary packages known (run parse_dependency first)")
+            logger.error(f"tunnel {src_pkg.package}: no binary packages known (run 'cache parse' first)")
             return False
 
         if src_pkg._mirror is None:
