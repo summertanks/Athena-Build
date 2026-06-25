@@ -1108,12 +1108,6 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 "container remote init: requires `cache build` first "
                 "(the recipe expands virtual Build-Depends from the cache)")
             return
-        _want_lm = bool(getattr(self.config, 'create_local_mirror', False))
-        if _want_lm and self.dep_tree is None:
-            console.print(
-                "container remote init: CreateLocalMirror is on but the build "
-                "closure isn't computed — run `cache parse` first")
-            return
         # Every configured remote (fan-out targets); fall back to the legacy
         # single remote_build_host when the registry is empty.
         _remotes = list(getattr(self.config, 'remotes', []) or [])
@@ -1125,6 +1119,14 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             console.print(
                 "container remote init: no remote build host configured — add "
                 "one with `container remote add <name> <ssh://user@host>`")
+            return
+        # Per-remote build mirror (RMIRROR-01): each remote opts in at
+        # `container remote add`; computing the closure needs the dep tree.
+        _want_any_lm = any(_r.get('local_mirror') for _r in _remotes)
+        if _want_any_lm and self.dep_tree is None:
+            console.print(
+                "container remote init: a remote has a local mirror enabled but "
+                "the build closure isn't computed — run `cache parse` first")
             return
         try:
             self.container = buildcontainer.BuildContainer(
@@ -1141,16 +1143,15 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         _how = {'present':     'present on remote',
                 'transferred': 'transferred over the LAN'}
         _plan = None
-        if _want_lm:
+        if _want_any_lm:
             _plan = local_mirror.plan(self.cache, self.dep_tree, self.config,
                                       include_index=True)
             console.print(
-                f"  local build mirror: {len(_plan['entries'])} pkg(s), "
-                f"~{local_mirror.human_size(_plan['total_size'])} closure",
+                f"  build mirror closure: {len(_plan['entries'])} pkg(s), "
+                f"~{local_mirror.human_size(_plan['total_size'])}",
                 tui.COLOR_INFO)
         console.print(
-            f"  Initialising {len(_remotes)} remote(s) for image {_tag}"
-            + (" + local mirror" if _want_lm else "") + ":",
+            f"  Initialising {len(_remotes)} remote(s) for image {_tag}:",
             tui.COLOR_HIGHLIGHT)
         _all_ready = True
         for _r in _remotes:
@@ -1191,8 +1192,8 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                     continue
             console.print(f"    {_r['name']}: image {_how.get(_state, _state)}",
                           tui.COLOR_HIGHLIGHT)
-            # 2. local build mirror (gated — resumable; re-run init to continue).
-            if _want_lm:
+            # 2. local build mirror — per-remote (gated; resumable: re-run init).
+            if _r.get('local_mirror'):
                 _result = self._stage_remote_localmirror_bars(_host, _plan, _key)
                 if not (_result and _result.get('indexed')
                         and not _result.get('failed')):
@@ -1205,11 +1206,12 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                     f"    {_r['name']}: local mirror ready "
                     f"({_result['downloaded']} fetched, "
                     f"{_result['skipped']} cached)", tui.COLOR_HIGHLIGHT)
-        # The recipe emits the file:///localmirror source ONLY when the mirror is
-        # ready on EVERY remote (else a build routed to a mirror-less remote
-        # would reference a missing source).  Override __init__'s BS1-dir-based
-        # value: for remote builds only the remote mirror matters.
-        self.container._localmirror_active = bool(_want_lm and _all_ready)
+        # Per-remote localmirror is applied at build time (compose_recipe's
+        # `localmirror` override keyed on each slot's flag) — no container-wide
+        # flag here.  For remote builds the container's own _localmirror_active
+        # (BS1's dir) is irrelevant; force it off so a stray BS1 localmirror
+        # can't leak a file:///localmirror source onto a mirror-less remote.
+        self.container._localmirror_active = False
         self.flags.build_container_ready = _all_ready
         if _all_ready:
             console.print("  Remote build container ready.", tui.COLOR_HIGHLIGHT)
@@ -1665,24 +1667,27 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             return
         _mem = _mem_s
 
-        # 5b. Local build mirror — a machine-wide toggle (CreateLocalMirror)
-        # that governs LOCAL builds' localmirror AND, for remote builders, the
-        # on-remote build-closure mirror populated at `container remote init`.
-        # Offer it here (guided only) since it's part of "set up a build host";
-        # skip if already enabled.  Built later, at init — not now.
-        if _guided and not getattr(self.config, 'create_local_mirror', False):
+        # 5b. Local build mirror — a PER-REMOTE toggle (RMIRROR-01): whether
+        # THIS remote stages a snapshot-pinned build-closure apt mirror at
+        # `container remote init` so its builds serve build-deps off local disk.
+        # Asked once here (guided); persisted on this remote's entry; never
+        # re-asked at init.  One-liner path: `lm=true`/`localmirror=true`.
+        _lm = (str(_opts.get('lm') or _opts.get('localmirror') or '').strip()
+               .lower() in ('1', 'true', 'yes', 'y'))
+        if _guided:
             _lm_resp = Prompt(
                 PROMPT_YESNO,
-                "Enable a local build mirror?").get_response()
-            if _lm_resp.strip().lower() in ('y', 'yes'):
-                self.config.create_local_mirror = True
-                utils.write_local_conf(self.config, create_local_mirror=True)
-                console.print("  local build mirror ENABLED", tui.COLOR_INFO)
+                "Build a local build mirror on this remote?").get_response()
+            _lm = _lm_resp.strip().lower() in ('y', 'yes')
+        if _lm:
+            console.print("  local build mirror: ON (built at `container remote "
+                          "init`)", tui.COLOR_INFO)
 
         # 6. Persist + summary.
         _ok, _detail = utils.add_remote(
             self.config, name=_name, host=_host, ssh_key=_keydst,
-            max_parallel_builds=_jobs, build_cpus=_cpus, build_memory=_mem)
+            max_parallel_builds=_jobs, build_cpus=_cpus, build_memory=_mem,
+            local_mirror=_lm)
         if not _ok:
             console.print(f"  {_detail}", tui.COLOR_ERROR)
             return
@@ -1697,9 +1702,10 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                       f"{_info['mem_gib']} GiB")
         console.print(f"    limits   : jobs={_jobs} "
                       f"cpus={_cpus or 'none'} mem={_mem or 'none'}")
+        console.print(f"    localmir : {'on' if _lm else 'off'}")
         console.print(f"    key      : {_keydst}")
         console.print("    image    : run `container remote init` to stage the "
-                      "build image")
+                      "build image" + (" + local mirror" if _lm else ""))
 
     def cmd_container_remote_list(self, *args):
         """List the configured remote build hosts + their per-host tuning."""
@@ -1713,6 +1719,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 f"  {_r['name']:<16} {_r['host']:<34} "
                 f"jobs={_r['max_parallel_builds']} "
                 f"cpus={_r['build_cpus'] or '-'} mem={_r['build_memory'] or '-'} "
+                f"lm={'on' if _r.get('local_mirror') else 'off'} "
                 f"key={_r['ssh_key'] or '-'}")
 
     def cmd_container_remote_delete(self, *args):
