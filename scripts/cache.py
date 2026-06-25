@@ -227,6 +227,26 @@ class Cache:
     def is_valid(self) -> bool:
         return self._config_valid
 
+    @staticmethod
+    def _should_reuse_pinned_release(
+        snapshot_ts: Optional[str], is_local: bool, release_file: str
+    ) -> bool:
+        """True when a snapshot-pinned InRelease can be served from cache.
+
+        A pinned URL embeds the snapshot timestamp and the on-disk filename
+        is derived from that URL, so a non-empty cached copy can only belong
+        to THIS exact pin (re-pinning yields a new filename, never a stale
+        reuse).  Trust is still re-checked by the unconditional GPG pass, so
+        this only controls re-fetch.  Never reuse a file:// fork mirror
+        (regenerated each build) or a floating/unpinned mirror.
+        """
+        return bool(
+            snapshot_ts is not None
+            and not is_local
+            and os.path.isfile(release_file)
+            and os.path.getsize(release_file) > 0
+        )
+
     def __get_files(self) -> int:
         """Fetch InRelease + Packages + Sources for every configured mirror.
 
@@ -265,15 +285,33 @@ class Cache:
                 _mirror.sources_path:  '',
             }
 
-            _size, _detail = utils.download_file(_release_url, _release_file)
-            if _size <= 0:
-                self.error_str = (
-                    f"Error downloading release file from {_release_url}: "
-                    f"{_detail or 'empty response'}"
+            # PERF-01: a snapshot-pinned InRelease is immutable — its URL
+            # embeds the pinned timestamp, and the on-disk filename is
+            # derived from that URL, so a cached copy can only belong to
+            # THIS exact pin (re-pinning changes the URL → a new filename,
+            # never a stale reuse).  Skip the re-download when pinned and a
+            # non-empty cached copy exists; trust is still gated by the
+            # UNCONDITIONAL GPG check below, with a delete+re-fetch+re-verify
+            # fallback if that cached copy fails to verify.  file:// fork
+            # mirrors are regenerated each build, so never skip them.
+            _reused_pinned = self._should_reuse_pinned_release(
+                self.snapshot_ts, _is_local, _release_file
+            )
+            if _reused_pinned:
+                logger.info(
+                    f"[{_mirror.id}] snapshot-pinned {_release_name} cached — "
+                    f"skipping re-download (GPG still verified)"
                 )
-                return -1
-            tui.console.print(f'Downloaded {os.path.basename(_release_url)}')
-            logger.info(f'Downloaded {_release_file}')
+            else:
+                _size, _detail = utils.download_file(_release_url, _release_file)
+                if _size <= 0:
+                    self.error_str = (
+                        f"Error downloading release file from {_release_url}: "
+                        f"{_detail or 'empty response'}"
+                    )
+                    return -1
+                tui.console.print(f'Downloaded {os.path.basename(_release_url)}')
+                logger.info(f'Downloaded {_release_file}')
 
             # Verify the InRelease GPG signature *before* parsing — once
             # the signature is good the SHA256 entries inside can be
@@ -291,6 +329,32 @@ class Cache:
                     self._security_keyring,
                     self._security_work_dir,
                 )
+                if not _ok and _reused_pinned:
+                    # The reused cache failed verification — it may be stale
+                    # or corrupt on disk.  Pinning controls re-fetch; GPG
+                    # controls trust, so fetch the immutable file once more
+                    # and re-verify before giving up.
+                    logger.warning(
+                        f"[{_mirror.id}] cached {_release_name} failed GPG "
+                        f"verification ({_detail}) — re-downloading once"
+                    )
+                    try:
+                        os.remove(_release_file)
+                    except OSError:
+                        pass
+                    _size, _detail = utils.download_file(_release_url, _release_file)
+                    if _size <= 0:
+                        self.error_str = (
+                            f"Error downloading release file from {_release_url}: "
+                            f"{_detail or 'empty response'}"
+                        )
+                        return -1
+                    logger.info(f'Downloaded {_release_file}')
+                    _ok, _detail = utils.verify_inrelease(
+                        _release_file,
+                        self._security_keyring,
+                        self._security_work_dir,
+                    )
                 if not _ok:
                     self.error_str = (
                         f"InRelease GPG verification failed for "
