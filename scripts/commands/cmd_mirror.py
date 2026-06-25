@@ -1528,7 +1528,7 @@ class MirrorCommandsMixin(SessionState):
         _keys = self._coord_self_keys()
         if _keys is None:
             return False
-        _bid, _, _pub = _keys
+        _bid, _privkey, _pub = _keys
         _target = args[0] if args else None
         if _target is not None:
             if _mirror.read_mirror_state(self.config, _target) is None:
@@ -1788,17 +1788,75 @@ class MirrorCommandsMixin(SessionState):
             _bar.close()
             self._mirror_pull_write_build_records(
                 _n, _per_pkg_downloads)
+            # Pull-time supersession reconciliation: where the pull brought a
+            # higher version (owned by a peer) of a binary we still hold an OWN
+            # live claim on, retire OUR old claim → obsolete locally — so
+            # `repo repair cleanup` can prune the superseded local file without a
+            # publish-to-release round-trip (we're the recipient, not the
+            # source).  Successor-not-present drift stays live (publish-before-
+            # prune).  Best-effort — never break a pull.
+            _retired = 0
+            try:
+                _retired = self._reconcile_pulled_supersession(
+                    _by_builder, _bid, _privkey, _snap)
+            except Exception as _e:    # noqa: BLE001
+                logger.warning(
+                    f"mirror pull: supersession reconcile skipped: {_e}")
             console.print(
                 f"  downloaded={_dl} skipped_own={_skip_own} "
                 f"skipped_present={_skip_present} "
                 f"verify_mismatch={_mismatch} failed={_failed}"
                 + (f" refreshed={_refreshed}" if _refreshed else '')
-                + (f" no_claim={_no_claim}" if _no_claim else ''),
+                + (f" no_claim={_no_claim}" if _no_claim else '')
+                + (f" retired_own={_retired}" if _retired else ''),
                 tui.COLOR_HIGHLIGHT if (_mismatch + _failed) == 0
                 else tui.COLOR_ERROR)
             if _mismatch or _failed:
                 _all_ok = False
         return _all_ok
+
+    def _reconcile_pulled_supersession(self, fetched_by_builder, bid,
+                                       privkey, snapshot):
+        """Retire OUR own published claims that a higher version present in the
+        pulled set (possibly peer-owned) supersedes — appending obsolescence
+        markers to our local jsonl so `repo repair cleanup` can prune the old
+        files WITHOUT a publish.  Returns the count retired.
+
+        View = our OWN claims read from the LOCAL ledger (authoritative seqs for
+        obsoletes_seq + the append) + every PEER's claims from the verified
+        fetch (the supersession source).  Idempotent — an already-obsoleted
+        claim is no longer PUBLISHED, so it re-emits nothing.
+        """
+        import datetime
+        import coord.publish as _publish
+        import coord.store as _store
+        _dir = getattr(self.config, 'dir_coord_claims', None)
+        if not _dir or not os.path.isdir(_dir) or not privkey:
+            return 0
+        _view: 'dict[str, list]' = {}
+        for _e in sorted(os.listdir(_dir)):
+            if _e.endswith('.jsonl'):
+                _view[_e[:-len('.jsonl')]] = _store.read_builder_claims(
+                    _dir, _e[:-len('.jsonl')])
+        for _b, _claims in fetched_by_builder.items():
+            if _b != bid:
+                _view[_b] = _claims
+        _now = datetime.datetime.now(
+            datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        _obs = _publish.emit_supersession_obsolescence(
+            builder_id=bid, by_builder=_view, snapshot_pin=snapshot or '',
+            built_at=_now, start_seq=_store.max_seq(_dir, bid))
+        _n = 0
+        for _oc in _obs:
+            _oc['seq'] = _store.max_seq(_dir, bid) + 1
+            try:
+                _store.append_claim(_dir, bid, _oc, privkey)
+                _n += 1
+            except (OSError, ValueError) as _e:
+                logger.warning(
+                    "mirror pull: obsolescence append failed for "
+                    f"{_oc.get('filename')}: {_e}")
+        return _n
 
     def cmd_mirror_reclaim(self, *args):
         """mirror reclaim [<source>|<file.deb|.udeb>] [<name>] [force]
