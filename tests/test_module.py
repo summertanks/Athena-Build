@@ -38720,50 +38720,26 @@ def test_stage_remote_localmirror_parses_progress_and_result():
     assert len(_seen) == 1 and _seen[0]['basename'] == 'a.deb'
 
 
-def test_stage_remote_localmirror_pushes_fork_files():
-    """file:// (fork / locally-built) closure members can't be fetched by the
-    remote — BS1 scps them into the mirror dir; only snapshot (http) members go
-    in the plan the remote downloads."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import remote_orchestrate as ro
+def test_local_mirror_plan_excludes_fork_file_urls():
+    """plan excludes closure members served from a file:// (fork / local)
+    mirror — the build mirror caches UPSTREAM snapshot packages only; forks come
+    from our repo and the common case (base-files) is Essential in the base
+    image."""
+    import local_mirror
+    cache, dt = _lm_mock_cache_and_tree()
 
-    class _FakePopen:
-        def __init__(self, *a, **k):
-            self.stdout = iter([
-                ro.LM_RESULT_MARKER + ' {"downloaded":1,"skipped":0,'
-                '"failed":0,"indexed":true,"failures":[]}\n'])
-
-        def wait(self):
-            return 0
-
-    class _R:
-        returncode = 0
-
-    _runs = []
-    _orig_run, _orig_popen = ro.subprocess.run, ro.subprocess.Popen
-    ro.subprocess.run = lambda argv, **k: (_runs.append(argv) or _R())
-    ro.subprocess.Popen = _FakePopen
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            _fork = os.path.join(tmp, 'base-files_athena2_amd64.deb')
-            open(_fork, 'w').write('x')
-            _runner = os.path.join(tmp, 'remote_localmirror.py')
-            open(_runner, 'w').write('x')
-            _plan = {'snapshot_ts': 'x', 'total_size': 100, 'entries': [
-                {'basename': 'base-files_athena2_amd64.deb',
-                 'url': 'file://' + _fork, 'sha256': '', 'size': 1},
-                {'basename': 'foo.deb',
-                 'url': 'https://snapshot/foo.deb', 'sha256': '', 'size': 99}],
-                'packages_index': 'Package: x\n'}
-            _res = ro.stage_remote_localmirror(
-                'u@h', _plan, _runner,
-                remote_mirror_dir='~/athena-localmirror')
-    finally:
-        ro.subprocess.run, ro.subprocess.Popen = _orig_run, _orig_popen
-    assert _res and _res['indexed'] is True
-    _flat = [' '.join(_a) for _a in _runs]
-    assert any('scp' in _s and _fork in _s and 'athena-localmirror' in _s
-               for _s in _flat), _flat
+    class _FileMir:
+        url = 'file:///home/x/fork'
+    # simulate a fork override: make's best version comes from a file:// repo
+    cache.package_hashtable['make']['1'][0]._mirror = _FileMir()
+    pl = local_mirror.plan(cache, dt, object(), include_index=True)
+    _names = {e['name'] for e in pl['entries']}
+    assert 'make' not in _names, "file:// (fork) member must be excluded"
+    assert any('make' in _x for _x in pl['local_excluded'])
+    assert 'Package: make' not in pl['packages_index']
+    # upstream (https) members still present
+    assert 'gcc' in _names and all(
+        e['url'].startswith('https') for e in pl['entries'])
 
 
 def test_remote_build_run_container_mounts_localmirror():
@@ -38904,7 +38880,7 @@ def main() -> int:
         test_local_mirror_plan_include_index_emits_packages_blob,
         test_remote_localmirror_populate_downloads_skips_indexes,
         test_stage_remote_localmirror_parses_progress_and_result,
-        test_stage_remote_localmirror_pushes_fork_files,
+        test_local_mirror_plan_excludes_fork_file_urls,
         test_remote_build_run_container_mounts_localmirror,
         test_stage_bundle_writes_localmirror_dir_into_build_json,
         test_init_remote_builds_image_and_gates_localmirror,

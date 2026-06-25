@@ -174,49 +174,23 @@ def stage_remote_localmirror(
     returns the parsed RESULT dict (or None on a transport/spawn failure).  The
     mirror dir persists; only the staging dir is cleaned up.
 
-    Closure members with a ``file://`` URL (our FORK / locally-built packages)
-    live on BS1's disk — the remote can't fetch them, so BS1 PUSHES those files
-    into the mirror dir directly; the remote only downloads the snapshot (http)
-    members over its own link.  The index (built from the full packages_index)
-    references both.
+    The plan carries only UPSTREAM (snapshot, http) members — local_mirror.plan
+    excludes our fork / file:// packages — so the remote fetches everything
+    itself; nothing is pushed from BS1.
     """
     import json as _json
     import tempfile as _tempfile
-    import urllib.parse as _up
     _ssh = _ssh_base(host, ssh_key)
     _stage = f"/tmp/athena-lm-stage-{os.getpid()}-{abs(hash(host)) % 100000}"
-    # Partition: snapshot (http/https) → remote downloads; file:// → BS1 pushes.
-    _entries = plan_dict.get('entries', [])
-    _local_files = [_e for _e in _entries
-                    if str(_e.get('url', '')).startswith('file:')]
-    _remote_plan = dict(plan_dict)
-    _remote_plan['entries'] = [_e for _e in _entries
-                               if not str(_e.get('url', '')).startswith('file:')]
-    _remote_plan['total_size'] = sum(
-        int(_e.get('size', 0) or 0) for _e in _remote_plan['entries'])
-    # scp target relative to the remote home (strip the literal ~/).
-    _rel_dir = (remote_mirror_dir[2:] if remote_mirror_dir.startswith('~/')
-                else remote_mirror_dir)
     _result: 'dict | None' = None
     _local_plan = None
     try:
-        if subprocess.run(_ssh + [f'mkdir -p {_stage} {remote_mirror_dir}']
-                          ).returncode != 0:
+        if subprocess.run(_ssh + [f'mkdir -p {_stage}']).returncode != 0:
             log(f"remote-localmirror: cannot create {_stage} on {host}")
             return None
-        # Push the BS1-local (fork) closure files into the mirror dir.
-        if _local_files:
-            _paths = [_up.urlparse(_e['url']).path for _e in _local_files]
-            _paths = [_p for _p in _paths if _p and os.path.isfile(_p)]
-            if _paths and subprocess.run(
-                    _scp_base(ssh_key) + _paths
-                    + [f'{host}:{_rel_dir}/']).returncode != 0:
-                log("remote-localmirror: scp of local (fork) files failed")
-                return None
-            log(f"pushed {len(_paths)} local (fork) file(s) to the mirror")
         _fd, _local_plan = _tempfile.mkstemp(suffix='.json', prefix='lmplan-')
         with os.fdopen(_fd, 'w') as _fh:
-            _json.dump(_remote_plan, _fh)
+            _json.dump(plan_dict, _fh)
         if subprocess.run(_scp_base(ssh_key) + [
                 _local_plan, remote_localmirror_py,
                 f'{host}:{_stage}/']).returncode != 0:
