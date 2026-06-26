@@ -27,7 +27,7 @@ import logging
 import os
 import shlex
 import subprocess
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger('athena')
 
@@ -425,6 +425,136 @@ def push_coord_head(
 
 # ───────────────────────── flock helper (P3) ─────────────────────────
 
+# FED-04: the lock holder touches its `<lock>.holder` sidecar every
+# FLOCK_HEARTBEAT_SEC while alive, so a LIVE-but-slow publish (a multi-GB
+# push over a poor link) keeps the mtime fresh.  A lock is treated as STALE
+# only when it is still held AND its heartbeat is older than
+# FLOCK_STALE_AGE_SEC (~4 missed beats) — that gap is what distinguishes a
+# dead holder (power-failed builder) from a legitimately slow one.
+FLOCK_HEARTBEAT_SEC = 15
+FLOCK_STALE_AGE_SEC = 75
+
+
+def _flock_hold_script(
+    lock_path: str, builder_id: str, heartbeat_sec: int = FLOCK_HEARTBEAT_SEC,
+) -> str:
+    """The shell run INSIDE ``flock -c`` on the mirror for the lifetime of
+    the lock.  Records the builder-id and the holder PID in sidecars, starts
+    a background heartbeat that touches ``<lock>.holder`` every
+    ``heartbeat_sec``, then blocks on ``cat`` (released when we close stdin).
+    On clean exit the heartbeat is killed and both sidecars removed.
+
+    builder_id is validated (no shell metacharacters) at `mirror init`, so
+    direct interpolation is safe."""
+    return (
+        f"echo {builder_id} > {lock_path}.holder; "
+        f"echo $$ > {lock_path}.pid; "
+        f"( while :; do sleep {int(heartbeat_sec)}; "
+        f"touch {lock_path}.holder 2>/dev/null || break; done ) & "
+        f"_hb=$!; "
+        f"echo COORD_LOCK_ACQUIRED; cat; "
+        f"kill $_hb 2>/dev/null; rm -f {lock_path}.holder {lock_path}.pid")
+
+
+def _flock_status_script(lock_path: str) -> str:
+    """One-shot remote probe of the publish lock — emits KEY=VALUE lines
+    parsed by :func:`_parse_flock_status`.  ``flock -n … -c true`` succeeds
+    (HELD=0) only when the lock is FREE, so a held lock reports HELD=1.  AGE
+    is the heartbeat sidecar's age in seconds (huge when absent)."""
+    return (
+        f"if flock -n {lock_path} -c true 2>/dev/null; then echo HELD=0; "
+        f"else echo HELD=1; fi; "
+        f"echo HOLDER=$(cat {lock_path}.holder 2>/dev/null); "
+        f"echo PID=$(cat {lock_path}.pid 2>/dev/null); "
+        f"_m=$(stat -c %Y {lock_path}.holder 2>/dev/null || echo 0); "
+        f"echo AGE=$(( $(date +%s) - _m ))")
+
+
+def _flock_break_script(lock_path: str) -> str:
+    """Break a stale lock: SIGKILL the recorded holder PID (releasing the
+    flock when that shell dies), fall back to ``fuser -k`` where available,
+    then clear both sidecars."""
+    return (
+        f"_p=$(cat {lock_path}.pid 2>/dev/null); "
+        f"if [ -n \"$_p\" ]; then kill -9 \"$_p\" 2>/dev/null; fi; "
+        f"command -v fuser >/dev/null 2>&1 && fuser -k {lock_path} 2>/dev/null; "
+        f"rm -f {lock_path}.holder {lock_path}.pid; echo COORD_LOCK_BROKEN")
+
+
+def _parse_flock_status(stdout: str) -> 'Dict[str, object]':
+    """Parse :func:`_flock_status_script` output into
+    ``{held: bool, holder: str|None, pid: str|None, age_sec: int|None}``."""
+    _d: 'Dict[str, str]' = {}
+    for _line in (stdout or '').splitlines():
+        if '=' in _line:
+            _k, _, _v = _line.partition('=')
+            _d[_k.strip()] = _v.strip()
+    try:
+        _age: 'Optional[int]' = int(_d['AGE'])
+    except (KeyError, ValueError):
+        _age = None
+    return {
+        'held':    _d.get('HELD') == '1',
+        'holder':  _d.get('HOLDER') or None,
+        'pid':     _d.get('PID') or None,
+        'age_sec': _age,
+    }
+
+
+def lock_is_stale(
+    status: 'Optional[Dict[str, object]]',
+    stale_age_sec: int = FLOCK_STALE_AGE_SEC,
+) -> bool:
+    """True when a lock status reports HELD and its heartbeat is older than
+    ``stale_age_sec`` — the signal that the holder died mid-publish.  A
+    live-but-slow holder keeps the heartbeat fresh, so this never fires on a
+    legitimate long push."""
+    if not status or not status.get('held'):
+        return False
+    _age = status.get('age_sec')
+    return isinstance(_age, int) and _age > stale_age_sec
+
+
+def remote_flock_lock_status(
+    *, ssh_host: str, lock_path: str, ssh_key: 'Optional[str]' = None,
+) -> 'Optional[Dict[str, object]]':
+    """Probe whether the publish lock is held, by whom, and its heartbeat
+    age.  Returns the parsed status dict, or None if the probe SSH failed."""
+    _ssh_cmd = ['ssh']
+    if ssh_key:
+        _ssh_cmd += ['-i', ssh_key]
+    _ssh_cmd += ['-o', 'StrictHostKeyChecking=accept-new', ssh_host,
+                 _flock_status_script(lock_path)]
+    try:
+        _r = subprocess.run(_ssh_cmd, capture_output=True, text=True,
+                            timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if _r.returncode != 0 and not (_r.stdout or '').strip():
+        return None
+    return _parse_flock_status(_r.stdout or '')
+
+
+def remote_flock_break(
+    *, ssh_host: str, lock_path: str, ssh_key: 'Optional[str]' = None,
+) -> 'Tuple[bool, str]':
+    """Forcibly break the publish lock (kill the holder + clear sidecars).
+    Caller MUST confirm staleness first — this is the explicit
+    `mirror unlock` recovery path, never automatic."""
+    _ssh_cmd = ['ssh']
+    if ssh_key:
+        _ssh_cmd += ['-i', ssh_key]
+    _ssh_cmd += ['-o', 'StrictHostKeyChecking=accept-new', ssh_host,
+                 _flock_break_script(lock_path)]
+    try:
+        _r = subprocess.run(_ssh_cmd, capture_output=True, text=True,
+                            timeout=30)
+    except (OSError, subprocess.SubprocessError) as _e:
+        return False, f"break SSH failed: {_e}"
+    if 'COORD_LOCK_BROKEN' in (_r.stdout or ''):
+        return True, "lock broken (holder killed, sidecars cleared)"
+    return False, (_r.stderr or _r.stdout or 'break command produced no output').strip()
+
 
 def remote_flock_holder(
     *, ssh_host: str, lock_path: str, ssh_key: 'Optional[str]' = None,
@@ -479,8 +609,7 @@ def remote_flock_acquire(
     # remove it on clean release.  builder_id is validated (no shell
     # metacharacters) at `mirror init`, so direct interpolation is safe.
     if builder_id:
-        _hold = (f"echo {builder_id} > {lock_path}.holder; "
-                 f"echo COORD_LOCK_ACQUIRED; cat; rm -f {lock_path}.holder")
+        _hold = _flock_hold_script(lock_path, builder_id)
     else:
         _hold = "echo COORD_LOCK_ACQUIRED; cat"
     _inner = (
