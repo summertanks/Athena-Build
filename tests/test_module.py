@@ -20585,6 +20585,30 @@ def test_fed03_remote_pubkey_state_local_and_ssh():
         _tr.subprocess = _orig
 
 
+def test_fed01_ledger_stranded_claims_detector():
+    """FED-01: detect live PEER claims the fetched closure ledger OMITS
+    (stranded by a stale / closure-limited ledger).  Ledger-covered files and
+    OUR own claims are excluded; no ledger → [] (the fallback walks the live
+    set)."""
+    from commands.cmd_mirror import _ledger_stranded_claims
+    # claim_by_fn: filename -> (claim, owner_builder)
+    _cbf = {
+        'a_1_amd64.deb': ({'builder': 'BS2'}, 'BS2'),   # peer, IN ledger
+        'b_1_amd64.deb': ({'builder': 'BS2'}, 'BS2'),   # peer, NOT in ledger
+        'c_1_amd64.deb': ({'builder': 'BS1'}, 'BS1'),   # OURS, not in ledger
+    }
+    _partial = {'entries': {'a': {'filename': 'a_1_amd64.deb'}}}
+    # only the peer claim the ledger omits is stranded (b); ours (c) excluded
+    assert _ledger_stranded_claims(_cbf, _partial, 'BS1') == ['b_1_amd64.deb']
+    # ledger covers every live peer claim → nothing stranded
+    _full = {'entries': {'a': {'filename': 'a_1_amd64.deb'},
+                         'b': {'filename': 'b_1_amd64.deb'}}}
+    assert _ledger_stranded_claims(_cbf, _full, 'BS1') == []
+    # no ledger / empty ledger → [] (fallback path already walks the live set)
+    assert _ledger_stranded_claims(_cbf, None, 'BS1') == []
+    assert _ledger_stranded_claims(_cbf, {}, 'BS1') == []
+
+
 def test_fed03d_builder_bindings_and_enforcement():
     """FED-03 D: build_builder_bindings + strict enforce_bindings —
     a swapped/injected pubkey or one absent from the signed map is rejected;
@@ -40471,6 +40495,7 @@ def main() -> int:
         test_fed03_remote_pubkey_state_local_and_ssh,
         test_fed03d_builder_bindings_and_enforcement,
         test_fed03d_new_coord_head_carries_builders,
+        test_fed01_ledger_stranded_claims_detector,
         test_transport_list_remote_debs_parses_and_guards,
         test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,

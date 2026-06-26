@@ -55,6 +55,36 @@ def _unlock_decision(
         "Re-run with --force only if you are certain the holder is dead.")
 
 
+def _ledger_stranded_claims(
+    claim_by_fn: 'dict', ledger: 'Optional[dict]', self_bid: str,
+) -> 'list[str]':
+    """FED-01: live PEER claims whose filename the fetched closure ledger
+    OMITS — files `mirror pull` would STRAND (the adoption loop walks the
+    ledger, so a live claim the ledger doesn't name is never downloaded →
+    phantom virtual_hash_conflict at virtual-build).  Our OWN claims aren't
+    stranded (we already hold those files), so they're excluded.  Returns the
+    sorted stranded filenames; [] when the ledger covers every live peer claim
+    (or there is no ledger — the fallback already walks the live set)."""
+    if not ledger:
+        return []
+    _ledger_fns = {
+        _e.get('filename')
+        for _e in (ledger.get('entries') or {}).values()
+        if isinstance(_e, dict) and isinstance(_e.get('filename'), str)
+        and _e.get('filename')
+    }
+    _out: 'list[str]' = []
+    for _fn, _cb in claim_by_fn.items():
+        if _fn in _ledger_fns:
+            continue
+        if not isinstance(_cb, tuple) or not _cb:
+            continue
+        _claim = _cb[0]
+        if isinstance(_claim, dict) and _claim.get('builder') != self_bid:
+            _out.append(_fn)
+    return sorted(_out)
+
+
 def _register_tofu_decision(
     pk_state: str, remote_sha: str, local_sha: str, force: bool,
 ) -> 'tuple[str, str]':
@@ -1876,6 +1906,24 @@ class MirrorCommandsMixin(SessionState):
                         f"  ledger: NOT applied ({_lg_detail}) — falling "
                         "back to live claims", tui.COLOR_WARNING)
                     _ledger = None
+
+            # FED-01: the ledger IS the adoption set (the loop below walks it),
+            # so a live PEER claim the ledger omits is STRANDED — never adopted
+            # → phantom virtual_hash_conflict at virtual-build.  Detect a
+            # stale / closure-limited ledger and WARN loudly (warn-only: the
+            # pull still proceeds on the ledger; auto-adopt-union is a separate
+            # decision).  The owner must republish a complete ledger to heal.
+            _stranded = _ledger_stranded_claims(_claim_by_fn, _ledger, _bid)
+            if _stranded:
+                _ex = ', '.join(_stranded[:5])
+                _more = '…' if len(_stranded) > 5 else ''
+                console.print(
+                    f"  ledger: STALE / closure-limited — {len(_stranded)} "
+                    f"live peer claim(s) are NOT in the fetched closure ledger "
+                    f"and will NOT be adopted (e.g. {_ex}{_more}).  This "
+                    f"strands files → phantom virtual_hash_conflict at "
+                    f"virtual-build.  Ask the mirror '{_n}' owner to republish "
+                    f"a complete ledger.", tui.COLOR_ERROR)
 
             # Byte-valued progress: the bar shows downloaded/total SIZE (auto
             # K/M/G) at MB/s, with the current binary package name as a fixed-
