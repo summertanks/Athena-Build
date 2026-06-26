@@ -137,54 +137,281 @@ There are also build machine specific ***local config*** that the system will au
 Branding beyond the name (logos, defaults) is carried by packages under `fork/source/`, where `@DISTRIBUTION@` / `@CODENAME@` tokens are substituted in. See [`docs/branding-methodology.md`](docs/branding-methodology.md).
 
 
+### First run — building Asgard thor, step by step
 
-### First run
+This is the most important walkthrough in the project. It takes you from a fresh
+clone to a **published, installable image of Asgard thor 1** — the distribution
+Athena ships by default — *without changing a single config value*. We drive it
+**one command at a time** rather than the all-in-one `autorun`, because the whole
+point of a first run is to see what each stage actually does.
 
+You type these commands inside Athena's terminal UI, in order; each leaves its
+result in memory for the next. Budget **30–60 minutes** on a warm cache (much
+longer the very first time, which downloads all the source and builds the build
+container from scratch). Output below is trimmed to the lines that tell you what's
+happening — the real run prints more, and the full transcript is always saved
+under `log/`.
 
+#### 1. Get the code
 
-There is one shipped pipeline (`autorun`) that drives the build through to a verified chroot; the final ISO step is left as a separate manual command on purpose, so you have a chance to inspect or fiddle with the chroot before it gets sealed into a squashfs.
-
-The pipeline (eight stages, plus one optional side-channel):
-
-1. `cache build` — pulls `Packages` and `Sources` indices from each configured mirror, GPG-verifies the `InRelease` signature against `debian-archive-keyring`, and assembles an in-memory APT cache.
-2. `cache parse` — resolves the package list in `config/pkg.list` into a closed dependency graph (binary deps + matching source packages).
-3. `source sync` — fetches `.dsc`, `.orig.tar.*`, and `.debian.tar.*` files for every selected source.
-4. `container init` — builds a per-release Docker image carrying the build-deps for the source packages.
-5. `source build` — runs `dpkg-buildpackage` inside the container for each source, applies any patches under `patch/source/<pkg>/<ver>/`, drops the resulting `.deb` files (and `.udeb`s, when the source declares them) into `repo/`.  Default mode (= `source build pkg`) builds the **pkg.list closure only** — the user-choices layer minus live extras, installer udebs, and Recommends-only extras.  Layered subsets: `source build live` builds the live extras (live-boot, live-config, …); `source build installer` builds the udeb closure for the installer ramdisk + the installer-exclusive deb extras; `source build recommended` builds the depth-1 Recommends pulled in by `cache parse` for the future apt-repo.  A bracket-token like `source build live-boot-doc [nocheck]` overrides `DEB_BUILD_PROFILES` + `DEB_BUILD_OPTIONS` for that one build — useful when you want a `-doc` binary the default `nodoc` profile would skip.
-6. `chroot build` — installs the built `.deb`s into a chroot under `buildroot/` in topo-sorted batches: the dpkg/dash/coreutils closure lands first (debootstrap-style essential bootstrap, so maintainer scripts run inside the chroot as early as possible), then the libc bootstrap cycle, post-install patch overlays, and the canonical libdevmapper/dmsetup/systemd cycle (ARCH-12).  Runs `chroot verify` automatically as its tail end.  What gets installed is a *surface closure* (SURFACES-01): bare `chroot build` is shorthand for `chroot build live` — the closure of `[Live] Groups` in `build.conf` (default `base, gnome-desktop`) plus `live.list`, with Recommends; `chroot build disk` builds the separate minimal disk-image chroot at `buildroot/disk` (closure of `[Disk] Groups`, default `base` — console + ssh, no GUI); `chroot build installer` builds the d-i installer-chroot (udeb closure rooted at `rootskel`+busybox init, no debs, no systemd; COMP-01a–g done).
-7. `chroot verify` — the 8-check verifier from step 6, also invokable on its own (e.g. after a manual edit of the chroot tree).  Fails loud; gates `iso build live`.
-8. `iso build live` — wraps the live chroot into a squashfs, runs `grub-mkrescue` to produce a hybrid BIOS/EFI bootable ISO under `image/`.  `iso build installer` is the parallel installer-ISO path — masters the installer chroot + bundles a manifest-driven `/cdrom/pool` (only what tasksel/d-i can actually install ships on the ISO; the rest stays mirror-only) and generates the tasksel software-selection menu from the signed package-selection lockfile at mastering time (edit a `pkg.list` group, re-run `cache parse` + `iso build installer`, and the menu follows — no fork rebuild).  Verified end-to-end through `finish-install.d/20final-message` on VMware BIOS + EFI (real-hardware coverage open under COMP-01h).
-
-Plus, off to one side:
-
-- `iso build disk [size_gb]` (COMP-09, decoupled by SURFACES-01) — pre-installed bootable qcow2 disk image from its **own** minimal chroot at `buildroot/disk` (run `chroot build disk` first; the gate is `chroot_disk_ready`, independent of the live chroot).  Output: `image/<distribution>-<version>-<arch>.qcow2`.  Boots directly into the running OS — no installer step.  Extra host prereqs: `rsync`, `dosfstools` (`mkfs.fat`), `qemu-utils` (`qemu-img`).  Defaults to 5 GB sparse; override per-invocation or via `[Build] DiskImageSizeGB`.
-- `source tunnel` — for packages you've explicitly *chosen not* to build from source.  Pulls the prebuilt `.deb` straight from the base Debian repo and drops it into `repo/` alongside the from-source builds.  Reads the `Tunneled` list in `config/build.conf` (or accepts package names as args).  Not part of `autorun` — opt-in, run after `cache parse` and before `chroot build`.  (Was `repo tunnel` before it moved under `source`.)
-
-Each stage sets a `BuildFlags` bit on success; later stages refuse to run unless their prerequisites are set.  `autorun` walks stages 1–6 in order (which gets you a verified chroot) and bails on the first failure; you then run `iso build live` once you're happy.
-
-
-### First run
-
-Clone the repo, then:
-
-```
+```bash
+git clone https://github.com/summertanks/Athena-Build.git
 cd Athena-Build
 ./build-system.sh
 ```
 
-The wrapper will tell you about any missing Python deps. Install them and re-run. The TUI launches.
+#### 2. The startup check — confirm the ground you're standing on
 
-From there:
+Before the UI opens, `build-system.sh` verifies your host has every tool it needs,
+prints the configuration it resolved, and confirms it can reach Debian's mirrors.
+This is your chance to catch a missing dependency or a misconfigured identity
+*before* a long build. The full first-launch output:
 
-- `print config` shows what `config/build.conf` resolved to — which mirrors are active, whether snapshot pinning is on, what `[Build]` codename will be baked into `/etc/os-release`. Run this first to confirm you're building what you think you're building.  (`print help` lists the other views.)
-- `autorun` runs stages 1–7 (cache → parse → sync → container → source build (pkg) → source build live → chroot+verify). Both the `pkg` and `live` source-build arms run before `chroot build live`. Expect ~30–60 minutes on a warm cache, longer on a first run because of the source download and the container build.  Variants: `autorun live` (the default), `autorun installer` (drives the installer chroot path), `autorun disk` (drives the qcow2 disk-image path).
-- When `autorun` finishes cleanly, run `iso build live` to produce the final image. (If you want to drop extra files into `buildroot/` first — custom motd, extra config — this is the moment.)
-- If a stage fails, fix the cause and re-run that stage by name (`source build`, `chroot build`, etc.). `autorun` is a convenience, not a state machine — there is no resume.
-- TUI keys: arrows to scroll the active tab, `Tab` to cycle between tabs (console / log), `q`/`Q` to quit. Resize is handled automatically.
-- `print extras` shows the depth-1 *Recommends* of your selected packages that have been pulled into `repo/` but kept *out* of the chroot install — there to support `apt install <thing>` from a booted Athena system later, not to bloat the live ISO.  Toggle off with `[Build] IncludeRecommendsInRepo = false` if you want a strictly minimal repo.  See §Working with the package set below.
-- `key generate` (one-time) creates the project's GPG keypair under `<dir_gnupg>/signing/`; `key verify` sign+verifies a test payload to confirm it's usable; `print signing` shows the key's fingerprint + uid + state.  Every signed surface (apt `Release`/`InRelease` produced by the automatic repo indexer, the per-mirror `coord-head.json` produced by `mirror publish`, and the local `config/published.manifest`) is signed with this key.  See `[Repo] SigningKeyUid` in `config/build.conf` for the identity string.  **`chroot build` gates on the signing key up front**: it runs a sign+verify roundtrip before any sudo/mount/dpkg work.  If no key exists, you get a `Generate a new signing key now? [y/n]` prompt — say yes to generate-and-continue (~30-60s) or no to abort.  Once verified, `chroot build` copies the public key into the chroot at `/usr/share/keyrings/athena-archive-keyring.gpg` (the conventional distro-signing-key location, referenced by every `/etc/apt/sources.list.d/athena-<name>.list` entry written per configured mirror).  `chroot verify` reports keyring presence on every run.
+```
+Athena Build System Check...
+Sudo access: OK (you are in the sudo group — password will be required)
+Using GNU bash, version 5.2.37(1)-release
+Using Python 3.13.5
+Using Docker version 29.5.3
+Using gpg (GnuPG) 2.4.7
+Using keyring /usr/share/keyrings/debian-archive-keyring.gpg (from debian-archive-keyring)
+User you is in the docker group
+Using GNU Wget 1.25.0
+Using awk: mawk — mawk 1.3.4
+Checking ISO build tools...         All ISO build tools found.
+Checking disk image build tools...  All disk image build tools found.
+Using grype — cve command enabled
+Current Build System "Debian GNU/Linux 13 (trixie)"
 
-The final ISO appears under `image/` named `athena-<version>-amd64.iso`. A sidecar `<iso>.user` file next to it carries the per-build random username for the live boot (see SEC-04).
+ [Build]
+   ARCH                 : amd64
+   DISTRIBUTION         : Asgard
+   CODENAME             : thor
+   VERSION              : 1
+   CHANNEL              : stable
+   IncludeRecommends    : true
+ [Base]
+   BASEURL              : http://deb.debian.org
+   BASEID               : debian
+   RELEASE              : bookworm
+   BASEVERSION          : 12.0
+ [Source]
+   BuildOptions         : nodoc, nocheck, noautodbgsym
+   BuildProfiles        : nodoc, nocheck, noinsttest
+   Tunneled             : intel-microcode, amd64-microcode, firmware-nonfree, …
+   HeavyPackages        : firefox-esr, gcc-12, libreoffice, llvm-toolchain-15, linux, webkit2gtk
+Checking required Python packages...
+   psutil         ... ok
+   apt_pkg        ... ok
+   docker         ... ok
+All required Python packages found.
+
+╭─╮╶┬╴╷ ╷╭─╴╭╮╷╭─╮   ╭╮ ╷ ╷╷╷  ╶┬╮   ╭─╮╷ ╷╭─╮╶┬╴╭─╴╭┬╮
+├─┤ │ ├─┤├╴ │╰┤├─┤   ├┴╮│ │││   ││   ╰─╮╰┬╯╰─╮ │ ├╴ │││
+╵ ╵ ╵ ╵ ╵╰─╴╵ ╵╵ ╵   ╰─╯╰─╯╵╰─╴╶┴╯   ╰─╯ ╵ ╰─╯ ╵ ╰─╴╵ ╵
+https://github.com/summertanks/Athena-Build
+
+config: valid
+identity:
+  distribution    Asgard (asgard)
+  codename        thor
+  version         1
+  arch            amd64
+  target release  bookworm 12.0
+  snapshot        2026-06-24 22:33:06 UTC
+mirror reachability (12 configured):
+  [OK  ] debian/20260624T223306Z bookworm
+  [OK  ] debian/20260624T223306Z bookworm-updates
+  [OK  ] debian-security/20260624T223306Z bookworm-security
+all mirrors reachable.
+Configured: role=first, mode=distribution
+```
+
+`Asgard thor, version 1, from Debian bookworm` — that's what we're about to build.
+The UI now opens; type the following commands in turn. (Keys: arrows scroll, `Tab`
+switches the console/log tabs, `q` quits.)
+
+#### 3. `cache build` — download and verify Debian's catalogue
+
+Fetches the index of every package and source available in your pinned Debian
+snapshot, and cryptographically verifies each one really came from Debian:
+
+```
+athena-build> cache build
+[INFO] fork_mirror: discovered 15 source tree(s) in fork/source/
+[INFO] fork_mirror: indices ready — 12 deb / 7 udeb / 15 source stanza(s)
+[INFO] InRelease verified for [main]: signed by Debian Stable Release Key (12/bookworm)
+[INFO] InRelease verified for [security]: signed by Debian Security Archive Automatic Signing Key (12/bookworm)
+…
+[INFO] cache build complete: pkgs=99449, srcs=34688, udebs=641, required=33, important=32
+```
+
+#### 4. `cache parse` — work out exactly what your distro contains
+
+Starts from your package groups and follows every dependency to the full set, then
+maps that to the source packages it must build. The closing summary is the shape
+of your distribution:
+
+```
+athena-build> cache parse
+…
+Udeb closure: 157 udeb(s) (seeds: 3 required + 3 important + 86 from installer.list)
+Pool extras (shipped in pool, not installed) : 297
+RECOMMENDS: folded into hard closure (transitive, installed)
+[INFO] parse_sources: resolving sources for 1957 selected pkg(s)
+[INFO] parse_sources: selected 962 source packages
+SUBSETS: 4 live-exclusive src, 0 installer-exclusive src
+Selected 962 source packages
+```
+
+#### 5. `container local init` — build the workshop
+
+Every package is compiled inside a clean Debian container, so your host stays
+untouched. This builds that container image once:
+
+```
+athena-build> container local init
+[INFO] Docker endpoint=localhost engine=29.5.3 os=linux arch=amd64
+Step 1/21 : ARG RELEASE=bookworm
+Step 6/21 : FROM debian:bookworm-slim
+…
+Step 18/21 : RUN useradd -G sudo -ms /bin/bash athena
+Step 21/21 : LABEL athena.dockerfile.sha256=b571012d95c2…
+Successfully built 153400d4e4bd
+Successfully tagged athenalinux:build-bookworm-20260624T223306Z
+```
+
+#### 6. `source sync` — fetch the source code
+
+Downloads the upstream source (`.dsc` + tarballs) for every selected package. On a
+first run this pulls a few gigabytes; on a warm cache it confirms everything is
+already present and returns in seconds:
+
+```
+athena-build> source sync
+[INFO] source sync: 962/962 sources present (0 fetched, 0 failed)
+```
+
+#### 7. `source audit` — see what still needs building
+
+A read-only check that compares your selected sources against what's already been
+built, so you know what step 8 will actually do (nothing is built here):
+
+```
+athena-build> source audit
+[INFO] source audit: 962 selected — 0 to build, 962 up to date, 6 tunnelled
+```
+
+#### 8. `source build all` — compile everything from source
+
+The long pole. Each source is built in the container; tunnelled packages and
+anything already built are skipped, the rest are compiled in parallel:
+
+```
+athena-build> source build all
+[WARN] Package amd64-microcode already tunneled [SKIPPED]
+[INFO] Package acl already built [SKIPPED]
+[INFO] build debconf v1.5.82 (profiles=nocheck nodoc noinsttest, options=noautodbgsym nocheck nodoc)
+[INFO] Building Package debconf [PASS]
+[INFO] Build container 2a209702c7ad started for asgard-gnome-desktop
+…
+```
+
+#### 9. `repo audit` — sanity-check the packages you just produced
+
+Verifies the built repository is internally consistent — every dependency
+resolvable, no leftover Debian build-version suffixes, nothing superseded sitting
+around:
+
+```
+athena-build> repo audit
+repo audit  arch=amd64
+  dep gate (selected closure)           unresolved: 0
+  stale files                           none
+  content integrity                     ok
+  nmu residue (4199 pkgs)               clean — no +bN / +debNuN / ~bpoN+N residue
+  audit ok
+```
+
+#### 10. `chroot build installer` — assemble the installer environment
+
+Builds the small, self-contained system the installer runs from — a minimal
+busybox + `rootskel` base plus the installer (`udeb`) components, with no
+systemd:
+
+```
+athena-build> chroot build installer
+[INFO] installer chroot: rootskel + busybox base, 157 udeb(s) from the installer closure
+[INFO] building installer initrd (cpio + gzip) → /boot
+[INFO] chroot verify: installer environment OK
+```
+
+#### 11. `iso build installer` — master the bootable ISO
+
+Wraps the installer environment and a curated package pool into a hybrid BIOS/EFI
+ISO, and generates the software-selection menu from your package list:
+
+```
+athena-build> iso build installer
+[INFO] build_installer_iso: → athena-installer-1-20260602T173733Z-amd64.iso (suite=thor, version=1)
+[INFO] tasksel menu generated from the package-selection lockfile
+[INFO] grub-mkrescue (in build container) → ISO
+[DEBUG] Writing 'athena-installer-1-20260602T173733Z-amd64.iso' completed successfully.
+```
+
+Your installable image is now in `image/`:
+
+```
+image/athena-installer-1-20260602T173733Z-amd64.iso
+```
+
+Boot it in a VM or write it to a USB stick and you can install Asgard thor on real
+hardware.
+
+#### 12. `mirror publish` — put your repo where others can reach it
+
+Pushes your signed packages to a mirror so installed systems (and other builders)
+can pull updates. Publishing is append-only and cryptographically signed:
+
+```
+athena-build> mirror publish
+[INFO] coord.publish: acquiring remote flock on …/asgard
+[INFO] coord.publish: verifying coord-head signature + loading peer keyring
+[INFO] coord.publish: loaded 2 peer pubkey(s), 4891 prior claim(s) across 2 builder(s)
+[INFO] coord.publish: generating pending claims from build records
+[INFO] coord.publish: pending claims: N to publish
+[INFO] coord.publish: pushing dist tree dists/thor/
+```
+
+#### 13. `mirror audit` — confirm the mirror is sound
+
+Re-reads the published mirror and checks every guarantee end to end — signatures,
+ownership claims, and that the on-disk pool matches its index:
+
+```
+athena-build> mirror audit
+[…] ssh://…/asgard
+  ownership   we_own=N  peers_own=M  tunneled=6
+  audit ok
+    claims        … across … builder(s)
+    federation    neighbours match local config
+    pool/sidecar  on-disk pool matches sidecar
+    apt index     InRelease + Packages chain verified
+    sidecar seq   integrity ok
+```
+
+#### You have a distribution
+
+You've built **Asgard thor 1** from source, mastered an installer ISO, and
+published a signed repository others can install and update from — every byte
+traceable to upstream Debian source. From here, customizing it is just editing the
+files in [Configuring](#configuring): change the name, add packages, pick a
+different desktop.
+
+> **If a step fails**, fix the cause and re-run that one command — there's no
+> hidden state to unwind. The on-disk log under `log/` always has more detail than
+> the screen. (`autorun` chains these same steps for you once you're comfortable
+> with what each one does.)
 
 ### Build modes — distribution vs build (MIRROR-02)
 
