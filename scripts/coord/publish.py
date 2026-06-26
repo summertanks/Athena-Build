@@ -503,6 +503,10 @@ def filter_pending_by_ownership(
     sort correctly (same convention as `dep_drift` and elsewhere).
     """
     import apt_pkg
+    # MAT-11(1): version_compare needs the apt config system initialised, else
+    # it falls back to a LEXICAL compare (`6.10` < `6.9`).  init_system is
+    # idempotent + cheap.
+    apt_pkg.init_system()
     _kept: List[dict] = []
     _blocked: List[dict] = []
     for _c in candidates:
