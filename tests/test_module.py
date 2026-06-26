@@ -20585,6 +20585,62 @@ def test_fed03_remote_pubkey_state_local_and_ssh():
         _tr.subprocess = _orig
 
 
+def test_fed03d_builder_bindings_and_enforcement():
+    """FED-03 D: build_builder_bindings + strict enforce_bindings —
+    a swapped/injected pubkey or one absent from the signed map is rejected;
+    verified_keyring_from_head treats a head with no `builders` as
+    not-migrated (rejects all)."""
+    import hashlib as _hl
+    import coord.identity as _id
+    with tempfile.TemporaryDirectory() as _d:
+        _alice = os.path.join(_d, 'alice.pub')
+        _bob = os.path.join(_d, 'bob.pub')
+        with open(_alice, 'wb') as _f:
+            _f.write(b'ALICEKEY\n')
+        with open(_bob, 'wb') as _f:
+            _f.write(b'BOBKEY\n')
+        _keyring = {'alice': _alice, 'bob': _bob}
+        _bindings = _id.build_builder_bindings(_keyring)
+        assert _bindings['alice'] == _hl.sha256(b'ALICEKEY\n').hexdigest()
+        # both match the signed map → both kept
+        _v, _dropped = _id.enforce_bindings(_keyring, _bindings)
+        assert set(_v) == {'alice', 'bob'} and not _dropped
+        # an INJECTED alice key (sha no longer matches the binding) → dropped
+        with open(_alice, 'wb') as _f:
+            _f.write(b'INJECTED\n')
+        _v, _dropped = _id.enforce_bindings(_keyring, _bindings)
+        assert set(_v) == {'bob'} and 'alice' in _dropped
+        # a builder absent from the signed map → dropped
+        _v, _dropped = _id.enforce_bindings({'carol': _bob}, _bindings)
+        assert not _v and 'carol' in _dropped
+        # head with no `builders` → not migrated, ALL dropped
+        _vk, _dr, _has = _id.verified_keyring_from_head(
+            {'bob': _bob}, {'inrelease_sha256': 'x'})
+        assert not _vk and _has is False and 'bob' in _dr
+        # head WITH bindings → enforced
+        _vk, _dr, _has = _id.verified_keyring_from_head(
+            {'bob': _bob}, {'builders': _bindings})
+        assert set(_vk) == {'bob'} and _has is True
+        # summaries
+        assert 'republish to migrate' in _id.binding_drop_summary(
+            {'a': 'r'}, False)
+        assert 'not matching' in _id.binding_drop_summary({'a': 'r'}, True)
+        assert _id.binding_drop_summary({}, True) == ''
+
+
+def test_fed03d_new_coord_head_carries_builders():
+    """FED-03 D: new_coord_head embeds the builder binding map (additive +
+    back-compat — absent when none given)."""
+    from coord.schema import new_coord_head
+    _h = new_coord_head(
+        inrelease_sha256='a', snapshot={}, last_seqs={}, head_time='t',
+        builders={'bs1': 'd' * 64})
+    assert _h['builders'] == {'bs1': 'd' * 64}
+    _h2 = new_coord_head(
+        inrelease_sha256='a', snapshot={}, last_seqs={}, head_time='t')
+    assert 'builders' not in _h2
+
+
 def test_fed04_unlock_decision_policy():
     """FED-04: `mirror unlock` decision policy — probe-fail, free lock,
     stale→break, live→refuse, and --force breaks a live lock too."""
@@ -40413,6 +40469,8 @@ def main() -> int:
         test_fed04_unlock_decision_policy,
         test_fed03_register_tofu_decision_policy,
         test_fed03_remote_pubkey_state_local_and_ssh,
+        test_fed03d_builder_bindings_and_enforcement,
+        test_fed03d_new_coord_head_carries_builders,
         test_transport_list_remote_debs_parses_and_guards,
         test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,

@@ -517,6 +517,7 @@ def new_coord_head(
     revoked_builders: 'Optional[Dict[str, str]]' = None,
     config_sha256: 'Optional[str]' = None,
     closure_ledger_sha256: 'Optional[str]' = None,
+    builders: 'Optional[Dict[str, str]]' = None,
 ) -> dict:
     """The signed canonical state snapshot.  GPG-clearsigned by the
     tier-1 (InRelease) signing key, stored at <mirror-root>/coord-head.json.
@@ -564,6 +565,13 @@ def new_coord_head(
     # live-claim set).  Additive field, no COORD_HEAD_SCHEMA_VERSION bump.
     if closure_ledger_sha256:
         _head['closure_ledger_sha256'] = str(closure_ledger_sha256)
+    # FED-03 D: tier-1-signed builder bindings — {builder_id: sha256(pubkey)}.
+    # A claim's keyring pubkey must match this signed map (identity.
+    # enforce_bindings), so a pubkey injected by anyone with SSH write but no
+    # tier-1 key is rejected.  Additive + back-compat (absent on pre-D heads;
+    # peers treat a head with no `builders` as not-yet-migrated).
+    if builders:
+        _head['builders'] = dict(builders)
     return _head
 
 
