@@ -55,6 +55,32 @@ def _unlock_decision(
         "Re-run with --force only if you are certain the holder is dead.")
 
 
+def _register_tofu_decision(
+    pk_state: str, remote_sha: str, local_sha: str, force: bool,
+) -> 'tuple[str, str]':
+    """Pure FED-03 step-B (client-side TOFU) policy for `mirror builders
+    register`.  Given the probed state of the existing remote pubkey, our local
+    pubkey's sha, and --force, decide the action.  Returns ``(action, detail)``
+    where action is ``upload`` | ``skip`` | ``refuse``.  Kept pure so the
+    identity-takeover guard is unit-testable without SSH."""
+    if pk_state == 'present':
+        if remote_sha and remote_sha == local_sha:
+            return ('skip', 'already registered, key unchanged')
+        if force:
+            return ('upload',
+                    'forced rotation over the existing different key')
+        return ('refuse',
+                'a DIFFERENT key is already registered for this builder-id — '
+                'registering would be an identity takeover')
+    if pk_state == 'absent':
+        return ('upload', 'no existing key — registering')
+    # pk_state == 'error': could not read the existing key
+    if force:
+        return ('upload', 'forced despite an unverifiable existing key')
+    return ('refuse',
+            'could not read the existing key — refusing to blind-overwrite')
+
+
 class MirrorCommandsMixin(SessionState):
     # ─────────────────────────────────────────────────────────────────────
     # Mirror umbrella — remote-endpoint federation
@@ -3183,8 +3209,11 @@ class MirrorCommandsMixin(SessionState):
         """
         _table = {
             'list':     'local builder + the registered keyring',
-            'register': 'register this builder on a mirror (upload pubkey + '
-                        'adopt canonical lists; needs signing key + SSH write)',
+            'register [--force]': 'register this builder on a mirror (upload '
+                        'pubkey + adopt canonical lists; needs signing key + '
+                        'SSH write).  REFUSES if a different key is already '
+                        'registered for this id (identity-takeover guard); '
+                        '--force overrides for a deliberate key rotation',
             'decommission': 'retire a builder <id>: revoke it so its claims '
                             'drop and its packages become no-owner (peers '
                             'take them)',
@@ -3231,17 +3260,27 @@ class MirrorCommandsMixin(SessionState):
         return True
 
     def cmd_mirror_builders_register(self, *args):
-        """mirror builders register <mirror> — register THIS builder on a
-        mirror: upload our Ed25519 pubkey to keyring/builders/ so peers can
+        """mirror builders register <mirror> [--force] — register THIS builder
+        on a mirror: upload our Ed25519 pubkey to keyring/builders/ so peers can
         verify our claims.  Gated on a verified tier-1 signing key AND SSH
-        write access (the upload proves it)."""
+        write access (the upload proves it).
+
+        FED-03 step B (client-side TOFU): before uploading, the existing remote
+        key is probed.  Absent → register; identical → idempotent no-op; a
+        DIFFERENT key (or an unreadable one) → REFUSE — overwriting it would be
+        an identity takeover ('<id>'s claims fail verification, the new key
+        publishes AS '<id>').  `--force` overrides (a deliberate key rotation)."""
+        import hashlib
         import mirror as _mirror
         import coord.transport as _transport
         import signing
-        if not args:
-            console.print("Usage: mirror builders register <mirror-name>")
+        _force = any(_a in ('--force', 'force') for _a in args)
+        _positional = [_a for _a in args if _a not in ('--force', 'force')]
+        if not _positional:
+            console.print(
+                "Usage: mirror builders register <mirror-name> [--force]")
             return False
-        _name = args[0]
+        _name = _positional[0]
         # Gate: builder identity present (mirror init)
         _keys = self._coord_self_keys()
         if _keys is None:
@@ -3267,19 +3306,55 @@ class MirrorCommandsMixin(SessionState):
         _ssh_key = _st.get('ssh_key') or None
         _remote_pub = (_coord_spec.rstrip('/')
                        + f'/keyring/builders/{_bid}.pub')
-        console.print(
-            f"mirror builders register: uploading {_bid}.pub -> {_name} "
-            "keyring/builders/", tui.COLOR_HIGHLIGHT)
-        _ok, _detail = _transport.push_jsonl(
-            local_path=_pub, remote_spec=_remote_pub, ssh_key=_ssh_key)
-        if not _ok:
+        # FED-03 step B — TOFU: probe the existing remote key and decide.
+        try:
+            with open(_pub, 'rb') as _pf:
+                _local_sha = hashlib.sha256(_pf.read()).hexdigest()
+        except OSError as _e:
             console.print(
-                f"mirror builders register: pubkey upload FAILED ({_detail}) "
-                f"— check SSH write access to {_name}.", tui.COLOR_ERROR)
+                f"mirror builders register: cannot read local pubkey {_pub} "
+                f"({_e}).", tui.COLOR_ERROR)
             return False
-        console.print(
-            f"registered builder '{_bid}' on mirror '{_name}'.",
-            tui.COLOR_HIGHLIGHT)
+        _pk_state, _pk_detail = _transport.remote_pubkey_state(
+            spec=_remote_pub, ssh_key=_ssh_key)
+        _action, _why = _register_tofu_decision(
+            _pk_state, _pk_detail, _local_sha, _force)
+        if _action == 'refuse':
+            _extra = ''
+            if _pk_state == 'present':
+                _extra = (f" (remote {_pk_detail[:12]}… vs local "
+                          f"{_local_sha[:12]}…)")
+            elif _pk_state == 'error':
+                _extra = f" ({_pk_detail})"
+            console.print(
+                f"mirror builders register: REFUSED — {_why}{_extra}.\n"
+                f"  If you are deliberately rotating THIS host's key for "
+                f"'{_bid}', re-run with --force.", tui.COLOR_ERROR)
+            return False
+        if _action == 'skip':
+            console.print(
+                f"mirror builders register: builder '{_bid}' already "
+                f"registered on '{_name}', key unchanged — nothing to upload.",
+                tui.COLOR_INFO)
+        else:   # 'upload' (absent / forced)
+            if _force and _pk_state == 'present':
+                console.print(
+                    f"  --force: OVERWRITING the existing different key for "
+                    f"'{_bid}' on '{_name}'.", tui.COLOR_WARNING)
+            console.print(
+                f"mirror builders register: uploading {_bid}.pub -> {_name} "
+                "keyring/builders/", tui.COLOR_HIGHLIGHT)
+            _ok, _detail = _transport.push_jsonl(
+                local_path=_pub, remote_spec=_remote_pub, ssh_key=_ssh_key)
+            if not _ok:
+                console.print(
+                    f"mirror builders register: pubkey upload FAILED "
+                    f"({_detail}) — check SSH write access to {_name}.",
+                    tui.COLOR_ERROR)
+                return False
+            console.print(
+                f"registered builder '{_bid}' on mirror '{_name}'.",
+                tui.COLOR_HIGHLIGHT)
         # Adopt the owner's canonical pkg.list/pool.list (overwrite local on
         # register) so this builder matches the federation's selection.
         import coord.head as _head_mod
