@@ -2213,6 +2213,27 @@ def copy_ssh_key(src: str, dst: str) -> bool:
         return False
 
 
+def remote_token_path(config: 'BuildConfig', name: str) -> str:
+    """Path to a remote's build-agent API token — config/<name>.remote-token,
+    a 0600 sidecar beside its config/<name>.key (REMOTE-API).  Derived from the
+    remote name so the orchestrator can find it without a registry lookup."""
+    return os.path.join(config.dir_config, f"{name}.remote-token")
+
+
+def generate_remote_token(config: 'BuildConfig', name: str) -> 'tuple[str, str]':
+    """Create a fresh random API token for a remote build agent, written 0600
+    to config/<name>.remote-token.  Returns (path, token).  The orchestrator
+    ships the token to the remote (the agent gates every request on it) and
+    sends it back as the X-Athena-Token header over the SSH tunnel."""
+    import secrets
+    _token = secrets.token_hex(32)
+    _path = remote_token_path(config, name)
+    with open(_path, 'w') as _fh:
+        _fh.write(_token)
+    os.chmod(_path, 0o600)
+    return _path, _token
+
+
 def remote_conf_path(config: 'BuildConfig') -> str:
     """Path to config/remote.conf — the UNTRACKED machine-local registry of
     remote build hosts (created by `container remote add`)."""

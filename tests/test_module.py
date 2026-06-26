@@ -564,6 +564,26 @@ def test_remote_conf_helpers_round_trip():
         assert utils.list_remotes(cfg) == []
 
 
+def test_remote_token_generate_and_path():
+    """REMOTE-API: generate_remote_token writes a 64-hex token 0600 to
+    config/<name>.remote-token; remote_token_path derives that path; a second
+    call rotates it."""
+    import utils
+    import stat
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        _path, _tok = utils.generate_remote_token(cfg, 'bs7')
+        assert _path == utils.remote_token_path(cfg, 'bs7')
+        assert _path.endswith('bs7.remote-token')
+        assert len(_tok) == 64 and all(_c in '0123456789abcdef' for _c in _tok)
+        assert open(_path).read().strip() == _tok
+        assert stat.S_IMODE(os.stat(_path).st_mode) == 0o600
+        _, _tok2 = utils.generate_remote_token(cfg, 'bs7')
+        assert _tok2 != _tok
+
+
 class _FakeOnbSession:
     """Minimal session for onboarding tests: a config with a tmp config_path
     (so write_local_conf lands in the tmp dir) + the federation methods the
@@ -20435,6 +20455,97 @@ def test_transport_remote_sha256_parses_digest_and_guards():
         _tr.subprocess = _orig
 
 
+def test_fed04_flock_scripts_shape():
+    """FED-04: the held-shell records builder-id + PID sidecars and a
+    heartbeat; the status probe checks held-ness + heartbeat age; the break
+    script kills the holder + clears sidecars."""
+    import coord.transport as _tr
+    _lock = '/var/lock/repo-coord.lock'
+    _hold = _tr._flock_hold_script(_lock, 'BS1', heartbeat_sec=15)
+    assert f'echo BS1 > {_lock}.holder' in _hold
+    assert f'echo $$ > {_lock}.pid' in _hold
+    assert 'sleep 15' in _hold and f'touch {_lock}.holder' in _hold
+    assert 'COORD_LOCK_ACQUIRED' in _hold and 'cat;' in _hold
+    assert f'rm -f {_lock}.holder {_lock}.pid' in _hold
+
+    _status = _tr._flock_status_script(_lock)
+    assert f'flock -n {_lock} -c true' in _status
+    assert 'HELD=' in _status and 'AGE=' in _status
+
+    _break = _tr._flock_break_script(_lock)
+    assert 'kill -9' in _break and 'fuser -k' in _break
+    assert f'rm -f {_lock}.holder {_lock}.pid' in _break
+    assert 'COORD_LOCK_BROKEN' in _break
+
+
+def test_fed04_parse_flock_status_and_staleness():
+    """FED-04: status parsing + the stale decision — held + old heartbeat is
+    stale; held + fresh heartbeat (slow-but-live publish) is NOT; unheld or
+    unparseable never is."""
+    import coord.transport as _tr
+    _held_old = _tr._parse_flock_status("HELD=1\nHOLDER=BS2\nPID=12345\nAGE=2460\n")
+    assert _held_old == {'held': True, 'holder': 'BS2',
+                         'pid': '12345', 'age_sec': 2460}
+    assert _tr.lock_is_stale(_held_old) is True
+    # fresh heartbeat → live, not stale
+    assert _tr.lock_is_stale(
+        _tr._parse_flock_status("HELD=1\nHOLDER=BS2\nPID=9\nAGE=20\n")) is False
+    # not held → never stale; empty sidecars parse to None
+    _free = _tr._parse_flock_status("HELD=0\nHOLDER=\nPID=\nAGE=999999\n")
+    assert _free['held'] is False and _free['holder'] is None
+    assert _tr.lock_is_stale(_free) is False
+    # missing/garbage AGE → not stale, no crash
+    assert _tr.lock_is_stale(
+        _tr._parse_flock_status("HELD=1\nHOLDER=BS2\n")) is False
+    assert _tr.lock_is_stale(None) is False
+
+
+def test_fed04_remote_flock_lock_status_and_break():
+    """FED-04: lock_status parses a held+stale probe; break succeeds on the
+    BROKEN token and surfaces the error otherwise."""
+    import types as _types
+    import coord.transport as _tr
+    _orig = _tr.subprocess
+    try:
+        _tr.subprocess = _types.SimpleNamespace(
+            run=lambda argv, **k: _types.SimpleNamespace(
+                returncode=0, stdout="HELD=1\nHOLDER=BS2\nPID=42\nAGE=3000\n",
+                stderr=''),
+            SubprocessError=Exception)
+        _st = _tr.remote_flock_lock_status(
+            ssh_host='u@h', lock_path='/var/lock/repo-coord.lock', ssh_key='k')
+        assert _st['held'] and _st['holder'] == 'BS2' and _st['pid'] == '42'
+        assert _tr.lock_is_stale(_st)
+        # break success
+        _tr.subprocess.run = lambda argv, **k: _types.SimpleNamespace(
+            returncode=0, stdout='COORD_LOCK_BROKEN\n', stderr='')
+        _ok, _detail = _tr.remote_flock_break(
+            ssh_host='u@h', lock_path='/var/lock/repo-coord.lock')
+        assert _ok, _detail
+        # break failure → surfaces stderr
+        _tr.subprocess.run = lambda argv, **k: _types.SimpleNamespace(
+            returncode=1, stdout='', stderr='ssh: connect failed')
+        _ok2, _detail2 = _tr.remote_flock_break(ssh_host='u@h', lock_path='/x')
+        assert not _ok2 and 'connect failed' in _detail2
+    finally:
+        _tr.subprocess = _orig
+
+
+def test_fed04_unlock_decision_policy():
+    """FED-04: `mirror unlock` decision policy — probe-fail, free lock,
+    stale→break, live→refuse, and --force breaks a live lock too."""
+    from commands.cmd_mirror import _unlock_decision
+    assert _unlock_decision(None, False, False)[0] == 'probe-failed'
+    assert _unlock_decision({'held': False}, False, False)[0] == 'free'
+    _held = {'held': True, 'holder': 'BS2', 'age_sec': 3000}
+    # held + stale, no force → break
+    assert _unlock_decision(_held, False, True)[0] == 'break'
+    # held + live (fresh heartbeat), no force → refuse
+    assert _unlock_decision(_held, False, False)[0] == 'refuse-live'
+    # --force breaks regardless of staleness
+    assert _unlock_decision(_held, True, False)[0] == 'break'
+
+
 def test_transport_list_remote_debs_parses_and_guards():
     """list_remote_debs runs `find dists … *.deb/*.udeb` on the pool host and
     returns the relative paths as a set; None on bad spec / non-zero rc."""
@@ -22608,6 +22719,265 @@ def test_remote_build_run_container_command_shape():
         assert os.path.isdir(os.path.join(_b, 'out'))
 
 
+def _remote_agent_spawn(bundle, build_cmd, *, hang=30, token='secret'):
+    """Start scripts/remote_agent.py as a detached subprocess against a
+    --build-cmd (no docker needed); return (proc, port)."""
+    import subprocess as _sub
+    import time
+    _tf = os.path.join(bundle, 'token')
+    with open(_tf, 'w') as _fh:
+        _fh.write(token)
+    _p = _sub.Popen(
+        [sys.executable, os.path.join(_ROOT, 'scripts', 'remote_agent.py'),
+         '--bundle', bundle, '--token-file', _tf, '--port', '0',
+         '--hang-secs', str(hang), '--build-cmd', build_cmd])
+    _portf = os.path.join(bundle, 'agent.port')
+    for _ in range(200):
+        if os.path.exists(_portf):
+            _v = open(_portf).read().strip()
+            if _v:
+                return _p, int(_v)
+        time.sleep(0.05)
+    _p.kill()
+    raise AssertionError('remote_agent did not publish its port')
+
+
+def _remote_agent_req(port, path, method='GET', token='secret'):
+    """One token-authed request to the agent; returns (status, body, headers)."""
+    import urllib.request as _u
+    _req = _u.Request(f'http://127.0.0.1:{port}{path}', method=method)
+    if token is not None:
+        _req.add_header('X-Athena-Token', token)
+    with _u.urlopen(_req, timeout=5) as _r:
+        return _r.status, _r.read(), dict(_r.headers)
+
+
+def _remote_agent_wait_terminal(port, tries=200):
+    import json as _j
+    import time
+    _st = {}
+    for _ in range(tries):
+        _st = _j.loads(_remote_agent_req(port, '/status')[1])
+        if _st['phase'] in ('done', 'failed', 'timeout', 'aborted'):
+            return _st
+        time.sleep(0.1)
+    return _st
+
+
+def test_remote_agent_helpers_name_and_log_offsets():
+    """REMOTE-API: container_name_for sanitises; read_log returns
+    (bytes-from-offset, next, size) for incremental / resumable polling."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_agent as _ra
+    assert _ra.container_name_for('/tmp/athena-remote-adduser-0') == \
+        'athena-build-athena-remote-adduser-0'
+    assert _ra.container_name_for('/p/weird name!') == 'athena-build-weird-name-'
+    with tempfile.TemporaryDirectory() as _d:
+        _f = os.path.join(_d, 'build.log')
+        with open(_f, 'wb') as _fh:
+            _fh.write(b'hello\nworld\n')
+        _data, _next, _size = _ra.read_log(_f, 0)
+        assert _data == b'hello\nworld\n' and _next == 12 and _size == 12
+        # resume from an offset → only the tail
+        _data2, _next2, _size2 = _ra.read_log(_f, 6)
+        assert _data2 == b'world\n' and _next2 == 12
+        # at/after EOF → empty, offset unchanged
+        assert _ra.read_log(_f, 12) == (b'', 12, 12)
+        # missing file → benign empties
+        assert _ra.read_log(os.path.join(_d, 'nope'), 0) == (b'', 0, 0)
+
+
+def test_remote_agent_lifecycle_success_logs_and_auth():
+    """REMOTE-API: a successful build reaches phase=done with its outputs;
+    /logs serves from an offset; a missing/wrong token is rejected 401."""
+    import json as _j
+    import urllib.error as _ue
+    with tempfile.TemporaryDirectory() as _b:
+        _p, _port = _remote_agent_spawn(
+            _b, 'echo hello; : > out/pkg_1.0_amd64.deb; echo done')
+        try:
+            _st = _remote_agent_wait_terminal(_port)
+            assert _st['phase'] == 'done', _st
+            assert _st['outputs'] == ['pkg_1.0_amd64.deb'], _st
+            assert _st['exit_code'] == 0
+            # logs from offset 0, then resume from next → empty
+            _code, _body, _hdrs = _remote_agent_req(_port, '/logs?from=0')
+            assert b'hello' in _body and b'done' in _body
+            _nxt = int(_hdrs['X-Log-Next'])
+            assert _remote_agent_req(_port, f'/logs?from={_nxt}')[1] == b''
+            # wrong token → 401
+            try:
+                _remote_agent_req(_port, '/status', token='wrong')
+                raise AssertionError('expected 401 for a bad token')
+            except _ue.HTTPError as _e:
+                assert _e.code == 401
+            # no token → 401
+            try:
+                _remote_agent_req(_port, '/status', token=None)
+                raise AssertionError('expected 401 for a missing token')
+            except _ue.HTTPError as _e:
+                assert _e.code == 401
+        finally:
+            try:
+                _remote_agent_req(_port, '/shutdown', 'POST')
+            except Exception:
+                pass
+            try:
+                _p.wait(timeout=10)
+            except Exception:
+                _p.kill()
+        assert _j is not None  # keep import used
+
+
+def test_remote_agent_watchdog_and_abort():
+    """REMOTE-API: a no-progress build is killed by the watchdog
+    (phase=timeout, watchdog=hang-killed); POST /abort stops a build
+    (phase=aborted)."""
+    # watchdog: a sleeping build emits no log growth → hang-killed after ~1s
+    with tempfile.TemporaryDirectory() as _b:
+        _p, _port = _remote_agent_spawn(_b, 'sleep 30', hang=1)
+        try:
+            _st = _remote_agent_wait_terminal(_port)
+            assert _st['phase'] == 'timeout', _st
+            assert _st['watchdog'] == 'hang-killed', _st
+        finally:
+            try:
+                _remote_agent_req(_port, '/shutdown', 'POST')
+            except Exception:
+                pass
+            try:
+                _p.wait(timeout=10)
+            except Exception:
+                _p.kill()
+    # abort: a long build, explicitly aborted → phase=aborted
+    with tempfile.TemporaryDirectory() as _b:
+        _p, _port = _remote_agent_spawn(_b, 'sleep 30', hang=300)
+        try:
+            _remote_agent_req(_port, '/abort', 'POST')
+            _st = _remote_agent_wait_terminal(_port)
+            assert _st['phase'] == 'aborted', _st
+        finally:
+            try:
+                _remote_agent_req(_port, '/shutdown', 'POST')
+            except Exception:
+                pass
+            try:
+                _p.wait(timeout=10)
+            except Exception:
+                _p.kill()
+
+
+def _run_remote_agent_fakes(out_dir, *, phase_seq):
+    """Build (subprocess-fake, agent-request-fake, calls-record) for driving
+    run_remote_agent without a real remote.  `phase_seq` is the sequence of
+    /status phases the agent reports."""
+    import types as _t
+    _calls = {'run': [], 'popen': [], 'status': 0, 'logs': 0}
+
+    class _FakeProc:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def _run(argv, **k):
+        _calls['run'].append(list(argv))
+        _joined = ' '.join(argv)
+        if 'agent.port' in _joined:
+            return _t.SimpleNamespace(returncode=0, stdout='54321\n', stderr='')
+        if 'out/*.deb' in _joined:
+            open(os.path.join(out_dir, 'adduser_1_amd64.deb'), 'w').close()
+        return _t.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    def _popen(argv, **k):
+        _calls['popen'].append(list(argv))
+        return _FakeProc()
+
+    _fake_sp = _t.SimpleNamespace(
+        run=_run, Popen=_popen, DEVNULL=-3, PIPE=-1, STDOUT=-2,
+        SubprocessError=Exception)
+
+    def _req(port, path, token, method='GET', timeout=10):
+        if path == '/status':
+            _i = min(_calls['status'], len(phase_seq) - 1)
+            _calls['status'] += 1
+            _phase = phase_seq[_i]
+            _outs = '["adduser_1_amd64.deb"]' if _phase == 'done' else '[]'
+            _code = '0' if _phase == 'done' else 'null'
+            return (200, (f'{{"phase":"{_phase}","outputs":{_outs},'
+                          f'"exit_code":{_code}}}').encode(), {})
+        if path.startswith('/logs'):
+            _calls['logs'] += 1
+            if _calls['logs'] == 1:
+                return (200, b'building adduser...\n', {'X-Log-Next': '20'})
+            return (200, b'', {'X-Log-Next': '20'})
+        return (200, b'{}', {})        # /abort /shutdown
+
+    return _fake_sp, _req, _calls
+
+
+def test_run_remote_agent_polls_to_done_ships_token_and_reaps():
+    """REMOTE-API: run_remote_agent ships the agent + token, starts it
+    detached, tunnels + polls to phase=done, recovers the .deb, and reaps the
+    named container in the finally."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+    with tempfile.TemporaryDirectory() as _bundle, \
+            tempfile.TemporaryDirectory() as _out:
+        open(os.path.join(_bundle, 'Dockerfile'), 'w').write('FROM x\n')
+        _agentpy = os.path.join(_bundle, '_agent_src.py')
+        open(_agentpy, 'w').write('# agent\n')
+        _fsp, _req, _calls = _run_remote_agent_fakes(
+            _out, phase_seq=['running', 'done'])
+        with mock.patch.object(_ro, 'subprocess', _fsp), \
+                mock.patch.object(_ro, '_agent_request', _req), \
+                mock.patch.object(_ro, 'AGENT_POLL_INTERVAL', 0):
+            _exit, _outputs = _ro.run_remote_agent(
+                'u@h', _bundle, '~/athena-remote-adduser-0', _out,
+                token='deadbeef', ssh_key='k.key',
+                remote_agent_py=_agentpy, hang_secs=1800)
+        assert (_exit, _outputs) == (0, ['adduser_1_amd64.deb']), (_exit, _outputs)
+        # token written 0600 into the bundle + agent staged
+        assert os.path.isfile(os.path.join(_bundle, 'agent.token'))
+        assert os.path.isfile(os.path.join(_bundle, 'remote_agent.py'))
+        _runs = [' '.join(_a) for _a in _calls['run']]
+        assert any('nohup python3 remote_agent.py' in _r and
+                   '--token-file agent.token' in _r for _r in _runs)
+        # tunnel forwards to the agent's reported remote port
+        assert any('-L' in _a and '127.0.0.1:54321' in ' '.join(_a)
+                   for _a in _calls['popen'])
+        # finally reaps the named container + wipes the scratch dir
+        assert any('docker rm -f athena-build-athena-remote-adduser-0' in _r and
+                   'rm -rf' in _r for _r in _runs)
+
+
+def test_run_remote_agent_watchdog_timeout_is_transport():
+    """REMOTE-API: a phase=timeout (remote watchdog killed a hung build) maps
+    to exit 12 so the fan-out scheduler re-queues it."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+    with tempfile.TemporaryDirectory() as _bundle, \
+            tempfile.TemporaryDirectory() as _out:
+        open(os.path.join(_bundle, 'Dockerfile'), 'w').write('FROM x\n')
+        _fsp, _req, _calls = _run_remote_agent_fakes(
+            _out, phase_seq=['running', 'timeout'])
+        with mock.patch.object(_ro, 'subprocess', _fsp), \
+                mock.patch.object(_ro, '_agent_request', _req), \
+                mock.patch.object(_ro, 'AGENT_POLL_INTERVAL', 0):
+            _exit, _outputs = _ro.run_remote_agent(
+                'u@h', _bundle, '~/athena-remote-x', _out, token='t')
+        assert _exit == 12 and _outputs == [], (_exit, _outputs)
+
+
 def test_remote_build_image_uses_args_and_skips_when_present():
     """build_image passes --build-arg for each param and SKIPS the build when
     the tag already exists (cached on the remote after run 1)."""
@@ -22677,8 +23047,7 @@ def test_remote_build_main_emits_result_marker():
 
 def test_remote_orchestrate_parse_host_stage_and_result():
     """parse_ssh_host normalises ssh:// URLs; stage_bundle lays out the bundle
-    (Dockerfile, source/, patch/, remote_build.py, build.json params);
-    _parse_result pulls the result marker."""
+    (Dockerfile, source/, patch/, remote_build.py, build.json params)."""
     import json
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import remote_orchestrate as _ro
@@ -22718,59 +23087,6 @@ def test_remote_orchestrate_parse_host_stage_and_result():
         assert _bj['image_tag'] == 'tag' and _bj['cmd_str'] == 'CMD'
         assert _bj['build_args']['RELEASE'] == 'bookworm'
         assert _bj['build_cpus'] == 7.0 and _bj['build_memory'] == '28g'
-    _line = (f"{_ro.RESULT_MARKER} "
-             + json.dumps({'exit_code': 0, 'outputs': ['a.deb']}))
-    assert _ro._parse_marker_line(_line) == (0, ['a.deb'])
-    assert _ro._parse_marker_line(None) == (1, [])
-    assert _ro._parse_marker_line('not a marker') == (1, [])
-
-
-def test_remote_orchestrate_run_remote_flow():
-    """run_remote scps the bundle up, ssh-runs remote_build.py, parses the
-    result, scps the .debs back, and ALWAYS cleans up the remote dir."""
-    from unittest import mock
-    import json
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import remote_orchestrate as _ro
-    with tempfile.TemporaryDirectory() as _t:
-        _bundle = os.path.join(_t, 'b')
-        os.makedirs(_bundle)
-        with open(os.path.join(_bundle, 'build.json'), 'w') as _f:
-            _f.write('{}')
-        _marker = (f"{_ro.RESULT_MARKER} "
-                   + json.dumps({'exit_code': 0,
-                                 'outputs': ['adduser_3.134_all.deb']}))
-        _out_dir = os.path.join(_t, 'out')
-        _calls = []
-
-        def _fake_run(cmd, **_kw):
-            _calls.append(cmd)
-            # Simulate the scp-DOWN delivering the artifact so the CONS-11
-            # recovery-reconcile (every marker output must land) is satisfied.
-            if any('out/*.deb' in str(_c) for _c in cmd):
-                os.makedirs(_out_dir, exist_ok=True)
-                open(os.path.join(_out_dir, 'adduser_3.134_all.deb'),
-                     'w').close()
-            return mock.Mock(returncode=0)
-
-        class _FakeProc:
-            stdout = iter([_marker + "\n"])
-
-            def wait(self):
-                return 0
-
-        with mock.patch.object(_ro.subprocess, 'run', side_effect=_fake_run), \
-                mock.patch.object(_ro.subprocess, 'Popen',
-                                  return_value=_FakeProc()):
-            _exit, _outputs = _ro.run_remote(
-                'user@h', _bundle, '/tmp/rd', _out_dir,
-                log=lambda *_a: None)
-        assert _exit == 0 and _outputs == ['adduser_3.134_all.deb']
-        _joined = [' '.join(c) for c in _calls]
-        assert any('mkdir -p /tmp/rd' in j for j in _joined)
-        assert any(j.startswith('scp ') for j in _joined)
-        assert any('out/*.deb' in j for j in _joined)
-        assert any('rm -rf /tmp/rd' in j for j in _joined)   # cleanup always
 
 
 def test_recipe_only_container_skips_local_docker():
@@ -22829,20 +23145,6 @@ def test_container_two_level_command_surface_wired():
     # the add/delete handlers go through the utils remote.conf helpers
     assert 'utils.add_remote(' in _b and 'utils.delete_remote(' in _b
     assert 'utils.list_remotes(' in _b
-
-
-def test_run_remote_decoupled_log_and_incremental_marker():
-    """run_remote writes the build log to a file ON THE REMOTE (so the build
-    can't be backpressured by a slow network) and tails it back; the result
-    marker is scanned incrementally, not by buffering the whole log."""
-    import inspect
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import remote_orchestrate as _ro
-    _src = inspect.getsource(_ro.run_remote)
-    assert '> build.log 2>&1' in _src              # build → remote file
-    assert 'tail -n +1 --pid=' in _src and '-F build.log' in _src
-    assert '_captured' not in _src                 # no whole-log buffering
-    assert '_parse_marker_line(_marker)' in _src   # incremental marker scan
 
 
 def test_ensure_remote_image_lan_transfer_paths():
@@ -22954,17 +23256,17 @@ def test_remotebuild_command_wired():
         _cs = _f.read()
     assert 'def cmd_source_remotebuild' in _cs
     # The per-package remote build body lives in _remotebuild_one_source (the
-    # fan-out worker).  Its build STREAM (run_remote) goes to the per-package
-    # log file, NOT the console tab (N concurrent workers would interleave) —
-    # the run_remote call must use the file writer, not console.print.
+    # fan-out worker).  Its build STREAM (run_remote_agent — the REMOTE-API
+    # transport) goes to the per-package log file, NOT the console tab (N
+    # concurrent workers would interleave) — the call must use the file writer.
     _rb = _cs[_cs.index('def _remotebuild_one_source'):]
     _rb = _rb[:_rb.index('\n    def ', 1)]
-    _after = _rb[_rb.index('run_remote('):]
-    assert 'log=_to_log' in _after[:300]
+    _after = _rb[_rb.index('run_remote_agent('):]
+    assert 'log=_to_log' in _after[:400]
     assert 'log=console.print' not in _after     # build stream not to console
     assert 'buildlog_path' in _rb and '_to_log' in _rb   # → log/build/<pkg>
-    # The per-remote SSH key threads through to run_remote (vs ambient ~/.ssh).
-    assert 'ssh_key=' in _after[:300]
+    # The per-remote SSH key + API token thread through to the agent transport.
+    assert 'ssh_key=' in _after[:400] and 'token=' in _after[:400]
     with open(os.path.join(_ROOT, 'scripts', 'utils.py')) as _f:
         assert "'RemoteBuildHost'" in _f.read()
 
@@ -22993,51 +23295,6 @@ def test_orchestrator_ssh_key_threads_into_argv():
     finally:
         _sp.run = _orig
     assert '-i' in _seen['argv'] and '/k' in _seen['argv']
-
-
-def test_run_remote_reconciles_partial_recovery_cons11():
-    """CONS-11: run_remote treats a SHORT scp recovery (fewer artifacts than the
-    remote's marker reported) as a TRANSPORT failure (exit 12, no outputs) so the
-    fan-out re-queues — never a `done` record claiming more .debs than landed.  A
-    COMPLETE recovery returns the marker's exit + outputs unchanged."""
-    import sys as _sys
-    import types as _types
-    import tempfile
-    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import remote_orchestrate as _ro
-
-    _marker = (_ro.RESULT_MARKER
-               + ' {"exit_code": 0, "outputs": ["a.deb", "b.deb"]}\n')
-
-    class _FakeProc:
-        def __init__(_s):
-            _s.stdout = iter([_marker])
-            _s.returncode = 0
-
-        def wait(_s):
-            return 0
-
-    def _run_remote_with(local_out_files):
-        with tempfile.TemporaryDirectory() as _bundle, \
-                tempfile.TemporaryDirectory() as _out:
-            for _f in local_out_files:
-                open(os.path.join(_out, _f), 'w').close()
-            _fake = _types.SimpleNamespace(
-                run=lambda *a, **k: _types.SimpleNamespace(returncode=0),
-                Popen=lambda *a, **k: _FakeProc(),
-                PIPE=-1, STDOUT=-2, DEVNULL=-3)
-            _orig = _ro.subprocess
-            _ro.subprocess = _fake
-            try:
-                return _ro.run_remote('h', _bundle, '/tmp/rd', _out,
-                                      log=lambda *a: None)
-            finally:
-                _ro.subprocess = _orig
-
-    # partial: only a.deb landed → transport failure
-    assert _run_remote_with(['a.deb']) == (12, [])
-    # complete: both landed → marker result passes through
-    assert _run_remote_with(['a.deb', 'b.deb']) == (0, ['a.deb', 'b.deb'])
 
 
 def test_probe_remote_build_host_parses_and_gates():
@@ -39420,11 +39677,14 @@ def main() -> int:
         test_cache_build_gates_on_mirror_reachability_and_config_command_wired,
         test_startup_banner_runs_config_check,
         test_remote_build_run_container_command_shape,
+        test_remote_agent_helpers_name_and_log_offsets,
+        test_remote_agent_lifecycle_success_logs_and_auth,
+        test_remote_agent_watchdog_and_abort,
+        test_run_remote_agent_polls_to_done_ships_token_and_reaps,
+        test_run_remote_agent_watchdog_timeout_is_transport,
         test_remote_build_image_uses_args_and_skips_when_present,
         test_remote_build_main_emits_result_marker,
         test_remote_orchestrate_parse_host_stage_and_result,
-        test_remote_orchestrate_run_remote_flow,
-        test_run_remote_decoupled_log_and_incremental_marker,
         test_ensure_remote_image_lan_transfer_paths,
         test_fetch_source_versions_cached_on_disk,
         test_published_ledger_memoised,
@@ -39432,7 +39692,6 @@ def main() -> int:
         test_container_two_level_command_surface_wired,
         test_remotebuild_command_wired,
         test_orchestrator_ssh_key_threads_into_argv,
-        test_run_remote_reconciles_partial_recovery_cons11,
         test_probe_remote_build_host_parses_and_gates,
         test_copy_ssh_key_copies_with_0600_and_delete_removes_key,
         test_container_remote_add_is_guided_with_probes,
@@ -39447,6 +39706,7 @@ def main() -> int:
         test_write_local_conf_writes_relocated_machine_keys,
         test_mirror_conf_registration_round_trips_and_migrates,
         test_remote_conf_helpers_round_trip,
+        test_remote_token_generate_and_path,
         test_write_local_conf_round_trips,
         test_command_allowed_gates_until_configured,
         test_configured_summary_reports_state_and_warns_unregistered,
@@ -40066,6 +40326,10 @@ def main() -> int:
         test_mirror_publish_reindexes_stale_local_index,
         test_push_dist_tree_excludes_pool_artifacts,
         test_transport_remote_sha256_parses_digest_and_guards,
+        test_fed04_flock_scripts_shape,
+        test_fed04_parse_flock_status_and_staleness,
+        test_fed04_remote_flock_lock_status_and_break,
+        test_fed04_unlock_decision_policy,
         test_transport_list_remote_debs_parses_and_guards,
         test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,

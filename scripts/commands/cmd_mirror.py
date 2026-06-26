@@ -31,6 +31,30 @@ def _print_audit_finding(_sev: str, _kind: str, _msg: str, _color) -> None:
         console.print(f"            {_cont}", _color)
 
 
+def _unlock_decision(
+    status: 'Optional[dict]', force: bool, is_stale: bool,
+) -> 'tuple[str, str]':
+    """Pure policy for `mirror unlock` (FED-04).  Given a probed lock status
+    (or None if the probe failed), the --force flag, and whether the lock
+    reads as stale, decide the action.  Returns ``(action, detail)`` where
+    action is one of ``probe-failed`` | ``free`` | ``refuse-live`` | ``break``.
+    Kept pure so the decision is unit-testable without SSH."""
+    if status is None:
+        return 'probe-failed', 'could not probe the lock (SSH failed)'
+    if not status.get('held'):
+        return 'free', 'lock is free — nothing to do'
+    _holder = status.get('holder') or '<unknown>'
+    _age = status.get('age_sec')
+    if force:
+        return 'break', f"forced break (holder {_holder})"
+    if is_stale:
+        return 'break', (f"holder {_holder} heartbeat is {_age}s old — "
+                         "appears STALE (holder likely died mid-publish)")
+    return 'refuse-live', (
+        f"holder {_holder} heartbeat is {_age}s old — looks LIVE; refusing. "
+        "Re-run with --force only if you are certain the holder is dead.")
+
+
 class MirrorCommandsMixin(SessionState):
     # ─────────────────────────────────────────────────────────────────────
     # Mirror umbrella — remote-endpoint federation
@@ -84,6 +108,8 @@ class MirrorCommandsMixin(SessionState):
             return self.cmd_mirror_publish(*args)
         if action == 'pull':
             return self.cmd_mirror_pull(*args)
+        if action == 'unlock':
+            return self.cmd_mirror_unlock(*args)
         if action == 'reclaim':
             return self.cmd_mirror_reclaim(*args)
         if action == 'withdraw-foreign':
@@ -117,6 +143,10 @@ class MirrorCommandsMixin(SessionState):
             'pull [<name>]':               'fetch + verify peer sidecar, then '
                                            'download claim .debs missing locally '
                                            '(skip-own; SHA-256 verified)',
+            'unlock [<name>] [--force]':   'break a STALE remote publish lock '
+                                           '(a crashed publisher strands it); '
+                                           'refuses a live heartbeat unless '
+                                           '--force',
             'reclaim [<src>|<file>] [<name>] [force]':
                                            'supersede OUR published claim for the '
                                            'SAME filename with the local rebuild '
@@ -1497,6 +1527,97 @@ class MirrorCommandsMixin(SessionState):
                         tui.COLOR_WARNING)
                     _all_ok = False
         return _all_ok
+
+    def cmd_mirror_unlock(self, *args):
+        """mirror unlock [<name>] [--force] — break a STALE remote publish lock.
+
+        A publish holds /var/lock/repo-coord.lock on the mirror over a
+        long-lived SSH session; if the publisher dies mid-publish (e.g. a
+        power failure on the builder) the orphaned lock lingers until sshd
+        reaps the dead connection — observed at 41 minutes, with every retry
+        failing `could not acquire remote flock`.  This probes the lock's
+        heartbeat sidecar and, when it reads as STALE (heartbeat older than
+        the live threshold) or with --force, kills the holder and clears the
+        sidecars.  A lock whose heartbeat is still fresh (a slow-but-live
+        multi-GB push) is REFUSED unless --force, so one peer never breaks
+        another's in-flight publish.
+        """
+        import mirror as _mirror
+        import coord.transport as _transport
+        _force = '--force' in args or 'force' in args
+        _name_args = [_a for _a in args if _a not in ('--force', 'force')]
+        # The flock path is remote_publish/revoke_builder's default; there is
+        # no config override for it today.
+        _flock_path = '/var/lock/repo-coord.lock'
+
+        _all = _mirror.list_mirrors(self.config)
+        if not _all:
+            console.print("mirror unlock: no mirrors configured (use "
+                          "`mirror add`).", tui.COLOR_WARNING)
+            return False
+        if _name_args:
+            _targets = [_n for _n in _name_args if _n in _all]
+            for _u in [_n for _n in _name_args if _n not in _all]:
+                console.print(f"mirror unlock: unknown mirror {_u!r}",
+                              tui.COLOR_ERROR)
+            if not _targets:
+                return False
+        else:
+            _targets = _all
+
+        _ok_all = True
+        for _n in _targets:
+            _st = _mirror.read_mirror_state(self.config, _n)
+            if _st is None:
+                console.print(f"mirror unlock {_n}: no mirror state.",
+                              tui.COLOR_ERROR)
+                _ok_all = False
+                continue
+            _url = _st.get('url', '')
+            _ssh_key = _st.get('ssh_key') or None
+            _, _coord_ssh = _mirror.rsync_spec_for_url(
+                _mirror.coord_root_for(_url))
+            _, _pool_ssh = _mirror.rsync_spec_for_url(_url)
+            _ssh_host = _coord_ssh or _pool_ssh
+            if not _ssh_host:
+                console.print(f"mirror unlock {_n}: local-fs mirror — no "
+                              "remote lock to break.", tui.COLOR_INFO)
+                continue
+            _status = _transport.remote_flock_lock_status(
+                ssh_host=_ssh_host, lock_path=_flock_path, ssh_key=_ssh_key)
+            _is_stale = _transport.lock_is_stale(_status)
+            _action, _detail = _unlock_decision(_status, _force, _is_stale)
+            if _action == 'probe-failed':
+                console.print(f"mirror unlock {_n}: {_detail}", tui.COLOR_ERROR)
+                _ok_all = False
+                continue
+            if _action == 'free':
+                console.print(f"mirror unlock {_n}: {_detail}", tui.COLOR_INFO)
+                continue
+            if _action == 'refuse-live':
+                console.print(f"mirror unlock {_n}: {_detail}",
+                              tui.COLOR_WARNING)
+                _ok_all = False
+                continue
+            # _action == 'break' — confirm unless --force.
+            console.print(f"mirror unlock {_n}: {_detail}", tui.COLOR_WARNING)
+            if not _force:
+                _resp = Prompt(
+                    PROMPT_YESNO,
+                    f"Break the publish lock on {_n!r} "
+                    f"(holder {_status.get('holder') if _status else '?'})?",
+                ).get_response()
+                if _resp.lower() not in ('y', 'yes'):
+                    console.print(f"mirror unlock {_n}: aborted by operator.",
+                                  tui.COLOR_WARNING)
+                    continue
+            _bok, _bdetail = _transport.remote_flock_break(
+                ssh_host=_ssh_host, lock_path=_flock_path, ssh_key=_ssh_key)
+            console.print(
+                f"mirror unlock {_n}: {_bdetail}",
+                tui.COLOR_HIGHLIGHT if _bok else tui.COLOR_ERROR)
+            _ok_all = _ok_all and _bok
+        return _ok_all
 
     def cmd_mirror_pull(self, *args):
         """mirror pull [<name>] — fetch from one mirror, or all when no name.

@@ -21,7 +21,7 @@
 # Per docs/branding-methodology.md Pattern B (drop-in static asset
 # owned by us) — no upstream patches, no per-version churn.
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import math
 import os
 
