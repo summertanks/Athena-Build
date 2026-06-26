@@ -18,7 +18,7 @@ Athena Build system is a (mostly) hands off toolchain to build and ship custom D
 
 The genesis of this project came from the conversation - while the Linux ecosystem as part of the FOSS world, can we really build the distro from source? As that wild idea took some roots it got convoluted into an idea - if we can do that then why cannot we have a public toolchain that allows me to build a Ubuntu from Debian or CentOS from RedHat. Why not let people build, customise and maintain their own distro end to end. The question as to why a sane person would even do that was conveniently sidestepped in the said conversation.
 
-Athena is not reinventing the wheel, it's just repackaging the car. Other projects own individual links of this chain, and often own them better — Linux From Scratch builds a system from source by hand, Yocto does industrial source builds for embedded targets, the Open Build Service publishes signed packages at scale, live-build composes Debian ISOs. Athena's identity is to do the whole chain at once, for a complete Debian derivative: 
+Athena is not reinventing the wheel, it's just putting the car together. Other projects own individual links of this chain, and often own them better — Linux From Scratch builds a system from source by hand, Yocto does industrial source builds for embedded targets, the Open Build Service publishes signed packages at scale, live-build composes Debian ISOs. Athena's identity is to do the whole chain at once, for a complete Debian derivative: 
 - Build the entire distro's dependency closure from source, 
 - Hold a clean fork identity, pin every input to a snapshot so the result is reproducible,
 - Publish it as a signed, append-only, federated mirror that multiple builders can extend. 
@@ -31,16 +31,14 @@ To our knowledge no other open-source tool does that entire chain, transparently
  - It is NOT currently (or ever may be) supported by any of Debian Linux Houses (e.g. debian, ubuntu, etc.)
  - Does it have Bugs? - Yes. Many?? Maybeeee. Please reach out to me and lets fix what you find.
  - Remember, and this is especially important: it is a source build toolchain, it does nothing to upstream source packages. What you get is what you get. You will (rather quickly) realise as I have that just because source code is available doesn't mean it is amenable to being built. Fixing that is completely on you. You will learn to embrace a whole new level of 'oh, but it builds on my system'.
- - A practical note for anyone coming from RHEL: this project will be largely incomprehensible for the first afternoon. Conventions are different, assumed reading is different. Stick with it; the underlying ideas are the same.
+ - A practical note for anyone coming from RHEL: this project will be largely incomprehensible for the first afternoon. Conventions are different, assumed reading is different. Patience is key.
 
 ### Background
 The first question is always - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a 'System V compatible' kernel inspired by a UNIX operating system clone called 'Minix', what we now ubiquitously call version 0.1 of the **Linux Kernel**. 
 
-Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU, which brought along the application stack that gave it purpose, and hence was born the **Linux Distribution**, or more colloquially just called Distro - a collection of self serving programs. The conversation of distinction between 'Linux Distribution' and 'Linux OS' is a petridish for violence amongst geeks, but for the purpose of this project lets assert debian is a 'Linux Distribution' and stay away from the phrase OS as much as possible.
+Unfortunately, the kernel had no application to run and remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU, which brought along the application stack that gave it purpose, and hence was born the **Linux Distribution**, or more colloquially just called Distro - a collection of self serving programs. The conversation of distinction between 'Linux Distribution' and 'Linux OS' is a petridish for violence amongst geeks, but for the purpose of this project lets assert debian is a 'Linux Distribution' and stay away from the phrase OS as much as possible.
 
-The first Linux distribution, called "Softlanding Linux System" (SLS), was released by 1992. and within the next three years we saw the advent of Slackware, Red Hat and Debian. The rest as they say is history.
-
-PS: Red Hat vs Debian - Red Hat was founded with the goal of creating a commercial distribution of Linux that could be sold and supported. On the other hand, Debian was founded  with the goal of creating a community-driven Linux distribution that was completely free, open-source and built from scratch. We like debian.
+The first Linux distribution, called "Softlanding Linux System" (SLS), was released by 1992. and within the next three years we saw the advent of Slackware, Red Hat and Debian. The rest as they say is history. Red Hat vs Debian - Red Hat was founded with the goal of creating a commercial distribution of Linux that could be sold and supported. On the other hand, Debian was founded  with the goal of creating a community-driven Linux distribution that was completely free, open-source and built from scratch. We like debian.
 
 A **package** is akin to SKU of software that can be installed and managed by the distribution's package manager. This is important - packages may intrinsically also define other packages as dependencies and it is usually the package manager's headache to install everything together. In this context Debian identifies an application, wraps the application's build system to produce the installables as a package construct, i.e. deb - debian package file, test it, patch it, and publish it in a repository.
 
@@ -51,11 +49,97 @@ If you can collect a set of packages that work together in a manner that makes t
 The sections that follow walk through what that looks like in practice — what to install on the host before you start, how to drive the build, where to look when something breaks (and it will).
 
 
-## Building Image
+## Building Distribution
 
-### Intro
+### Prerequisites
 
-The build system is a curses TUI driven by `build-system.sh`. There is one shipped pipeline (`autorun`) that drives the build through to a verified chroot; the final ISO step is left as a separate manual command on purpose, so you have a chance to inspect or fiddle with the chroot before it gets sealed into a squashfs.
+A Debian-derived host. Development happens on Debian bookworm; trixie should work, current Ubuntu LTS likely too. Rough resource envelope for a full bookworm-derived build:
+
+- **CPU** — the source build is the long pole: every package is compiled with `dpkg-buildpackage` in a container, several in parallel (each spawning its own `make -j`). 4 cores is a week's worth of effort; 8+ noticeably shortens a full run. Source builds are CPU centric - for production think 32+.
+- **RAM** — 8 GB works for Athena. For source builds 16 GB is minimal, 24GB+ is strongly recommended. A handful of sources (firefox-esr, gcc, llvm, libreoffice, webkit) are memory-hungry during linking and can OOM a small box when built alongside each other. If you are running builds in parallel, just use the same factor for resources.
+- **Disk** — budget ~30 GB. The bulk lives in `source/` (upstream tarballs), `build/` (per-package build trees), `repo/` (the produced `.deb`s), and `buildroot/` (the chroot the image is built from).
+- **Local vs remote builds** — by default every package can be built locally on the same system as Athena. You can instead register remote Docker hosts and fan builds out over multiple build systems. This allows you to use multiple smaller remote systems than one massive host system.  
+- **Heavy packages** — the worst offenders are pre-listed in `[Source] HeavyPackages` (`firefox-esr`, `gcc-12`, `libreoffice`, `llvm-toolchain-15`, `linux`, `webkit2gtk`); the scheduler drains other builds before starting one so as to avoid building two giants at once.
+- **Local mirror** — We can configure a snapshot-pinned apt mirror of the build-dependency closure on local disk so containers resolve Build-Depends offline. Faster on repeat runs, but budget 10+ GB for it.
+- **Publishing a mirror** — to publish you need a project signing key and the endpoint needs writable space and SSH/rsync or HTTP access. (Federation across builders adds Ed25519 keys + a GPG-signed coord-head — see [`docs/mirror-setup.md`](docs/mirror-setup.md).)
+- **Bandwidth** — the first run pulls a few GB of indices and source tarballs and deb for local mirror; after that it is mostly local. If not using a local mirror the full build almost gets throttled over slow network connection.
+
+Firstly, make sure the current user is in the `sudo` group — a default Debian install does not add you. And do not run the build system itself as root/sudo; it asks for a sudo password only when it needs one.
+```bash
+usermod -aG sudo $(whoami)
+```
+Restart session to take effect. Confirm by (assuming sudo is installed)
+```bash
+if sudo -l -n 2>/dev/null | grep -q '(ALL'; then echo "($(whoami) has sudo privileges)"; fi
+```
+
+Now install the host packages the startup check looks for (Docker is handled separately, just below): 
+```bash
+sudo apt install -y bash gzip wget gawk gnupg debian-archive-keyring python3 python3-apt python3-debian python3-gnupg python3-psutil python3-requests python3-docker squashfs-tools xorriso mtools grub-common grub-pc-bin grub-efi-amd64-bin rsync qemu-utils dosfstools e2fsprogs util-linux
+```
+
+Avoid using repo shipped docker. While strong recommendation is to check the [official site](https://docs.docker.com/engine/install/debian/) for any changes in steps but for simplicity sake just adding the easy way. 
+```bash
+sudo apt remove $(dpkg --get-selections docker.io docker-compose docker-doc podman-docker containerd runc | cut -f1)
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh ./get-docker.sh
+```
+
+### Configuring
+
+Designing a distro with Athena comes down to two questions **what is it being derived from** and **what goes in it**. Both answered by editing files under `config/` relatively easily
+
+From distro.conf we can simply set - what is it being derived from
+```ini
+[Build]
+ARCH = amd64          # target architecture - i386, amd64 or all
+DISTRIBUTION = Asgard # name of your distribution, simple as that 
+CODENAME = thor       # code name
+...
+[Base]
+BASEURL     = http://deb.debian.org
+BASEID      = debian
+RELEASE     = bookworm  # where we are deriving our distribution from
+BASEVERSION = 12.0
+
+```
+
+From build.conf we can configure **What goes in it — package groups and surfaces.** 
+
+```ini
+[Live]
+# The live image: GNOME desktop experience (+ Recommends of the set).
+Groups = base, gnome-desktop
+
+[Disk]
+# The pre-installed qcow2 disk image: minimal console system.
+Groups = base
+
+[Packages]
+Pkg_List       = pkg.list
+Pool_List      = pool.list
+Live_List      = live.list
+Installer_List = installer.list
+Build_Pkg_List = build_pkg.list
+
+[Source]
+...
+BuildOptions = nodoc, nocheck, noautodbgsym
+BuildProfiles = nodoc, nocheck, noinsttest
+Tunneled = intel-microcode, amd64-microcode, ...
+```
+
+For your first attempt - even if you don't change anything in the config files you will get a working distro called `Asgard` with Codename `thor` derived from Debian Bookworm 12.0. For detailed info on config files please look at [`docs/config.md`](docs/config.md)
+
+Branding beyond the name (logos, defaults) is carried by packages under `fork/source/`, where `@DISTRIBUTION@` / `@CODENAME@` tokens are substituted in. See [`docs/branding-methodology.md`](docs/branding-methodology.md).
+
+**Local Config** there are build machine specific configuration that the system will automatically set for you and you can configure it from within the TUI itself. Ideally you shouldn't have to manually change anything in that. 
+
+### First run
+
+
+
+There is one shipped pipeline (`autorun`) that drives the build through to a verified chroot; the final ISO step is left as a separate manual command on purpose, so you have a chance to inspect or fiddle with the chroot before it gets sealed into a squashfs.
 
 The pipeline (eight stages, plus one optional side-channel):
 
@@ -75,17 +159,6 @@ Plus, off to one side:
 
 Each stage sets a `BuildFlags` bit on success; later stages refuse to run unless their prerequisites are set.  `autorun` walks stages 1–6 in order (which gets you a verified chroot) and bails on the first failure; you then run `iso build live` once you're happy.
 
-### Prerequisites
-
-A Debian-derived host. Development happens on Debian bookworm; trixie should work, current Ubuntu LTS likely too. You need:
-
-- **sudo**. The chroot install steps shell out to `mount --bind`, `chroot`, `dpkg`. Run the build as a normal user; the TUI will prompt for your sudo password at the start of `chroot build` (and again at the start of `iso build live`) and zero it from memory the instant each command exits — pass or fail (see STA-07).
-- **Docker Engine** (not Docker Desktop). The source-build container runs build-deps in isolation. See [`docs/install-docker.md`](docs/install-docker.md) for the apt incantation that gets you an up-to-date Engine from Docker's own repo (the distro packages are usually too old).
-- **Python ≥ 3.9** plus `python3-apt`, `python3-debian`, `python3-gnupg`, `python3-requests`, `python3-psutil`, `python3-docker`. The wrapper `build-system.sh` checks `py_requirements.txt` and tells you what's missing.
-- **debian-archive-keyring** — used to GPG-verify mirror `InRelease` files. On a Debian host it's almost always there; on Ubuntu you may need to apt-install it (see `[Security]` in `config/build.conf` for the keyring path).
-- **Disk** — budget ~30 GB for a full bookworm-derived build. The bulk lives in `source/` (raw upstream tarballs), `build/` (per-package build trees inside the container), `repo/` (the produced `.deb`s), and `buildroot/` (the chroot the ISO is built from).
-- **RAM** — 8 GB is workable; 16 GB makes the source-build stage less painful, particularly once parallel builds land (COMP-03).
-- **Bandwidth** — first `cache build` + `source sync` will pull a few GB. The rest is local.
 
 ### First run
 
