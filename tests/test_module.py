@@ -20585,6 +20585,54 @@ def test_fed03_remote_pubkey_state_local_and_ssh():
         _tr.subprocess = _orig
 
 
+def _advertised_and_dispatched(method):
+    """(advertised, dispatched) sets for a command-umbrella method: advertised
+    = the first word of each help-table dict key; dispatched = every string
+    `action` is compared against (== or `in (...)`).  AST-based, so it's robust
+    to formatting."""
+    import ast
+    import inspect
+    import textwrap
+    _tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
+    _adv, _disp = set(), set()
+    for _node in ast.walk(_tree):
+        if isinstance(_node, ast.Dict):
+            for _k in _node.keys:
+                if isinstance(_k, ast.Constant) and isinstance(_k.value, str):
+                    _parts = _k.value.split()
+                    if _parts and not _parts[0].startswith('<'):
+                        _adv.add(_parts[0])
+        if (isinstance(_node, ast.Compare)
+                and isinstance(_node.left, ast.Name)
+                and _node.left.id == 'action'):
+            for _op, _comp in zip(_node.ops, _node.comparators):
+                if isinstance(_op, ast.Eq) and isinstance(_comp, ast.Constant):
+                    if isinstance(_comp.value, str):
+                        _disp.add(_comp.value)
+                elif isinstance(_op, ast.In) and isinstance(
+                        _comp, (ast.Tuple, ast.List, ast.Set)):
+                    for _e in _comp.elts:
+                        if isinstance(_e, ast.Constant) and isinstance(
+                                _e.value, str):
+                            _disp.add(_e.value)
+    return _adv, _disp
+
+
+def test_mat11_mirror_help_subcommands_all_dispatch():
+    """MAT-11(6): every subcommand the `mirror` umbrella ADVERTISES in its help
+    table must actually DISPATCH (advertised ⊆ real) — guards against a menu
+    entry that 404s to the help fallback when an operator types it."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from commands.cmd_mirror import MirrorCommandsMixin
+    _adv, _disp = _advertised_and_dispatched(MirrorCommandsMixin.cmd_mirror)
+    # sanity: we actually parsed a rich table + dispatcher
+    assert len(_adv) >= 10 and 'publish' in _adv and 'unlock' in _adv, _adv
+    _undispatched = _adv - _disp
+    assert not _undispatched, (
+        f"mirror advertises subcommand(s) that don't dispatch: "
+        f"{sorted(_undispatched)}")
+
+
 def test_mat10c_bump_decision_parity_triggers():
     """MAT-10(c): the +asg stamp decision (DELTA or LINEAGE) is duplicated in
     the real-build path (buildcontainer._normalize_built_artifacts) and the
@@ -40525,6 +40573,7 @@ def main() -> int:
         test_fed03d_new_coord_head_carries_builders,
         test_fed01_ledger_stranded_claims_detector,
         test_mat10c_bump_decision_parity_triggers,
+        test_mat11_mirror_help_subcommands_all_dispatch,
         test_transport_list_remote_debs_parses_and_guards,
         test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
