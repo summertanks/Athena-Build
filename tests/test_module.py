@@ -564,6 +564,26 @@ def test_remote_conf_helpers_round_trip():
         assert utils.list_remotes(cfg) == []
 
 
+def test_remote_token_generate_and_path():
+    """REMOTE-API: generate_remote_token writes a 64-hex token 0600 to
+    config/<name>.remote-token; remote_token_path derives that path; a second
+    call rotates it."""
+    import utils
+    import stat
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        _path, _tok = utils.generate_remote_token(cfg, 'bs7')
+        assert _path == utils.remote_token_path(cfg, 'bs7')
+        assert _path.endswith('bs7.remote-token')
+        assert len(_tok) == 64 and all(_c in '0123456789abcdef' for _c in _tok)
+        assert open(_path).read().strip() == _tok
+        assert stat.S_IMODE(os.stat(_path).st_mode) == 0o600
+        _, _tok2 = utils.generate_remote_token(cfg, 'bs7')
+        assert _tok2 != _tok
+
+
 class _FakeOnbSession:
     """Minimal session for onboarding tests: a config with a tmp config_path
     (so write_local_conf lands in the tmp dir) + the federation methods the
@@ -39689,6 +39709,7 @@ def main() -> int:
         test_write_local_conf_writes_relocated_machine_keys,
         test_mirror_conf_registration_round_trips_and_migrates,
         test_remote_conf_helpers_round_trip,
+        test_remote_token_generate_and_path,
         test_write_local_conf_round_trips,
         test_command_allowed_gates_until_configured,
         test_configured_summary_reports_state_and_warns_unregistered,
