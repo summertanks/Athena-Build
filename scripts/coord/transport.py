@@ -23,6 +23,7 @@ codes propagate.  No fancy progress bars at this layer (publish path
 in cmd_repo_publish has its own ProgressBar that wraps this).
 """
 
+import hashlib
 import logging
 import os
 import shlex
@@ -224,6 +225,56 @@ def remote_sha256(
         return None
     _parts = (_r.stdout or '').strip().split()
     return _parts[0] if _parts and len(_parts[0]) == 64 else None
+
+
+def _is_sha256(s: str) -> bool:
+    return len(s) == 64 and all(_c in '0123456789abcdef' for _c in s.lower())
+
+
+def remote_pubkey_state(
+    *, spec: str, ssh_key: 'Optional[str]' = None,
+) -> 'Tuple[str, str]':
+    """TOFU probe of an existing keyring pubkey BEFORE `mirror builders
+    register` would overwrite it (FED-03 step B).  Unlike :func:`remote_sha256`
+    (whose ``None`` conflates "absent" with "ssh failed"), this DISTINGUISHES:
+
+        ('present', <sha256-hex>)  — a key is already registered for this id
+        ('absent',  '')            — no key yet (safe to register)
+        ('error',   <reason>)      — could NOT determine (ssh down / bad output);
+                                     the caller MUST NOT blind-overwrite.
+
+    ``spec`` is the rsync-style destination of the pubkey — a local path
+    (file:// mirror) or ``user@host:path``."""
+    if ':' not in spec:                        # local-fs mirror
+        if not os.path.isfile(spec):
+            return ('absent', '')
+        try:
+            with open(spec, 'rb') as _fh:
+                return ('present', hashlib.sha256(_fh.read()).hexdigest())
+        except OSError as _e:
+            return ('error', str(_e))
+    _host, _, _path = spec.partition(':')
+    # One ssh round-trip: print the sha, or a sentinel when the file is absent.
+    _probe = (f'if [ -f {shlex.quote(_path)} ]; then '
+              f'sha256sum {shlex.quote(_path)} | cut -d" " -f1; '
+              f'else echo __ABSENT__; fi')
+    _cmd = ['ssh']
+    if ssh_key:
+        _cmd += ['-i', ssh_key]
+    _cmd += ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
+             _host, _probe]
+    try:
+        _r = subprocess.run(_cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as _e:
+        return ('error', str(_e))
+    if _r.returncode != 0:
+        return ('error', (_r.stderr or 'ssh failed').strip() or 'ssh failed')
+    _out = (_r.stdout or '').strip()
+    if _out == '__ABSENT__':
+        return ('absent', '')
+    if _is_sha256(_out):
+        return ('present', _out.lower())
+    return ('error', f'unexpected probe output: {_out!r}')
 
 
 def list_remote_debs(

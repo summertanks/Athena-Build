@@ -20531,6 +20531,60 @@ def test_fed04_remote_flock_lock_status_and_break():
         _tr.subprocess = _orig
 
 
+def test_fed03_register_tofu_decision_policy():
+    """FED-03 step B: register TOFU policy — absent→upload, same key→skip,
+    different key→refuse (force→upload), unreadable→refuse (force→upload)."""
+    from commands.cmd_mirror import _register_tofu_decision
+    _L = 'a' * 64
+    # no existing key → register
+    assert _register_tofu_decision('absent', '', _L, False)[0] == 'upload'
+    # same key already there → idempotent no-op
+    assert _register_tofu_decision('present', _L, _L, False)[0] == 'skip'
+    # a DIFFERENT key already registered → refuse (identity takeover)
+    assert _register_tofu_decision('present', 'b' * 64, _L, False)[0] == 'refuse'
+    # …unless forced (deliberate rotation)
+    assert _register_tofu_decision('present', 'b' * 64, _L, True)[0] == 'upload'
+    # couldn't read the existing key → refuse (don't blind-overwrite)
+    assert _register_tofu_decision('error', '', _L, False)[0] == 'refuse'
+    assert _register_tofu_decision('error', '', _L, True)[0] == 'upload'
+
+
+def test_fed03_remote_pubkey_state_local_and_ssh():
+    """FED-03: remote_pubkey_state distinguishes present/absent/error for both
+    a local-fs spec and an ssh `user@host:path` spec (mocked)."""
+    import types as _types
+    import hashlib as _hl
+    import coord.transport as _tr
+    # local-fs mirror: real file present / missing
+    with tempfile.TemporaryDirectory() as _d:
+        _f = os.path.join(_d, 'BS1.pub')
+        with open(_f, 'wb') as _fh:
+            _fh.write(b'ssh-ed25519 AAAA...\n')
+        _sha = _hl.sha256(b'ssh-ed25519 AAAA...\n').hexdigest()
+        assert _tr.remote_pubkey_state(spec=_f) == ('present', _sha)
+        assert _tr.remote_pubkey_state(
+            spec=os.path.join(_d, 'nope.pub')) == ('absent', '')
+    # ssh spec: mock subprocess for present / absent / ssh-error
+    _orig = _tr.subprocess
+    try:
+        _digest = 'c' * 64
+        _tr.subprocess = _types.SimpleNamespace(
+            run=lambda a, **k: _types.SimpleNamespace(
+                returncode=0, stdout=_digest + '\n', stderr=''),
+            SubprocessError=Exception)
+        assert _tr.remote_pubkey_state(
+            spec='u@h:/k/BS1.pub', ssh_key='k') == ('present', _digest)
+        _tr.subprocess.run = lambda a, **k: _types.SimpleNamespace(
+            returncode=0, stdout='__ABSENT__\n', stderr='')
+        assert _tr.remote_pubkey_state(spec='u@h:/k/BS1.pub') == ('absent', '')
+        _tr.subprocess.run = lambda a, **k: _types.SimpleNamespace(
+            returncode=255, stdout='', stderr='ssh: connect refused')
+        _st, _why = _tr.remote_pubkey_state(spec='u@h:/k/BS1.pub')
+        assert _st == 'error' and 'connect refused' in _why
+    finally:
+        _tr.subprocess = _orig
+
+
 def test_fed04_unlock_decision_policy():
     """FED-04: `mirror unlock` decision policy — probe-fail, free lock,
     stale→break, live→refuse, and --force breaks a live lock too."""
@@ -32066,24 +32120,51 @@ def test_mirror_builders_register_gates_and_uploads():
     # coord fetch, keeping this test focused on the pubkey upload)
     _st = {'url': 'ssh://u@h/p', 'ssh_key': None}
     with tempfile.TemporaryDirectory() as _dc:
+        # a real local pubkey so the FED-03 TOFU sha read succeeds
+        _pubf = os.path.join(_dc, 'alice.pub')
+        with open(_pubf, 'wb') as _fh:
+            _fh.write(b'ssh-ed25519 AAAA-alice\n')
+        _keys_real = ('alice', '/priv.pem', _pubf)
         _s.config = type('C', (), {
             'dir_cache': _dc,
             'pkglist_path': os.path.join(_dc, 'pkg'),
             'poollist_path': os.path.join(_dc, 'pool')})()
         with patch.object(BuildSession, '_coord_self_keys',
-                          return_value=_keys), \
+                          return_value=_keys_real), \
                 patch('signing.verify_key', return_value=(True, 'ok')), \
                 patch('mirror.read_mirror_state', return_value=_st), \
                 patch('mirror.coord_root_for',
                       return_value='ssh://u@h/p-coord'), \
                 patch('mirror.rsync_spec_for_url',
                       return_value=('u@h:/p-coord', None)), \
+                patch('coord.transport.remote_pubkey_state',
+                      return_value=('absent', '')) as _probe, \
                 patch('coord.transport.push_jsonl',
                       return_value=(True, '')) as _push, \
                 patch('coord.transport.pull_remote_coord',
                       return_value=(False, 'skip')):
             assert _s.cmd_mirror_builders_register('m1') is True
-            assert _push.called
+            assert _push.called and _probe.called
+        # FED-03 TOFU: a DIFFERENT key already registered → REFUSE, no upload
+        with patch.object(BuildSession, '_coord_self_keys',
+                          return_value=_keys_real), \
+                patch('signing.verify_key', return_value=(True, 'ok')), \
+                patch('mirror.read_mirror_state', return_value=_st), \
+                patch('mirror.coord_root_for',
+                      return_value='ssh://u@h/p-coord'), \
+                patch('mirror.rsync_spec_for_url',
+                      return_value=('u@h:/p-coord', None)), \
+                patch('coord.transport.remote_pubkey_state',
+                      return_value=('present', 'd' * 64)), \
+                patch('coord.transport.push_jsonl',
+                      return_value=(True, '')) as _push2, \
+                patch('coord.transport.pull_remote_coord',
+                      return_value=(False, 'skip')):
+            assert _s.cmd_mirror_builders_register('m1') is False
+            assert not _push2.called          # refused before any upload
+            # …but --force overrides
+            assert _s.cmd_mirror_builders_register('m1', '--force') is True
+            assert _push2.called
 
 
 def _new_pending_claim(builder: str, package: str, filename: str,
@@ -40330,6 +40411,8 @@ def main() -> int:
         test_fed04_parse_flock_status_and_staleness,
         test_fed04_remote_flock_lock_status_and_break,
         test_fed04_unlock_decision_policy,
+        test_fed03_register_tofu_decision_policy,
+        test_fed03_remote_pubkey_state_local_and_ssh,
         test_transport_list_remote_debs_parses_and_guards,
         test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
