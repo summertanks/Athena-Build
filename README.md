@@ -78,11 +78,12 @@ Now install the host packages the startup check looks for (Docker is handled sep
 sudo apt install -y bash gzip wget gawk gnupg debian-archive-keyring python3 python3-apt python3-debian python3-gnupg python3-psutil python3-requests python3-docker squashfs-tools xorriso mtools grub-common grub-pc-bin grub-efi-amd64-bin rsync qemu-utils dosfstools e2fsprogs util-linux
 ```
 
-Avoid using repo shipped docker. While strong recommendation is to check the [official site](https://docs.docker.com/engine/install/debian/) for any changes in steps but for simplicity sake just adding the easy way. 
+Avoid using repo shipped docker. While strong recommendation is to check the [official site](https://docs.docker.com/engine/install/debian/) for any changes in steps but for simplicity sake just adding the easy way. Also, remember to add the ssh user to docker group.
 ```bash
 sudo apt remove $(dpkg --get-selections docker.io docker-compose docker-doc podman-docker containerd runc | cut -f1)
 curl -fsSL https://get.docker.com -o get-docker.sh
 sudo sh ./get-docker.sh
+usermod -aG docker $USER
 ```
 
 ### Configuring
@@ -129,11 +130,13 @@ BuildProfiles = nodoc, nocheck, noinsttest
 Tunneled = intel-microcode, amd64-microcode, ...
 ```
 
-For your first attempt - even if you don't change anything in the config files you will get a working distro called `Asgard` with Codename `thor` derived from Debian Bookworm 12.0. For detailed info on config files please look at [`docs/config.md`](docs/config.md)
+For your first attempt - even if you don't change anything in the config files you will get a working distro called `Asgard` with Codename `thor` derived from Debian Bookworm 12.0.  
+
+There are also build machine specific ***local config*** that the system will automatically generate for you on first run from within the TUI itself. The system also enables you to change these settings from within the console. Ideally you shouldn't have to manually change anything in that. For detailed info on config files please look at [`docs/config.md`](docs/config.md)
 
 Branding beyond the name (logos, defaults) is carried by packages under `fork/source/`, where `@DISTRIBUTION@` / `@CODENAME@` tokens are substituted in. See [`docs/branding-methodology.md`](docs/branding-methodology.md).
 
-**Local Config** there are build machine specific configuration that the system will automatically set for you and you can configure it from within the TUI itself. Ideally you shouldn't have to manually change anything in that. 
+
 
 ### First run
 
@@ -428,9 +431,7 @@ in CI for the same reason.
 - [`docs/release.md`](docs/release.md) — release runbook (snapshot pin → key → build → publish → tag).
 - [`docs/mirror-setup.md`](docs/mirror-setup.md) — operator howto for `mirror add` / first-publish / wipe-and-redo on the MIRROR-01 federation surface.
 - [`docs/remote-build.md`](docs/remote-build.md) — building source packages on remote Docker hosts (`source remotebuild` fan-out) + the snapshot-pinned local build mirror (`set create-local-mirror`).
-- [`docs/virtual-build.md`](docs/virtual-build.md) — `virtual build` dry-run pipeline: predict bump arithmetic, closure breaks, and ownership blocks before running any source build.
-- [`docs/install-docker.md`](docs/install-docker.md) — Docker Engine install on the build host.
-- [`docs/build-quirks.md`](docs/build-quirks.md) — catalogue of Debian packaging/toolchain gotchas we've actually hit (Provides vs real packages, options vs profiles, arch wildcards, dh races, …) with the incident + the rule for each.
+- [`docs/virtual-build.md`](docs/virtual-build.md) — `virtual build` dry-run pipeline: predict bump arithmetic, closure breaks, and ownership blocks before running any source build.- [`docs/build-quirks.md`](docs/build-quirks.md) — catalogue of Debian packaging/toolchain gotchas we've actually hit (Provides vs real packages, options vs profiles, arch wildcards, dh races, …) with the incident + the rule for each.
 - [`docs/api.md`](docs/api.md) — the key-protected HTTP API (`./build-system.sh --api`): state/records/sidecars/progress reads + the command dispatcher; the contract the separate web-UI repo consumes.
 - [`docs/pseudocode.md`](docs/pseudocode.md) — natural-English walkthrough of every module.
 - [`TODO.md`](TODO.md) — open work, with severity + status + history preserved.

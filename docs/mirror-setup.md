@@ -384,7 +384,7 @@ in build mode routes there automatically.
 
 ### Federated build-mode peer — end-to-end
 
-A build-mode peer (e.g. a WSL builder; see `docs/install-docker.md`) joins
+A build-mode peer (e.g. a WSL builder) joins
 the federation, pulls the mirror, builds + publishes the packages it owns,
 and the distribution publisher consolidates on sync-back.
 
