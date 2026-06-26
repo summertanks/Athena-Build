@@ -87,27 +87,82 @@ def _need_tool(name: str) -> str:
     return _path   # type: ignore[return-value]
 
 
+# OVMF firmware lives at different paths across distros / package versions.
+# Modern Debian ships the 4MB build (OVMF_CODE_4M.fd); older ones the legacy
+# OVMF_CODE.fd.  CODE is read-only; VARS is the writable NVRAM template that
+# MUST be copied per-run (a single shared VARS would be mutated concurrently).
+_OVMF_CODE_CANDIDATES = (
+    '/usr/share/OVMF/OVMF_CODE_4M.fd',
+    '/usr/share/OVMF/OVMF_CODE.fd',
+    '/usr/share/edk2/x64/OVMF_CODE.4m.fd',
+    '/usr/share/qemu/OVMF_CODE.fd',
+)
+_OVMF_VARS_CANDIDATES = (
+    '/usr/share/OVMF/OVMF_VARS_4M.fd',
+    '/usr/share/OVMF/OVMF_VARS.fd',
+    '/usr/share/edk2/x64/OVMF_VARS.4m.fd',
+)
+
+
+def _find_ovmf() -> 'tuple[str | None, str | None]':
+    """(OVMF_CODE, OVMF_VARS_template) absolute paths, or (None, None)."""
+    _code = next((_p for _p in _OVMF_CODE_CANDIDATES if os.path.isfile(_p)), None)
+    _vars = next((_p for _p in _OVMF_VARS_CANDIDATES if os.path.isfile(_p)), None)
+    return _code, _vars
+
+
+def _kvm_available() -> bool:
+    """True iff /dev/kvm is usable by this user (read+write).  Without it QEMU
+    falls back to TCG — correct but ~10× slower (a full install may not reach
+    d-i within the --quick timeout)."""
+    return os.access('/dev/kvm', os.R_OK | os.W_OK)
+
+
+def extract_boot_images(iso_path: str, dest_dir: str) -> 'tuple[str, str]':
+    """Extract /boot/vmlinuz + /boot/initrd.gz from the ISO (via xorriso) so
+    the smoke can DIRECT-boot the installer kernel with `console=ttyS0` — the
+    only reliable way to capture serial headlessly (the ISO's GRUB uses a
+    gfxterm console that produces nothing under `-nographic`) AND the only way
+    `-append` (preseed cmdline) actually takes effect.  Returns (vmlinuz,
+    initrd)."""
+    _xorriso = _need_tool('xorriso')
+    _vmlinuz = os.path.join(dest_dir, 'vmlinuz')
+    _initrd = os.path.join(dest_dir, 'initrd.gz')
+    _r = subprocess.run(
+        [_xorriso, '-osirrox', 'on', '-indev', iso_path,
+         '-extract', '/boot/vmlinuz', _vmlinuz,
+         '-extract', '/boot/initrd.gz', _initrd],
+        capture_output=True, text=True)
+    if not (os.path.isfile(_vmlinuz) and os.path.isfile(_initrd)):
+        _err(f'could not extract /boot/{{vmlinuz,initrd.gz}} from {iso_path}: '
+             f'{(_r.stderr or "").strip()[:200]}')
+    return _vmlinuz, _initrd
+
+
 def build_qemu_cmd(
     iso_path: str,
     serial_log: str,
     disk_img: str,
     *,
-    mode: str = 'bios',
+    mode: str = 'direct',
     mem_mb: int = _DEFAULT_MEM_MB,
+    kernel: 'str | None' = None,
+    initrd: 'str | None' = None,
     kernel_append: 'str | None' = None,
+    ovmf_vars: 'str | None' = None,
 ) -> 'list[str]':
     """Build the qemu-system-x86_64 argv.
 
-    mode='bios' uses SeaBIOS (the QEMU default).  mode='efi' uses
-    OVMF if the package is installed at /usr/share/OVMF/OVMF_CODE.fd
-    — apt-install ovmf to get it.
+    mode='direct' (default) DIRECT-boots the extracted installer kernel+initrd
+      (`-kernel`/`-initrd`/`-append`) — firmware-agnostic, reliable headless
+      serial, and the preseed cmdline actually applies.  This is the installer-
+      RUNTIME smoke (does d-i start + run cleanly).
+    mode='bios' / 'efi' boot the ISO through the firmware/GRUB path (SeaBIOS /
+      OVMF) — the firmware-BOOT smoke (does the hybrid ISO boot under this
+      firmware).  efi needs OVMF + a per-run writable VARS copy (`ovmf_vars`).
 
-    Serial is captured to `serial_log` (no graphical console).  This
-    matches what /lib/debian-installer-startup.d/S99-syslog-to-serial
-    in our installer ramdisk expects: tails /var/log/syslog to
-    /dev/ttyS0, which we route to the file.
-
-    Returns argv as list[str] — caller subprocess.Popen's it.
+    The CD-ROM is always attached: the installer reads udebs + the pool from
+    /cdrom even in direct mode.  Serial is captured to `serial_log`.
     """
     _qemu = _need_tool('qemu-system-x86_64')
     _cmd = [
@@ -116,27 +171,30 @@ def build_qemu_cmd(
         '-nographic',                          # serial only; no SDL/GTK window
         '-cdrom', iso_path,
         '-drive', f'file={disk_img},format=qcow2,if=virtio',
-        '-boot', 'd',                          # boot from CD-ROM first
         '-serial', f'file:{serial_log}',
         '-monitor', 'none',                    # no QEMU monitor — keeps stdin clean
     ]
-    if shutil.which('kvm-ok'):
-        # Optional accelerator — speeds full installs by ~10×.  Fails
-        # silently if /dev/kvm not accessible; QEMU falls back to TCG.
+    if _kvm_available():
         _cmd[1:1] = ['-enable-kvm']
-    if mode == 'efi':
-        _ovmf_code = '/usr/share/OVMF/OVMF_CODE.fd'
-        if not os.path.isfile(_ovmf_code):
-            _err(
-                f'mode=efi requires {_ovmf_code} '
-                f'(apt-get install ovmf)'
-            )
-        _cmd[1:1] = ['-drive', f'if=pflash,format=raw,readonly=on,file={_ovmf_code}']
-    if kernel_append:
-        # When the harness drives an unattended install, we override
-        # the boot kernel cmdline to point at our preseed and force
-        # console=ttyS0 so output lands in serial_log.
-        _cmd.extend(['-append', kernel_append])
+    if mode == 'direct':
+        if not (kernel and initrd):
+            _err('mode=direct requires an extracted kernel + initrd')
+        _cmd += ['-kernel', kernel, '-initrd', initrd]
+        if kernel_append:
+            _cmd += ['-append', kernel_append]
+    else:
+        _cmd += ['-boot', 'd']                 # boot from CD-ROM (→ firmware → GRUB)
+        if mode == 'efi':
+            _code, _ = _find_ovmf()
+            if not _code or not ovmf_vars:
+                _err('mode=efi requires OVMF (apt-get install ovmf) + a '
+                     'writable VARS copy')
+            _cmd[1:1] = [
+                '-drive',
+                f'if=pflash,format=raw,unit=0,readonly=on,file={_code}',
+                '-drive',
+                f'if=pflash,format=raw,unit=1,file={ovmf_vars}',
+            ]
     return _cmd
 
 
@@ -155,7 +213,7 @@ def run_smoke(
     iso_path: str,
     output_dir: str,
     *,
-    mode: str = 'bios',
+    mode: str = 'direct',
     timeout_s: int = _DEFAULT_TIMEOUT_QUICK,
     full: bool = False,
     mem_mb: int = _DEFAULT_MEM_MB,
@@ -175,22 +233,34 @@ def run_smoke(
     _disk_img   = os.path.join(output_dir, 'disk.qcow2')
     make_blank_disk(_disk_img)
 
-    _kernel_append: 'str | None' = None
-    if full:
-        # Operator NOTE: this requires preseed.cfg to be tuned for
-        # fully-unattended partman + base-install.  See preseed.cfg
-        # header for the required answers.  Until that's done, --full
-        # will time out at the first un-answered prompt.
-        _kernel_append = (
-            'auto=true priority=critical console=ttyS0,115200n8 '
-            'preseed/file=/cdrom/preseed.cfg'   # uses the in-ISO preseed
-            # OR fetch ours via http://10.0.2.2:8080/preseed.cfg —
-            # see _serve_preseed_http below (not yet wired).
-        )
+    # mode='direct' extracts the kernel+initrd and boots them with
+    # console=ttyS0 so serial capture works headlessly (and the preseed
+    # cmdline applies in --full).  bios/efi go through the firmware/GRUB path;
+    # efi needs a per-run writable OVMF VARS copy.
+    _kernel: 'str | None' = None
+    _initrd: 'str | None' = None
+    _ovmf_vars: 'str | None' = None
+    _append: 'str | None' = None
+    if mode == 'direct':
+        _kernel, _initrd = extract_boot_images(iso_path, output_dir)
+        _append = 'console=ttyS0,115200n8 ramdisk_size=131072'
+        if full:
+            # The preseed is baked into the installer initrd at /preseed.cfg
+            # (matches the ISO's own "Install Asgard" GRUB entry).
+            _append = ('auto=true priority=critical preseed/file=/preseed.cfg '
+                       + _append)
+        _append += ' ---'
+    elif mode == 'efi':
+        _, _vars_tpl = _find_ovmf()
+        if _vars_tpl:
+            _ovmf_vars = os.path.join(output_dir, 'OVMF_VARS.fd')
+            shutil.copyfile(_vars_tpl, _ovmf_vars)
 
     _cmd = build_qemu_cmd(
         iso_path, _serial_log, _disk_img,
-        mode=mode, mem_mb=mem_mb, kernel_append=_kernel_append,
+        mode=mode, mem_mb=mem_mb,
+        kernel=_kernel, initrd=_initrd,
+        kernel_append=_append, ovmf_vars=_ovmf_vars,
     )
     print(f'smoke: spawning QEMU\n  argv: {" ".join(_cmd)}\n  serial: {_serial_log}')
     _proc = subprocess.Popen(
@@ -204,9 +274,10 @@ def run_smoke(
     #   (a) QEMU exits (clean install + auto-shutdown, or crash)
     #   (b) timeout fires (no completion signal — assume hung)
     _completion_signal = (
-        # Stock d-i emits this near the end of finish-install.d
-        # — match in --full mode to short-circuit the timeout.
-        'Installation complete' if full else None
+        # Our installer reaches finish-install.d/20final-message at the end;
+        # main-menu logs the finish-install step to syslog (→ serial), so this
+        # short-circuits the --full timeout once the install is wrapping up.
+        'finish-install' if full else None
     )
     _start = time.time()
     _exit_via_signal = False
@@ -276,6 +347,48 @@ def run_smoke(
     return 1 if known_bad_patterns.has_fatal(_findings) else 0
 
 
+def _self_test() -> int:
+    """Validate the pure argv / firmware logic WITHOUT spawning QEMU — a fast
+    sanity check runnable anywhere qemu-system-x86_64 is present.  Returns 0 on
+    success, 1 on an assertion failure."""
+    import tempfile
+    try:
+        with tempfile.TemporaryDirectory() as _d:
+            _iso = os.path.join(_d, 'x.iso')
+            open(_iso, 'w').close()
+            _ser = os.path.join(_d, 's.log')
+            _disk = os.path.join(_d, 'd.qcow2')
+            # direct: -kernel/-initrd/-append + -cdrom, NO -boot d
+            _c = build_qemu_cmd(_iso, _ser, _disk, mode='direct',
+                                kernel='/k', initrd='/i',
+                                kernel_append='console=ttyS0')
+            assert '-kernel' in _c and '/k' in _c, _c
+            assert '-initrd' in _c and '-append' in _c, _c
+            assert '-cdrom' in _c and '-boot' not in _c, _c
+            # bios: -cdrom + -boot d, no -kernel
+            _c = build_qemu_cmd(_iso, _ser, _disk, mode='bios')
+            assert '-cdrom' in _c and _c[_c.index('-boot') + 1] == 'd', _c
+            assert '-kernel' not in _c, _c
+            # efi: pflash unit0 (code, ro) + unit1 (vars, rw) — if OVMF present
+            _code, _vars = _find_ovmf()
+            if _code and _vars:
+                _vcopy = os.path.join(_d, 'VARS.fd')
+                shutil.copyfile(_vars, _vcopy)
+                _c = build_qemu_cmd(_iso, _ser, _disk, mode='efi',
+                                    ovmf_vars=_vcopy)
+                _j = ' '.join(_c)
+                assert 'if=pflash' in _j and 'unit=0' in _j and 'unit=1' in _j, _c
+                assert 'readonly=on' in _j and _vcopy in _j, _c
+                print(f'self-test: efi argv OK (OVMF: {_code})')
+            else:
+                print('self-test: OVMF not found — skipping efi argv check')
+            print('self-test: build_qemu_cmd argv shapes OK')
+        return 0
+    except AssertionError as _e:
+        print(f'self-test FAILED: {_e}', file=sys.stderr)
+        return 1
+
+
 def main() -> 'None':
     _ap = argparse.ArgumentParser(
         prog='installer-smoke',
@@ -283,11 +396,18 @@ def main() -> 'None':
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent(__doc__ or '').rstrip(),
     )
-    _ap.add_argument('--iso', required=True, help='Path to installer ISO')
+    _ap.add_argument('--iso', help='Path to installer ISO (required unless '
+                                   '--self-test)')
+    _ap.add_argument('--self-test', action='store_true',
+                     help='Validate the argv/firmware logic without QEMU + exit')
     _ap.add_argument('--output-dir', default='/tmp/installer-smoke',
                      help='Where to write serial log + disk image (default: /tmp/installer-smoke)')
-    _ap.add_argument('--mode', choices=('bios', 'efi'), default='bios',
-                     help='Firmware mode (default: bios)')
+    _ap.add_argument('--mode', choices=('direct', 'bios', 'efi'),
+                     default='direct',
+                     help='direct = boot the extracted installer kernel+initrd '
+                          '(reliable headless serial; installer-runtime smoke). '
+                          'bios/efi = boot the ISO via firmware/GRUB (firmware-'
+                          'boot smoke; efi needs OVMF).  Default: direct')
     _ap.add_argument('--timeout', type=int, default=None,
                      help=f'Max seconds before forcing QEMU exit '
                           f'(default: {_DEFAULT_TIMEOUT_QUICK} for --quick, '
@@ -301,6 +421,11 @@ def main() -> 'None':
                     help='Drive unattended install via preseed; '
                          'requires preseed.cfg to be tuned (see file header)')
     args = _ap.parse_args()
+
+    if args.self_test:
+        sys.exit(_self_test())
+    if not args.iso:
+        _ap.error('--iso is required (unless --self-test)')
 
     _timeout = args.timeout
     if _timeout is None:
