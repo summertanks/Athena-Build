@@ -23436,11 +23436,13 @@ def test_orchestrator_ssh_key_threads_into_argv():
     ssh/scp call honours the per-remote key; _has_image builds the keyed argv."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import remote_orchestrate as _ro
+    _akn = ['-o', 'StrictHostKeyChecking=accept-new']
     assert _ro._ssh_base('u@h', '/k') == [
-        'ssh', '-o', 'BatchMode=yes', '-i', '/k', 'u@h']
-    assert _ro._ssh_base('u@h', None) == ['ssh', '-o', 'BatchMode=yes', 'u@h']
-    assert _ro._scp_base('/k') == ['scp', '-q', '-i', '/k']
-    assert _ro._scp_base(None) == ['scp', '-q']
+        'ssh', '-o', 'BatchMode=yes', *_akn, '-i', '/k', 'u@h']
+    assert _ro._ssh_base('u@h', None) == [
+        'ssh', '-o', 'BatchMode=yes', *_akn, 'u@h']
+    assert _ro._scp_base('/k') == ['scp', '-q', *_akn, '-i', '/k']
+    assert _ro._scp_base(None) == ['scp', '-q', *_akn]
     # _has_image(remote) routes through _ssh_base → the key reaches the argv.
     import subprocess as _sp
     _seen = {}
