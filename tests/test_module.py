@@ -23324,17 +23324,17 @@ def test_remotebuild_command_wired():
         _cs = _f.read()
     assert 'def cmd_source_remotebuild' in _cs
     # The per-package remote build body lives in _remotebuild_one_source (the
-    # fan-out worker).  Its build STREAM (run_remote) goes to the per-package
-    # log file, NOT the console tab (N concurrent workers would interleave) —
-    # the run_remote call must use the file writer, not console.print.
+    # fan-out worker).  Its build STREAM (run_remote_agent — the REMOTE-API
+    # transport) goes to the per-package log file, NOT the console tab (N
+    # concurrent workers would interleave) — the call must use the file writer.
     _rb = _cs[_cs.index('def _remotebuild_one_source'):]
     _rb = _rb[:_rb.index('\n    def ', 1)]
-    _after = _rb[_rb.index('run_remote('):]
-    assert 'log=_to_log' in _after[:300]
+    _after = _rb[_rb.index('run_remote_agent('):]
+    assert 'log=_to_log' in _after[:400]
     assert 'log=console.print' not in _after     # build stream not to console
     assert 'buildlog_path' in _rb and '_to_log' in _rb   # → log/build/<pkg>
-    # The per-remote SSH key threads through to run_remote (vs ambient ~/.ssh).
-    assert 'ssh_key=' in _after[:300]
+    # The per-remote SSH key + API token thread through to the agent transport.
+    assert 'ssh_key=' in _after[:400] and 'token=' in _after[:400]
     with open(os.path.join(_ROOT, 'scripts', 'utils.py')) as _f:
         assert "'RemoteBuildHost'" in _f.read()
 
