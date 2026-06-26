@@ -13,9 +13,18 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
+import time
+import urllib.error
+import urllib.request
 
 import remote_build   # for the shared RESULT_MARKER (single source)
+
+# REMOTE-API poll cadence + how long with NO successful /status before we give
+# up on a (presumed-dead) agent and re-queue the build elsewhere.
+AGENT_POLL_INTERVAL = 2.0
+AGENT_DEAD_GRACE_SEC = 300.0
 
 RESULT_MARKER = remote_build.RESULT_MARKER
 
@@ -57,11 +66,12 @@ def _scp_base(ssh_key: 'str | None' = None) -> 'list[str]':
 
 def stage_bundle(bundle: str, *, dockerfile: str, source_files: 'list[str]',
                  patch_dir: str, recipe: dict, build_cpus, build_memory,
-                 remote_build_py: str,
+                 remote_build_py: str, remote_agent_py: 'str | None' = None,
                  localmirror_dir: 'str | None' = None) -> None:
-    """Populate <bundle> with the everything remote_build.py needs:
-    Dockerfile, source/<pkg files>, patch/<*.patch>, remote_build.py, and
-    build.json (the params blob — image tag/args + cmd_str + caps).
+    """Populate <bundle> with everything the remote needs: Dockerfile,
+    source/<pkg files>, patch/<*.patch>, remote_build.py, the optional
+    remote_agent.py (REMOTE-API transport), and build.json (the params blob —
+    image tag/args + cmd_str + caps).
 
     `localmirror_dir` (set only when the recipe emits the file:///localmirror
     source) tells remote_build.py to bind-mount that on-remote mirror dir."""
@@ -69,6 +79,8 @@ def stage_bundle(bundle: str, *, dockerfile: str, source_files: 'list[str]',
     os.makedirs(os.path.join(bundle, 'patch'), exist_ok=True)
     shutil.copy(dockerfile, os.path.join(bundle, 'Dockerfile'))
     shutil.copy(remote_build_py, os.path.join(bundle, 'remote_build.py'))
+    if remote_agent_py:
+        shutil.copy(remote_agent_py, os.path.join(bundle, 'remote_agent.py'))
     for _f in source_files:
         shutil.copy(_f, os.path.join(bundle, 'source', os.path.basename(_f)))
     if patch_dir and os.path.isdir(patch_dir):
@@ -351,3 +363,230 @@ def run_remote(host: str, local_bundle: str, remote_dir: str,
     finally:
         subprocess.run(_ssh + [f'rm -rf {remote_dir}'],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _free_local_port() -> int:
+    """An OS-assigned free localhost port for the SSH tunnel's local end."""
+    _s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _s.bind(('127.0.0.1', 0))
+        return _s.getsockname()[1]
+    finally:
+        _s.close()
+
+
+def _agent_request(local_port: int, path: str, token: str,
+                   method: str = 'GET', timeout: float = 10.0):
+    """One token-authed HTTP request to the agent through the tunnel.  Returns
+    (status, body-bytes, headers-dict).  Module-level so tests can patch it."""
+    _req = urllib.request.Request(
+        f'http://127.0.0.1:{local_port}{path}', method=method)
+    _req.add_header('X-Athena-Token', token)
+    with urllib.request.urlopen(_req, timeout=timeout) as _r:
+        return _r.status, _r.read(), dict(_r.headers)
+
+
+class _AgentHandle:
+    """A register_proc handle whose ``.terminate()`` aborts the remote build +
+    tears the tunnel down — the fan-out scheduler's SIGINT path only calls
+    ``.terminate()`` on whatever it registered, so this duck-types a Popen."""
+
+    def __init__(self, abort_cb) -> None:
+        self._abort = abort_cb
+        self._done = False
+
+    def terminate(self) -> None:
+        if not self._done:
+            self._done = True
+            try:
+                self._abort()
+            except Exception:      # noqa: BLE001 — abort is strictly best-effort
+                pass
+
+    def kill(self) -> None:
+        self.terminate()
+
+    def poll(self):
+        return None
+
+    def wait(self, *a, **k) -> int:
+        return 0
+
+
+def _remote_container_name(remote_dir: str) -> str:
+    """The container name the agent will use (athena-build-<bundle basename>),
+    so the orchestrator can reap an orphan by name.  Mirrors
+    remote_agent.container_name_for over the SAME basename."""
+    import re
+    _base = os.path.basename(remote_dir.rstrip('/')) or 'build'
+    return 'athena-build-' + re.sub(r'[^A-Za-z0-9_.-]', '-', _base)
+
+
+def run_remote_agent(host: str, local_bundle: str, remote_dir: str,
+                     local_out: str, *, token: str,
+                     ssh_key: 'str | None' = None,
+                     remote_agent_py: 'str | None' = None,
+                     hang_secs: int = 1800,
+                     register_proc=None, log=print) -> 'tuple[int, list[str]]':
+    """REMOTE-API transport: ship the bundle + agent, start the agent DETACHED
+    on the remote, open an SSH tunnel to its localhost API, and POLL /status +
+    /logs until the build is terminal — then recover the .debs.  Unlike the
+    SSH-tail path the build survives orchestrator disconnects (the tunnel is
+    reopened and polling resumes from the last log offset), and a PROGRESS
+    watchdog on the remote (not a wall-clock timer) kills a wedged build.
+
+    Exit codes mirror run_remote: 10 (mkdir/start) / 11 (scp-up) / 12 (watchdog
+    timeout, agent-dead, or partial recovery) are TRANSPORT failures the
+    scheduler re-queues; a real build exit otherwise.  130 = aborted (SIGINT).
+    """
+    _ssh = _ssh_base(host, ssh_key)
+    _tunnel: 'subprocess.Popen | None' = None
+    _state: dict = {'local_port': None, 'aborted': False}
+
+    def _abort() -> None:
+        _state['aborted'] = True
+        _lp = _state['local_port']
+        if _lp is not None:
+            try:
+                _agent_request(_lp, '/abort', token, method='POST', timeout=5)
+            except Exception:      # noqa: BLE001
+                pass
+
+    if register_proc is not None:
+        register_proc(_AgentHandle(_abort))
+
+    def _open_tunnel(remote_port: int) -> 'tuple[subprocess.Popen, int]':
+        _lp = _free_local_port()
+        _argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes']
+        if ssh_key:
+            _argv += ['-i', ssh_key]
+        _argv += ['-N', '-L', f'127.0.0.1:{_lp}:127.0.0.1:{remote_port}', host]
+        return subprocess.Popen(_argv), _lp
+
+    try:
+        # 1. remote scratch dir
+        if subprocess.run(_ssh + [f'mkdir -p {remote_dir}']).returncode != 0:
+            log(f"remote: cannot create {remote_dir} on {host}")
+            return (10, [])
+        # 2. drop the token into the bundle (0600) + ship everything
+        _tokfile = os.path.join(local_bundle, 'agent.token')
+        with open(_tokfile, 'w') as _tf:
+            _tf.write(token)
+        os.chmod(_tokfile, 0o600)
+        if remote_agent_py:
+            shutil.copy(remote_agent_py,
+                        os.path.join(local_bundle, 'remote_agent.py'))
+        _items = [os.path.join(local_bundle, _e)
+                  for _e in sorted(os.listdir(local_bundle))]
+        if subprocess.run(_scp_base(ssh_key) + ['-r', *_items,
+                          f'{host}:{remote_dir}/']).returncode != 0:
+            log("remote: scp of bundle failed")
+            return (11, [])
+        # 3. start the agent DETACHED (survives this ssh session closing)
+        _start = (
+            f'cd {remote_dir} && nohup python3 remote_agent.py --bundle . '
+            f'--token-file agent.token --port 0 --hang-secs {int(hang_secs)} '
+            f'< /dev/null > agent.out 2>&1 & echo AGENT_STARTED')
+        if subprocess.run(_ssh + [_start]).returncode != 0:
+            log("remote: agent failed to start")
+            return (10, [])
+        # 4. learn the agent's chosen localhost port
+        _rport = None
+        for _ in range(120):
+            _r = subprocess.run(
+                _ssh + [f'cat {remote_dir}/agent.port 2>/dev/null'],
+                capture_output=True, text=True)
+            _v = (_r.stdout or '').strip()
+            if _v.isdigit():
+                _rport = int(_v)
+                break
+            if _state['aborted']:
+                return (130, [])
+            time.sleep(0.5)
+        if _rport is None:
+            log("remote: agent did not publish its port")
+            return (10, [])
+        # 5. tunnel + 6. poll
+        _tunnel, _state['local_port'] = _open_tunnel(_rport)
+        _log_off = 0
+        _status: dict = {}
+        _last_ok = time.time()
+        while True:
+            if _state['aborted']:
+                break
+            if _tunnel.poll() is not None:          # tunnel collapsed — reopen
+                _tunnel, _state['local_port'] = _open_tunnel(_rport)
+            _lp = _state['local_port']
+            try:
+                _, _body, _ = _agent_request(_lp, '/status', token, timeout=10)
+                _status = json.loads(_body)
+                _last_ok = time.time()
+            except (urllib.error.URLError, OSError, ValueError):
+                if time.time() - _last_ok > AGENT_DEAD_GRACE_SEC:
+                    log(f"remote: agent on {host} unreachable for "
+                        f"{int(AGENT_DEAD_GRACE_SEC)}s — re-queueing")
+                    return (12, [])
+                time.sleep(AGENT_POLL_INTERVAL)
+                continue
+            try:
+                _, _ldata, _lhdr = _agent_request(
+                    _lp, f'/logs?from={_log_off}', token, timeout=10)
+                if _ldata:
+                    for _line in _ldata.decode('utf-8', 'replace').splitlines():
+                        log(_line)
+                    _log_off = int(_lhdr.get('X-Log-Next', _log_off))
+            except (urllib.error.URLError, OSError, ValueError):
+                pass
+            if _status.get('phase') in ('done', 'failed', 'timeout', 'aborted'):
+                break
+            time.sleep(AGENT_POLL_INTERVAL)
+        # 7. terminal handling
+        _phase = _status.get('phase')
+        _outputs = list(_status.get('outputs') or [])
+        if _state['aborted'] or _phase == 'aborted':
+            return (130, [])
+        if _phase == 'timeout':
+            log(f"remote: watchdog killed a hung build on {host} "
+                "(no progress) — re-queueing")
+            return (12, [])
+        if _outputs:
+            os.makedirs(local_out, exist_ok=True)
+            subprocess.run(_scp_base(ssh_key) + [
+                f'{host}:{remote_dir}/out/*.deb', f'{local_out}/'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(_scp_base(ssh_key) + [
+                f'{host}:{remote_dir}/out/*.udeb', f'{local_out}/'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _recovered = (set(os.listdir(local_out))
+                          if os.path.isdir(local_out) else set())
+            _missing = [_o for _o in _outputs
+                        if os.path.basename(_o) not in _recovered]
+            if _missing:
+                log(f"remote: scp recovered {len(_outputs) - len(_missing)}/"
+                    f"{len(_outputs)} artifact(s) from {host}; missing "
+                    f"{sorted(os.path.basename(_m) for _m in _missing)} — "
+                    "transport failure, re-queueing")
+                return (12, [])
+        _exit = _status.get('exit_code')
+        return (int(_exit) if _exit is not None else 1, _outputs)
+    finally:
+        _lp = _state['local_port']
+        if _lp is not None:
+            try:
+                _agent_request(_lp, '/shutdown', token, method='POST', timeout=5)
+            except Exception:      # noqa: BLE001
+                pass
+        if _tunnel is not None:
+            try:
+                _tunnel.terminate()
+                _tunnel.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                try:
+                    _tunnel.kill()
+                except OSError:
+                    pass
+        # reap an orphaned container by name + wipe the scratch dir
+        subprocess.run(
+            _ssh + [f'docker rm -f {_remote_container_name(remote_dir)} '
+                    f'2>/dev/null; rm -rf {remote_dir}'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
