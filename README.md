@@ -5,12 +5,13 @@
 # Athena-Build
 
 ## Features
-- **A whole derivative, built from source** — resolves the full dependency closure of your package list and compiles every package from upstream Debian source inside reproducible Docker build containers (parallel, with heavy-package serialisation).
-- **Three boot surfaces** — a live ISO, a from-source Debian-installer ISO, and a pre-installed qcow2 disk image, each composed from its own dependency closure.
-- **Patch at every layer** — source, pre-install, and post-install patching, plus a fork system with an identity collision gate that fails the build rather than let an upstream version silently shadow your fork.
-- **Reproducible and signed** — inputs pinned to `snapshot.debian.org`, GPG-signed apt metadata (`Release`/`InRelease`), and a CycloneDX SBOM per build.
-- **Federated publishing** — push signed, append-only updates from your own apt mirror that multiple builders can extend (Ed25519-signed claims + a GPG-signed coord-head); published bytes are immutable.
-- **One interface, fully transparent** — a curses TUI (with headless and HTTP-API backends) drives the entire pipeline, and every step is logged and inspectable.
+- **Custom Linux Distro** - End to end from source to repo publishing
+- **A whole derivative, built from source** — resolves the full dependency closure of your custom package list and compiles every package from upstream Debian source.
+- **Multiple image surfaces** — a live ISO, a from-source installer ISO, and a pre-installed qcow2 disk image.
+- **Patch at every layer** — fine control on source, pre-install, and post-install patching, plus a fork system with an identity collision gate.
+- **Reproducible and signed** — GPG-signed apt metadata (`Release`/`InRelease`) for repository.
+- **Federated publishing** — push signed, append-only updates from your own apt mirror that multiple builders can extend.
+- **One interface, fully transparent** — a curses TUI (with headless and HTTP-API backends) drives the entire pipeline.
 
 ## Introduction
 Athena Build system is (trying to be) a (mostly) hands off 'build system' to build and install custom Debian Linux distribution from source (the catch). The distinction is that  sources are built rather than using the prepared packages. The differential here being toolchain system that you can derive a full fledged independent custom linux distro from the upstream debian that you can support with your own repo. Post this build the running system should look to your own repository, not Debian's, for updates — runtime independence is the aim, even if the build itself still draws its source from upstream Debian. 
