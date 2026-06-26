@@ -825,10 +825,14 @@ def remote_publish(
             builder_id=builder_id,
         )
         if _lock_proc is None:
-            _holder = _transport.remote_flock_holder(
+            _st = _transport.remote_flock_lock_status(
                 ssh_host=ssh_host, lock_path=flock_path, ssh_key=ssh_key)
+            _holder = _st.get('holder') if _st else None
             _by = (f" — builder '{_holder}' is publishing" if _holder
                    else " — held by a peer, or SSH failed")
+            if _st and _transport.lock_is_stale(_st):
+                _by += (f" — lock appears STALE (heartbeat {_st.get('age_sec')}s "
+                        "old); run `mirror unlock` to break it")
             return False, (
                 f"could not acquire remote flock on {ssh_host} "
                 f"({flock_path}){_by}; retry shortly")
@@ -1618,10 +1622,14 @@ def revoke_builder(
             timeout_sec=flock_timeout, ssh_key=ssh_key,
             builder_id=our_builder_id)
         if _lock_proc is None:
-            _holder = _transport.remote_flock_holder(
+            _st = _transport.remote_flock_lock_status(
                 ssh_host=ssh_host, lock_path=flock_path, ssh_key=ssh_key)
+            _holder = _st.get('holder') if _st else None
             _by = (f" — builder '{_holder}' is publishing" if _holder
                    else " — held by a peer, or SSH failed")
+            if _st and _transport.lock_is_stale(_st):
+                _by += (f" — lock appears STALE (heartbeat {_st.get('age_sec')}s "
+                        "old); run `mirror unlock` to break it")
             return False, f"could not acquire remote flock{_by}; retry shortly"
     try:
         _status("fetching remote coord tree (rsync)")

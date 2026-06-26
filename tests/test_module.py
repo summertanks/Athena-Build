@@ -20435,6 +20435,97 @@ def test_transport_remote_sha256_parses_digest_and_guards():
         _tr.subprocess = _orig
 
 
+def test_fed04_flock_scripts_shape():
+    """FED-04: the held-shell records builder-id + PID sidecars and a
+    heartbeat; the status probe checks held-ness + heartbeat age; the break
+    script kills the holder + clears sidecars."""
+    import coord.transport as _tr
+    _lock = '/var/lock/repo-coord.lock'
+    _hold = _tr._flock_hold_script(_lock, 'BS1', heartbeat_sec=15)
+    assert f'echo BS1 > {_lock}.holder' in _hold
+    assert f'echo $$ > {_lock}.pid' in _hold
+    assert 'sleep 15' in _hold and f'touch {_lock}.holder' in _hold
+    assert 'COORD_LOCK_ACQUIRED' in _hold and 'cat;' in _hold
+    assert f'rm -f {_lock}.holder {_lock}.pid' in _hold
+
+    _status = _tr._flock_status_script(_lock)
+    assert f'flock -n {_lock} -c true' in _status
+    assert 'HELD=' in _status and 'AGE=' in _status
+
+    _break = _tr._flock_break_script(_lock)
+    assert 'kill -9' in _break and 'fuser -k' in _break
+    assert f'rm -f {_lock}.holder {_lock}.pid' in _break
+    assert 'COORD_LOCK_BROKEN' in _break
+
+
+def test_fed04_parse_flock_status_and_staleness():
+    """FED-04: status parsing + the stale decision — held + old heartbeat is
+    stale; held + fresh heartbeat (slow-but-live publish) is NOT; unheld or
+    unparseable never is."""
+    import coord.transport as _tr
+    _held_old = _tr._parse_flock_status("HELD=1\nHOLDER=BS2\nPID=12345\nAGE=2460\n")
+    assert _held_old == {'held': True, 'holder': 'BS2',
+                         'pid': '12345', 'age_sec': 2460}
+    assert _tr.lock_is_stale(_held_old) is True
+    # fresh heartbeat → live, not stale
+    assert _tr.lock_is_stale(
+        _tr._parse_flock_status("HELD=1\nHOLDER=BS2\nPID=9\nAGE=20\n")) is False
+    # not held → never stale; empty sidecars parse to None
+    _free = _tr._parse_flock_status("HELD=0\nHOLDER=\nPID=\nAGE=999999\n")
+    assert _free['held'] is False and _free['holder'] is None
+    assert _tr.lock_is_stale(_free) is False
+    # missing/garbage AGE → not stale, no crash
+    assert _tr.lock_is_stale(
+        _tr._parse_flock_status("HELD=1\nHOLDER=BS2\n")) is False
+    assert _tr.lock_is_stale(None) is False
+
+
+def test_fed04_remote_flock_lock_status_and_break():
+    """FED-04: lock_status parses a held+stale probe; break succeeds on the
+    BROKEN token and surfaces the error otherwise."""
+    import types as _types
+    import coord.transport as _tr
+    _orig = _tr.subprocess
+    try:
+        _tr.subprocess = _types.SimpleNamespace(
+            run=lambda argv, **k: _types.SimpleNamespace(
+                returncode=0, stdout="HELD=1\nHOLDER=BS2\nPID=42\nAGE=3000\n",
+                stderr=''),
+            SubprocessError=Exception)
+        _st = _tr.remote_flock_lock_status(
+            ssh_host='u@h', lock_path='/var/lock/repo-coord.lock', ssh_key='k')
+        assert _st['held'] and _st['holder'] == 'BS2' and _st['pid'] == '42'
+        assert _tr.lock_is_stale(_st)
+        # break success
+        _tr.subprocess.run = lambda argv, **k: _types.SimpleNamespace(
+            returncode=0, stdout='COORD_LOCK_BROKEN\n', stderr='')
+        _ok, _detail = _tr.remote_flock_break(
+            ssh_host='u@h', lock_path='/var/lock/repo-coord.lock')
+        assert _ok, _detail
+        # break failure → surfaces stderr
+        _tr.subprocess.run = lambda argv, **k: _types.SimpleNamespace(
+            returncode=1, stdout='', stderr='ssh: connect failed')
+        _ok2, _detail2 = _tr.remote_flock_break(ssh_host='u@h', lock_path='/x')
+        assert not _ok2 and 'connect failed' in _detail2
+    finally:
+        _tr.subprocess = _orig
+
+
+def test_fed04_unlock_decision_policy():
+    """FED-04: `mirror unlock` decision policy — probe-fail, free lock,
+    stale→break, live→refuse, and --force breaks a live lock too."""
+    from commands.cmd_mirror import _unlock_decision
+    assert _unlock_decision(None, False, False)[0] == 'probe-failed'
+    assert _unlock_decision({'held': False}, False, False)[0] == 'free'
+    _held = {'held': True, 'holder': 'BS2', 'age_sec': 3000}
+    # held + stale, no force → break
+    assert _unlock_decision(_held, False, True)[0] == 'break'
+    # held + live (fresh heartbeat), no force → refuse
+    assert _unlock_decision(_held, False, False)[0] == 'refuse-live'
+    # --force breaks regardless of staleness
+    assert _unlock_decision(_held, True, False)[0] == 'break'
+
+
 def test_transport_list_remote_debs_parses_and_guards():
     """list_remote_debs runs `find dists … *.deb/*.udeb` on the pool host and
     returns the relative paths as a set; None on bad spec / non-zero rc."""
@@ -40066,6 +40157,10 @@ def main() -> int:
         test_mirror_publish_reindexes_stale_local_index,
         test_push_dist_tree_excludes_pool_artifacts,
         test_transport_remote_sha256_parses_digest_and_guards,
+        test_fed04_flock_scripts_shape,
+        test_fed04_parse_flock_status_and_staleness,
+        test_fed04_remote_flock_lock_status_and_break,
+        test_fed04_unlock_decision_policy,
         test_transport_list_remote_debs_parses_and_guards,
         test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
