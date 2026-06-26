@@ -20585,6 +20585,32 @@ def test_fed03_remote_pubkey_state_local_and_ssh():
         _tr.subprocess = _orig
 
 
+def test_mat10c_bump_decision_parity_triggers():
+    """MAT-10(c): the +asg stamp decision (DELTA or LINEAGE) is duplicated in
+    the real-build path (buildcontainer._normalize_built_artifacts) and the
+    virtual-build path (virtual_build.synthesize_source_binaries) — documented
+    as aligned but with no test guarding against future DRIFT.
+
+    Structural parity canary: BOTH decisions must reference the SAME two
+    triggers — DELTA (`was_patched` + `strip_nmu_suffix`) and LINEAGE
+    (`pristine_base` + `parse_asg_suffix` over the ledger).  A future edit that
+    drops a trigger from one path fails here, forcing a re-sync — or the
+    deferred consolidation into one shared predicate.  (Source-level by
+    necessity: the inline-duplicated decision can't be behaviourally
+    parity-tested without extracting it first.)"""
+    import inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer as _bc
+    import virtual_build as _vb
+    _real = inspect.getsource(_bc.BuildContainer._normalize_built_artifacts)
+    _virt = inspect.getsource(_vb.synthesize_source_binaries)
+    for _src, _name in ((_real, 'real-build'), (_virt, 'virtual-build')):
+        assert 'was_patched' in _src and 'strip_nmu_suffix' in _src, \
+            f'{_name}: DELTA trigger (was_patched/strip_nmu_suffix) missing'
+        assert 'pristine_base' in _src and 'parse_asg_suffix' in _src, \
+            f'{_name}: LINEAGE trigger (pristine_base/parse_asg_suffix) missing'
+
+
 def test_fed01_ledger_stranded_claims_detector():
     """FED-01: detect live PEER claims the fetched closure ledger OMITS
     (stranded by a stale / closure-limited ledger).  Ledger-covered files and
@@ -40496,6 +40522,7 @@ def main() -> int:
         test_fed03d_builder_bindings_and_enforcement,
         test_fed03d_new_coord_head_carries_builders,
         test_fed01_ledger_stranded_claims_detector,
+        test_mat10c_bump_decision_parity_triggers,
         test_transport_list_remote_debs_parses_and_guards,
         test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
