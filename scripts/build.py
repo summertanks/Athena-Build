@@ -245,6 +245,11 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         # off: the predicate would otherwise flag every NMU-suffixed
         # upstream source on every cmd_source_build call.
         self._in_update_build: bool = False
+        # MAT-10(b): these were only ever assigned lazily inside the source /
+        # tunnel command paths, so any consumer reading them before one of
+        # those ran hit a latent AttributeError.  Initialise them here.
+        self.selected_srcs: dict = {}
+        self.download_size: int = 0
 
     @staticmethod
     def _read_pkg_list(path: str, already_selected: set) -> list:
