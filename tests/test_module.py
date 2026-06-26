@@ -2460,7 +2460,7 @@ def test_sta37_build_chroot_gates_on_incomplete_set():
         bs._setup_chroot_env = lambda: None
         bs._init_dpkg_database = lambda: None
         bs._mount_chroot_fs = lambda: None
-        bs._umount_chroot_fs = lambda: None
+        bs._umount_chroot_fs = lambda: True
         bs._ensure_initramfs = lambda: None
         bs.post_install = lambda: None
         bs.generate_system_configs = lambda debug=False: None
@@ -2528,7 +2528,7 @@ def test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds():
     bs._setup_chroot_env = lambda: None
     bs._init_dpkg_database = lambda: None
     bs._mount_chroot_fs = lambda: None
-    bs._umount_chroot_fs = lambda: None
+    bs._umount_chroot_fs = lambda: True
     bs._ensure_initramfs = lambda: None
     bs.post_install = lambda: None
     bs.generate_system_configs = lambda debug=False: None
