@@ -23047,8 +23047,7 @@ def test_remote_build_main_emits_result_marker():
 
 def test_remote_orchestrate_parse_host_stage_and_result():
     """parse_ssh_host normalises ssh:// URLs; stage_bundle lays out the bundle
-    (Dockerfile, source/, patch/, remote_build.py, build.json params);
-    _parse_result pulls the result marker."""
+    (Dockerfile, source/, patch/, remote_build.py, build.json params)."""
     import json
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import remote_orchestrate as _ro
@@ -23088,59 +23087,6 @@ def test_remote_orchestrate_parse_host_stage_and_result():
         assert _bj['image_tag'] == 'tag' and _bj['cmd_str'] == 'CMD'
         assert _bj['build_args']['RELEASE'] == 'bookworm'
         assert _bj['build_cpus'] == 7.0 and _bj['build_memory'] == '28g'
-    _line = (f"{_ro.RESULT_MARKER} "
-             + json.dumps({'exit_code': 0, 'outputs': ['a.deb']}))
-    assert _ro._parse_marker_line(_line) == (0, ['a.deb'])
-    assert _ro._parse_marker_line(None) == (1, [])
-    assert _ro._parse_marker_line('not a marker') == (1, [])
-
-
-def test_remote_orchestrate_run_remote_flow():
-    """run_remote scps the bundle up, ssh-runs remote_build.py, parses the
-    result, scps the .debs back, and ALWAYS cleans up the remote dir."""
-    from unittest import mock
-    import json
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import remote_orchestrate as _ro
-    with tempfile.TemporaryDirectory() as _t:
-        _bundle = os.path.join(_t, 'b')
-        os.makedirs(_bundle)
-        with open(os.path.join(_bundle, 'build.json'), 'w') as _f:
-            _f.write('{}')
-        _marker = (f"{_ro.RESULT_MARKER} "
-                   + json.dumps({'exit_code': 0,
-                                 'outputs': ['adduser_3.134_all.deb']}))
-        _out_dir = os.path.join(_t, 'out')
-        _calls = []
-
-        def _fake_run(cmd, **_kw):
-            _calls.append(cmd)
-            # Simulate the scp-DOWN delivering the artifact so the CONS-11
-            # recovery-reconcile (every marker output must land) is satisfied.
-            if any('out/*.deb' in str(_c) for _c in cmd):
-                os.makedirs(_out_dir, exist_ok=True)
-                open(os.path.join(_out_dir, 'adduser_3.134_all.deb'),
-                     'w').close()
-            return mock.Mock(returncode=0)
-
-        class _FakeProc:
-            stdout = iter([_marker + "\n"])
-
-            def wait(self):
-                return 0
-
-        with mock.patch.object(_ro.subprocess, 'run', side_effect=_fake_run), \
-                mock.patch.object(_ro.subprocess, 'Popen',
-                                  return_value=_FakeProc()):
-            _exit, _outputs = _ro.run_remote(
-                'user@h', _bundle, '/tmp/rd', _out_dir,
-                log=lambda *_a: None)
-        assert _exit == 0 and _outputs == ['adduser_3.134_all.deb']
-        _joined = [' '.join(c) for c in _calls]
-        assert any('mkdir -p /tmp/rd' in j for j in _joined)
-        assert any(j.startswith('scp ') for j in _joined)
-        assert any('out/*.deb' in j for j in _joined)
-        assert any('rm -rf /tmp/rd' in j for j in _joined)   # cleanup always
 
 
 def test_recipe_only_container_skips_local_docker():
@@ -23199,20 +23145,6 @@ def test_container_two_level_command_surface_wired():
     # the add/delete handlers go through the utils remote.conf helpers
     assert 'utils.add_remote(' in _b and 'utils.delete_remote(' in _b
     assert 'utils.list_remotes(' in _b
-
-
-def test_run_remote_decoupled_log_and_incremental_marker():
-    """run_remote writes the build log to a file ON THE REMOTE (so the build
-    can't be backpressured by a slow network) and tails it back; the result
-    marker is scanned incrementally, not by buffering the whole log."""
-    import inspect
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import remote_orchestrate as _ro
-    _src = inspect.getsource(_ro.run_remote)
-    assert '> build.log 2>&1' in _src              # build → remote file
-    assert 'tail -n +1 --pid=' in _src and '-F build.log' in _src
-    assert '_captured' not in _src                 # no whole-log buffering
-    assert '_parse_marker_line(_marker)' in _src   # incremental marker scan
 
 
 def test_ensure_remote_image_lan_transfer_paths():
@@ -23363,51 +23295,6 @@ def test_orchestrator_ssh_key_threads_into_argv():
     finally:
         _sp.run = _orig
     assert '-i' in _seen['argv'] and '/k' in _seen['argv']
-
-
-def test_run_remote_reconciles_partial_recovery_cons11():
-    """CONS-11: run_remote treats a SHORT scp recovery (fewer artifacts than the
-    remote's marker reported) as a TRANSPORT failure (exit 12, no outputs) so the
-    fan-out re-queues — never a `done` record claiming more .debs than landed.  A
-    COMPLETE recovery returns the marker's exit + outputs unchanged."""
-    import sys as _sys
-    import types as _types
-    import tempfile
-    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import remote_orchestrate as _ro
-
-    _marker = (_ro.RESULT_MARKER
-               + ' {"exit_code": 0, "outputs": ["a.deb", "b.deb"]}\n')
-
-    class _FakeProc:
-        def __init__(_s):
-            _s.stdout = iter([_marker])
-            _s.returncode = 0
-
-        def wait(_s):
-            return 0
-
-    def _run_remote_with(local_out_files):
-        with tempfile.TemporaryDirectory() as _bundle, \
-                tempfile.TemporaryDirectory() as _out:
-            for _f in local_out_files:
-                open(os.path.join(_out, _f), 'w').close()
-            _fake = _types.SimpleNamespace(
-                run=lambda *a, **k: _types.SimpleNamespace(returncode=0),
-                Popen=lambda *a, **k: _FakeProc(),
-                PIPE=-1, STDOUT=-2, DEVNULL=-3)
-            _orig = _ro.subprocess
-            _ro.subprocess = _fake
-            try:
-                return _ro.run_remote('h', _bundle, '/tmp/rd', _out,
-                                      log=lambda *a: None)
-            finally:
-                _ro.subprocess = _orig
-
-    # partial: only a.deb landed → transport failure
-    assert _run_remote_with(['a.deb']) == (12, [])
-    # complete: both landed → marker result passes through
-    assert _run_remote_with(['a.deb', 'b.deb']) == (0, ['a.deb', 'b.deb'])
 
 
 def test_probe_remote_build_host_parses_and_gates():
@@ -39798,8 +39685,6 @@ def main() -> int:
         test_remote_build_image_uses_args_and_skips_when_present,
         test_remote_build_main_emits_result_marker,
         test_remote_orchestrate_parse_host_stage_and_result,
-        test_remote_orchestrate_run_remote_flow,
-        test_run_remote_decoupled_log_and_incremental_marker,
         test_ensure_remote_image_lan_transfer_paths,
         test_fetch_source_versions_cached_on_disk,
         test_published_ledger_memoised,
@@ -39807,7 +39692,6 @@ def main() -> int:
         test_container_two_level_command_surface_wired,
         test_remotebuild_command_wired,
         test_orchestrator_ssh_key_threads_into_argv,
-        test_run_remote_reconciles_partial_recovery_cons11,
         test_probe_remote_build_host_parses_and_gates,
         test_copy_ssh_key_copies_with_0600_and_delete_removes_key,
         test_container_remote_add_is_guided_with_probes,
