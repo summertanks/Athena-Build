@@ -23,6 +23,7 @@ Signatures are raw 64 bytes (Ed25519 fixed-size); hex-encoded for
 embedding in the JSONL `sig` field (128 hex chars).
 """
 
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -232,3 +233,91 @@ def verify_claim_against_keyring(
     if _pub is None:
         return False
     return verify_claim(claim, _pub)
+
+
+# ──────────────── FED-03 D: tier-1-signed builder bindings ────────────────
+# A builder's id→pubkey binding is authenticated by recording sha256(pubkey)
+# in the coord-head's `builders` map, which is tier-1 GPG-signed + freshness-
+# checked as a whole.  A pubkey dropped onto the mirror by anyone with SSH
+# write but NO tier-1 key has no entry in that signed map, so its claims are
+# rejected.  (Caveat, accepted: the tier-1 key is shared across peers, so this
+# stops OUTSIDERS, not a malicious insider peer — see TODO FED-03.)
+
+
+def pubkey_sha256(pub_path: str) -> 'Optional[str]':
+    """sha256 hex of a pubkey FILE's bytes, or None if unreadable."""
+    try:
+        with open(pub_path, 'rb') as _fh:
+            return hashlib.sha256(_fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def build_builder_bindings(keyring: Dict[str, str]) -> Dict[str, str]:
+    """The signed binding map for a keyring: ``{builder_id: sha256(pubkey)}``.
+    Entries whose pubkey can't be read are skipped (never bound to None)."""
+    _out: Dict[str, str] = {}
+    for _bid, _path in keyring.items():
+        _sha = pubkey_sha256(_path)
+        if _sha:
+            _out[_bid] = _sha
+    return _out
+
+
+def enforce_bindings(
+    keyring: Dict[str, str], bindings: Dict[str, str],
+) -> 'Tuple[Dict[str, str], Dict[str, str]]':
+    """Strict FED-03 D filter: keep only keyring entries whose pubkey sha256
+    matches the head's signed binding.  Returns ``(verified, dropped)`` where
+    ``dropped`` is ``{builder_id: reason}`` (no signed binding, or a pubkey
+    that doesn't match the bound sha — i.e. a swapped/injected key)."""
+    _verified: Dict[str, str] = {}
+    _dropped: Dict[str, str] = {}
+    for _bid, _path in keyring.items():
+        _want = bindings.get(_bid)
+        if not _want:
+            _dropped[_bid] = 'no tier-1-signed binding in coord-head'
+            continue
+        _got = pubkey_sha256(_path)
+        if _got != _want:
+            _dropped[_bid] = (
+                f'pubkey does not match signed binding '
+                f'(head {_want[:12]}…, keyring {(_got or "unreadable")[:12]}…)')
+            continue
+        _verified[_bid] = _path
+    return _verified, _dropped
+
+
+def verified_keyring_from_head(
+    keyring: Dict[str, str], head: 'Optional[dict]',
+) -> 'Tuple[Dict[str, str], Dict[str, str], bool]':
+    """Apply the coord-head's signed builder bindings to a loaded keyring
+    (strict FED-03 D).  Returns ``(verified_keyring, dropped, has_bindings)``.
+
+    When the head carries no ``builders`` map (a pre-D head, not yet migrated)
+    EVERY entry is dropped and ``has_bindings`` is False, so the caller can
+    surface "owner must republish to migrate" rather than silently trusting
+    unauthenticated keys."""
+    _bindings = (head or {}).get('builders')
+    if not isinstance(_bindings, dict):
+        _reason = ('coord-head carries no signed builder bindings '
+                   '(republish to migrate — FED-03 D)')
+        return ({}, dict.fromkeys(keyring, _reason), False)
+    _verified, _dropped = enforce_bindings(keyring, _bindings)
+    return _verified, _dropped, True
+
+
+def binding_drop_summary(
+    dropped: Dict[str, str], has_bindings: bool,
+) -> str:
+    """One-line operator message for keys dropped by strict binding
+    enforcement, or '' when nothing was dropped.  Distinguishes a not-yet-
+    migrated head (no `builders` map) from per-key mismatches."""
+    if not dropped:
+        return ''
+    if not has_bindings:
+        return ("coord-head carries no signed builder bindings — the owner "
+                "must republish to migrate (FED-03 D); rejecting all "
+                f"{len(dropped)} builder key(s) until then")
+    return (f"rejected {len(dropped)} builder key(s) not matching the "
+            f"coord-head's signed bindings: {', '.join(sorted(dropped))}")

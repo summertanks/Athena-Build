@@ -1501,6 +1501,18 @@ def remote_publish(
                 if _lsha:
                     _ledger_sha = _lsha
                     _wrote_ledger = True
+        # FED-03 D: bind every known builder's pubkey into the tier-1-signed
+        # head — the fetched peer keyring PLUS our own pubkey (a first publish
+        # may precede our pub landing in the fetched keyring).  Peers verify a
+        # claim's keyring pubkey against this signed map.
+        _builders_ring = dict(_keyring)
+        _idir = getattr(config, 'dir_coord_identity', '')
+        if _idir:
+            _own_pub = _identity.builder_pub_path(_idir, builder_id)
+            if os.path.isfile(_own_pub):
+                _builders_ring[builder_id] = _own_pub
+        _builders = _identity.build_builder_bindings(_builders_ring)
+        _status(f"binding {len(_builders)} builder pubkey(s) into coord-head")
         _new_head = _schema.new_coord_head(
             inrelease_sha256=_ir_sha,
             snapshot=_ss,
@@ -1510,6 +1522,7 @@ def remote_publish(
             revoked_builders=(_head_dict or {}).get('revoked_builders'),
             config_sha256=_config_sha,
             closure_ledger_sha256=_ledger_sha,
+            builders=_builders,
         )
         _status(f"signing coord-head (last_seqs[{builder_id}]={_seq})")
         _ok = _head.write_coord_head(
@@ -1663,9 +1676,11 @@ def revoke_builder(
             revoked_builders=_revoked,
             # Revocation only changes revoked_builders — preserve the prior
             # head's content pins so peers don't lose the canonical config /
-            # closure ledger (and fall back unnecessarily) after a revoke.
+            # closure ledger / builder bindings (and fall back / strict-reject
+            # everyone) after a revoke.
             config_sha256=_head_dict.get('config_sha256'),
             closure_ledger_sha256=_head_dict.get('closure_ledger_sha256'),
+            builders=_head_dict.get('builders'),
         )
         _status(f"signing coord-head (revoking {builder_id_to_revoke})")
         if not _head.write_coord_head(

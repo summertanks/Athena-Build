@@ -417,6 +417,12 @@ class VirtualCommandsMixin(SessionState):
                     continue
                 _keyring = _id.load_keyring(
                     os.path.join(_fetched, 'keyring', 'builders'))
+                # FED-03 D: trust only pubkeys bound in the tier-1-signed head.
+                _keyring, _dropped, _has_bind = _id.verified_keyring_from_head(
+                    _keyring, _head)
+                _bmsg = _id.binding_drop_summary(_dropped, _has_bind)
+                if _bmsg:
+                    logger.warning(f"virtual build: mirror {_mn}: {_bmsg}")
                 _revoked = _head.get('revoked_builders') or {}
                 _bb = _store.read_all_claims(_claims_dir, _keyring, _revoked)
                 for _bid, _cl in _bb.items():
