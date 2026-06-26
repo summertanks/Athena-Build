@@ -44,10 +44,14 @@ def parse_ssh_host(remote: str) -> str:
 
 
 def _ssh_base(host: str, ssh_key: 'str | None' = None) -> 'list[str]':
-    """`ssh -o BatchMode=yes [-i <key>] <host>` — the argv prefix for a remote
-    command.  Centralises `-i` insertion so every ssh call site honours the
-    per-remote key copied into config/ (vs the operator's ambient ~/.ssh)."""
-    _argv = ['ssh', '-o', 'BatchMode=yes']
+    """`ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new [-i <key>]
+    <host>` — the argv prefix for a remote command.  Centralises `-i` insertion
+    so every ssh call site honours the per-remote key copied into config/ (vs
+    the operator's ambient ~/.ssh).  MAT-11(4): `accept-new` matches every
+    other ssh site (mirror probes, the agent tunnel) so a first contact with a
+    fresh remote records its host key instead of failing under BatchMode."""
+    _argv = ['ssh', '-o', 'BatchMode=yes',
+             '-o', 'StrictHostKeyChecking=accept-new']
     if ssh_key:
         _argv += ['-i', ssh_key]
     _argv.append(host)
@@ -55,8 +59,10 @@ def _ssh_base(host: str, ssh_key: 'str | None' = None) -> 'list[str]':
 
 
 def _scp_base(ssh_key: 'str | None' = None) -> 'list[str]':
-    """`scp -q [-i <key>]` — the argv prefix for a bundle/output transfer."""
-    _argv = ['scp', '-q']
+    """`scp -q -o StrictHostKeyChecking=accept-new [-i <key>]` — the argv prefix
+    for a bundle/output transfer (MAT-11(4): accept-new for parity with the ssh
+    sites + a fresh remote's first transfer)."""
+    _argv = ['scp', '-q', '-o', 'StrictHostKeyChecking=accept-new']
     if ssh_key:
         _argv += ['-i', ssh_key]
     return _argv

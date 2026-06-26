@@ -1040,6 +1040,9 @@ def project_post_publish_state(local_state, remote_by_builder: dict):
                 # only if its version is strictly higher than the local
                 # one (mirror has a newer pkg we haven't built yet).
                 import apt_pkg as _apt_pkg
+                # MAT-11(1): init the apt config system or version_compare
+                # falls back to a LEXICAL compare (`6.10` < `6.9`).  Idempotent.
+                _apt_pkg.init_system()
                 try:
                     _cmp = _apt_pkg.version_compare(
                         _ver, str(_existing.get('Version', '')))
