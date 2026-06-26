@@ -141,10 +141,15 @@ def _local_docker_e2e():
 
 def _remote_transport_e2e(remote, ssh_key):
     print(f'=== FULL TRANSPORT e2e against {remote} ===')
+    import shutil
     import remote_orchestrate as _ro
     with tempfile.TemporaryDirectory() as _bundle, \
             tempfile.TemporaryDirectory() as _out:
         _make_bundle(_bundle, _OK_CMD)
+        # The agent runs from the shipped bundle dir and imports remote_build,
+        # so it must travel in the bundle (production stage_bundle does this).
+        shutil.copy(os.path.join(_ROOT, 'scripts', 'remote_build.py'),
+                    os.path.join(_bundle, 'remote_build.py'))
         _logs = []
         _exit, _outputs = _ro.run_remote_agent(
             remote, _bundle,
