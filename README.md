@@ -5,7 +5,7 @@
 # Athena-Build
 
 ## Features
-- **Custom Linux Distro** - End to end from source to repo publishing
+- **Custom Linux Distro** — End to end from source to repo publishing
 - **A whole derivative, built from source** — resolves the full dependency closure of your custom package list and compiles every package from upstream Debian source.
 - **Multiple image surfaces** — a live ISO, a from-source installer ISO, and a pre-installed qcow2 disk image.
 - **Patch at every layer** — fine control on source, pre-install, and post-install patching, plus a fork system with an identity collision gate.
