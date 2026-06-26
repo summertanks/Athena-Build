@@ -372,11 +372,18 @@ def run_remote_agent(host: str, local_bundle: str, remote_dir: str,
                           f'{host}:{remote_dir}/']).returncode != 0:
             log("remote: scp of bundle failed")
             return (11, [])
-        # 3. start the agent DETACHED (survives this ssh session closing)
+        # 3. start the agent DETACHED (survives this ssh session closing).
+        # `cd … || exit 1; nohup … &` — NOT `cd && … &`: with `&&` the shell
+        # backgrounds the WHOLE `cd && nohup` compound as a subshell that runs
+        # the (long-lived) agent in its foreground, so the subshell keeps the
+        # SSH channel's stdout open and the start ssh never returns.  Using `;`
+        # runs cd in the session and backgrounds ONLY the fd-redirected agent,
+        # releasing the channel so the start returns immediately.
         _start = (
-            f'cd {remote_dir} && nohup python3 remote_agent.py --bundle . '
-            f'--token-file agent.token --port 0 --hang-secs {int(hang_secs)} '
-            f'< /dev/null > agent.out 2>&1 & echo AGENT_STARTED')
+            f'cd {remote_dir} || exit 1; nohup python3 remote_agent.py '
+            f'--bundle . --token-file agent.token --port 0 '
+            f'--hang-secs {int(hang_secs)} < /dev/null > agent.out 2>&1 & '
+            f'echo AGENT_STARTED')
         if subprocess.run(_ssh + [_start]).returncode != 0:
             log("remote: agent failed to start")
             return (10, [])
