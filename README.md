@@ -14,49 +14,41 @@
 - **One interface, fully transparent** — a curses TUI (with headless and HTTP-API backends) drives the entire pipeline.
 
 ## Introduction
-Athena Build system is (trying to be) a (mostly) hands off 'build system' to build and install custom Debian Linux distribution from source (the catch). The distinction is that  sources are built rather than using the prepared packages. The differential here being toolchain system that you can derive a full fledged independent custom linux distro from the upstream debian that you can support with your own repo. Post this build the running system should look to your own repository, not Debian's, for updates — runtime independence is the aim, even if the build itself still draws its source from upstream Debian. 
+Athena Build system is a (mostly) hands off toolchain to build and ship custom Debian Linux distribution from source (the catch). The differential being, instead of wrapping upstream packages you get to own the build process end to end from building upstream debian sources to managing your own repo. Post this build the running system should look to your own repository, not Debian's, for updates — runtime independence is the aim, even if the build itself still draws its source from upstream Debian. 
 
-The genesis of this project came from the conversation - while the Linux ecosystem as part of the FOSS world, can we really build the distro from source? As that wild idea took some roots it got convoluted into an idea - if we can do that then why cannot we have a public toolchain that allows me to build a Ubuntu from Debian or CentOS from RedHat. Why not let people build and maintain their own distro. The question as to why a sane person would even do that was conveniently sidestepped in the said conversation.
+The genesis of this project came from the conversation - while the Linux ecosystem as part of the FOSS world, can we really build the distro from source? As that wild idea took some roots it got convoluted into an idea - if we can do that then why cannot we have a public toolchain that allows me to build a Ubuntu from Debian or CentOS from RedHat. Why not let people build, customise and maintain their own distro end to end. The question as to why a sane person would even do that was conveniently sidestepped in the said conversation.
 
-Athena is not reinventing the wheel, it's just repackaging the car. Other projects own individual links of this chain, and often own them better — Linux From Scratch builds a system from source by hand, Yocto does industrial source builds for embedded targets, the Open Build Service publishes signed packages at scale, live-build composes Debian ISOs, Devuan selectively rebuilds a few dozen packages to hold an identity. Athena's identity is to do the whole chain at once, for a complete Debian derivative: 
-- Build the entire package closure from source, 
+Athena is not reinventing the wheel, it's just repackaging the car. Other projects own individual links of this chain, and often own them better — Linux From Scratch builds a system from source by hand, Yocto does industrial source builds for embedded targets, the Open Build Service publishes signed packages at scale, live-build composes Debian ISOs. Athena's identity is to do the whole chain at once, for a complete Debian derivative: 
+- Build the entire distro's dependency closure from source, 
 - Hold a clean fork identity, pin every input to a snapshot so the result is reproducible,
 - Publish it as a signed, append-only, federated mirror that multiple builders can extend. 
 
 To our knowledge no other open-source tool does that entire chain, transparently, end to end. As a product it is still young, infant to be exact, and the road from here to something you would run on real hardware in anger is, candidly, only for the brave. Many more real builds, more community adoption on real machines and real environments will help mitigate some of that pain.
 
 ### Reality Check
- - This will be a maturing solution and not immediately suitable to go to your boss and pitch your custom distro for the company (but it won't stop you). Currently, best used for tinkering. See Project maturity below.
+ - This will be a maturing solution and not immediately suitable to go to your boss and pitch your custom distro for the company (but don't let it stop you). See Project maturity below.
  - Can this be faster, YES. Is it worth making it faster (e.g. shifting to C, trading space with time, etc.) NO
- - It is NOT currently (or ever may be) supported by any of Debian Linux Houses (e.g. debian, ubuntu, etc)
+ - It is NOT currently (or ever may be) supported by any of Debian Linux Houses (e.g. debian, ubuntu, etc.)
  - Does it have Bugs? - Yes. Many?? Maybeeee. Please reach out to me and lets fix what you find.
  - Remember, and this is especially important: it is a source build toolchain, it does nothing to upstream source packages. What you get is what you get. You will (rather quickly) realise as I have that just because source code is available doesn't mean it is amenable to being built. Fixing that is completely on you. You will learn to embrace a whole new level of 'oh, but it builds on my system'.
  - A practical note for anyone coming from RHEL: this project will be largely incomprehensible for the first afternoon. Conventions are different, assumed reading is different. Stick with it; the underlying ideas are the same.
 
 ### Background
-The first question always is - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a 'System V compatible' kernel inspired by a UNIX operating system clone called 'Minix', what we now ubiquitously call Ver 0.1 of the **Linux Kernel**. 
+The first question is always - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a 'System V compatible' kernel inspired by a UNIX operating system clone called 'Minix', what we now ubiquitously call version 0.1 of the **Linux Kernel**. 
 
-Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU and gave it purpose. They brought the application stack that gave Linux Kernel purpose, and hence was born the Linux Distribution, or more colloquially just called **Linux Distribution**. The conversation of distinction between 'Linux Distribution' and 'Linux OS' is a petridish for violence amongst geeks, but for the purpose of this project lets assert debian is a 'Linux Distribution' and stay away from the phrase OS as much as possible.
+Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU, which brought along the application stack that gave it purpose, and hence was born the **Linux Distribution**, or more colloquially just called Distro - a collection of self serving programs. The conversation of distinction between 'Linux Distribution' and 'Linux OS' is a petridish for violence amongst geeks, but for the purpose of this project lets assert debian is a 'Linux Distribution' and stay away from the phrase OS as much as possible.
 
 The first Linux distribution, called "Softlanding Linux System" (SLS), was released by 1992. and within the next three years we saw the advent of Slackware, Red Hat and Debian. The rest as they say is history.
 
-PS: Red Hat vs Debian - Red Hat was founded with the goal of creating a commercial distribution of Linux that could be sold and supported. On the other hand, Debian was founded  with the goal of creating a community-driven Linux distribution that was completely free, open-source and built from scratch. 
+PS: Red Hat vs Debian - Red Hat was founded with the goal of creating a commercial distribution of Linux that could be sold and supported. On the other hand, Debian was founded  with the goal of creating a community-driven Linux distribution that was completely free, open-source and built from scratch. We like debian.
 
-A **package** is akin to SKU (Stock Keeping Unit) of software that can be installed and managed by the operating system's package manager. This is important - packages may intrinsically also define other packages as dependencies and it is usually the package manager's headache to install everything together. In this context Debian identifies an application, wraps the application's build system to produce the installables as a package construct, i.e. deb - debian package file, test it, patch it, and publish it in a repository.
+A **package** is akin to SKU of software that can be installed and managed by the distribution's package manager. This is important - packages may intrinsically also define other packages as dependencies and it is usually the package manager's headache to install everything together. In this context Debian identifies an application, wraps the application's build system to produce the installables as a package construct, i.e. deb - debian package file, test it, patch it, and publish it in a repository.
 
-If you can collect a set of packages that work together in a manner that makes the computer usable even if it's to play minesweeper, you have a distribution. If you can support it with updates via a online / offline repository you have a more mature practically usable distro. If you can ship it with packages or UX other distros don't usually ship you have a custom distro with (maybe) some unique appeal. 
+If you can collect a set of packages that work together in a manner that makes the computer usable even if it's to play minesweeper, you have a distribution. If you can support it with updates via a online / offline repository you have a more mature practically usable distro that you can talk to your friends about. If you can ship it with packages or UX other distros don't usually ship you have a custom distro with (maybe) some unique appeal. 
 
 ***Athena enables you to create this distro of 'unique appeal' without having to hit your head on how to manage the distro but to focus on what to put in it.***
 
-### Stitched together
-
-So we have a kernel, a libc, a userland, a package manager, mirrors that hand out signed metadata, source archives that build into binary packages — what does it actually take to *stitch* this into a working system?
-
-Roughly: bootstrap a minimal root filesystem, teach it to find packages, install everything you want it to ship with, wire up the boot loader and the init system, write the identity files (`/etc/os-release`, `/etc/hostname`, network config), and wrap the whole tree into something a machine can boot from — a live ISO, an installer ISO, or a disk image.
-
-Done by hand this is a long week. `debootstrap` automates the bootstrap step. `live-build` automates the live-ISO bit. `debian-installer` automates the installer-ISO bit. Each tool does one piece well, and gluing them together for a *custom* distribution — your own package set, your own patches, your own branding — is where the friction usually shows up.
-
-Athena-Build is one attempt in one user interactable TUI, with the additional constraint that everything ships from source. The sections that follow walk through what that looks like in practice — what to install on the host before you start, how to drive the build, where to look when something breaks (and it will).
+The sections that follow walk through what that looks like in practice — what to install on the host before you start, how to drive the build, where to look when something breaks (and it will).
 
 
 ## Building Image
