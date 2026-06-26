@@ -115,7 +115,14 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
             #   2. `-xdev` so `find -delete` never descends across a
             #      surviving mount boundary into host /dev/{null,sda,…}.
             # Either alone closes the hole; together they're belt-and-braces.
-            self._umount_chroot_fs()
+            # MAT-10(a): if a mount is WEDGED (survives umount -lf), refuse to
+            # wipe — `find -delete` would still be pointed at a tree carrying a
+            # live host bind-mount.  Better to abort loudly than risk it.
+            if not self._umount_chroot_fs():
+                raise RuntimeError(
+                    "Refusing to wipe chroot: a host bind-mount is WEDGED "
+                    "under it (see log) — unmount it manually "
+                    "(`sudo umount -lf` the listed paths) and retry.")
             _proc = subprocess.run(
                 ['sudo', '-S', 'find', self._dir_chroot, '-xdev',
                  '-mindepth', '1', '-delete'],

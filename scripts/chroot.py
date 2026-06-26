@@ -415,7 +415,7 @@ class _ChrootMixin:
 
             logger.info(f'_mount_chroot_fs: mounted {_dst}')
 
-    def _umount_chroot_fs(self):
+    def _umount_chroot_fs(self) -> bool:
         """Unmount virtual filesystems from the chroot (reverse of _mount_chroot_fs).
 
         Uses -lf (lazy force) so a partial mount state from a previous failed
@@ -424,8 +424,13 @@ class _ChrootMixin:
         Logs each successful unmount at info level for symmetry with the
         mount path; failures (target was never a mount point) are silent
         because that's the normal case after a partial-mount cleanup.
+
+        Returns True when everything is unmounted (clean), False when a
+        WEDGED mount survived 64 lazy-force attempts — callers that wipe or
+        image the chroot MUST refuse on False (MAT-10(a)).
         """
         _chroot = self._dir_chroot
+        _survivors: 'list[str]' = []
         for _dst in [
             f'{_chroot}/dev/pts',
             f'{_chroot}/dev',
@@ -448,8 +453,22 @@ class _ChrootMixin:
                     ['sudo', '-S', 'umount', '-lf', _dst],
                     input=self._password + '\n',
                     capture_output=True, text=True)
-            if _was_mounted:
+            # MAT-10(a): POST-ASSERT.  The loop's umount rc was unchecked, so a
+            # target that refuses to unmount after 64 lazy-force attempts (a
+            # wedged mount) would fall through and get logged as "unmounted".
+            # A surviving bind-mount of the host's /dev,/proc,… would then be
+            # imaged into the squashfs/ISO (mksquashfs walks it) — a
+            # contaminated image.  Detect it + report so callers can refuse to
+            # wipe/image.
+            if os.path.ismount(_dst):
+                _survivors.append(_dst)
+                logger.error(
+                    f'_umount_chroot_fs: {_dst} STILL mounted after 64 '
+                    'umount -lf attempts — WEDGED mount (refusing to treat as '
+                    'clean; wiping/imaging through it would contaminate)')
+            elif _was_mounted:
                 logger.info(f'_umount_chroot_fs: unmounted {_dst}')
+        return not _survivors
 
     def _chroot_dpkg_available(self) -> bool:
         """True when the chroot has both dpkg and sh, so chroot-mode dpkg

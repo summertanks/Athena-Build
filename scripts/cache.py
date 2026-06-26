@@ -517,10 +517,13 @@ class Cache:
             return False, (
                 f"{os.path.basename(_compressed_dst)} sha256 {_got[:12]}… != "
                 f"InRelease {_comp[:12]}…")
-        # Reachable only if neither form has a sha in Release — but we only
-        # get here with a chosen (Release-listed) compressed variant, so this
-        # is defensive.
-        return True, 'no InRelease SHA256 entry to verify against'
+        # Reachable only if neither form has a sha in Release — defensive,
+        # since we only get here with a chosen (Release-listed) compressed
+        # variant.  MAT-10(e): fail CLOSED — refuse to ingest an index we
+        # can't verify against the GPG-signed InRelease, rather than trusting
+        # it silently.
+        return False, ('no InRelease SHA256 entry for the index — refusing '
+                       'to ingest an unverifiable index')
 
     def _fetch_optional_index(self, _path: str, _base_url: str,
                               _rel_sha: dict, _mirror) -> Optional[str]:

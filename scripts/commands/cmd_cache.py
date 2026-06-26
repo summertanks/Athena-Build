@@ -945,13 +945,20 @@ class CacheCommandsMixin(SessionState):
             _state = selection_lock.assemble_state(
                 self.dep_tree, self.udeb_dep_tree, self.config, closure=_fresh)
             if _action == selection_lock.ACTION_BLOCK and _accept:
-                selection_lock.write_selection_state(self.config, _state)
-                # intent-at-accept: record the deprecation on the
-                # dropped sources' build records NOW (before any publish),
-                # then touch the still-selected set.
+                # MAT-10(d): the signed lockfile (selection.state) is the
+                # AUTHORITY, so make it the COMMIT POINT — do the derived
+                # side-effects (mark the dropped sources' build records
+                # deprecated, touch the still-selected set) FIRST, then write
+                # the lockfile LAST.  A crash before the lockfile write leaves
+                # the authority unchanged (old selection) + at worst a few
+                # premature deprecation marks that the next `cache parse`
+                # re-stamps as selected — strictly better than the old order,
+                # where a crash shrank the authority but left the dropped
+                # sources un-deprecated (the drift only `mirror audit` caught).
                 _dep_n = utils.lifecycle_mark_deprecated(
                     _lc_log, _removed['srcs'], _lc_pin)
                 _lc_touch()
+                selection_lock.write_selection_state(self.config, _state)
                 console.print(
                     f"cache select accept: re-baselined selection.state — "
                     f"{len(_removed['bins'])} binary(ies) / "
