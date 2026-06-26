@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/athena-splash.png" alt="Athena Build System" width="480">
+  <img src="docs/assets/athena-splash.png" alt="Athena Build System" width="360">
 </p>
 
 # Athena-Build
