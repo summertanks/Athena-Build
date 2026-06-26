@@ -139,7 +139,7 @@ _All architecture & coding-practice tickets are closed — see [`docs/done.md`](
 
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
-| DOC-06 | P2 | todo | Keep `README.md` in sync with the code as the project evolves.  When a pipeline stage is added/renamed, a default in `config/build.conf` changes, a new common failure mode appears (or an old one is fixed), or the operator workflow shifts — update the README in the same PR.  Periodic audit: when closing each ticket touching `scripts/` or `config/`, scan README §Building Image and amend if the change is operator-visible.  Footer note in the README points future-me here. |
+| DOC-06 | P2 | BLOCKED (README under active work 2026-06-26) | Keep `README.md` in sync with the code as the project evolves.  When a pipeline stage is added/renamed, a default in `config/build.conf` changes, a new common failure mode appears (or an old one is fixed), or the operator workflow shifts — update the README in the same PR.  Periodic audit: when closing each ticket touching `scripts/` or `config/`, scan README §Building Image and amend if the change is operator-visible.  Footer note in the README points future-me here. |
 
 ## 7. Security & supply-chain — P0 / P1
 
