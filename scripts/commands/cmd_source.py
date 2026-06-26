@@ -1814,16 +1814,25 @@ class SourceCommandsMixin(SessionState):
                 build_memory=_slot.get('build_memory') or None,
                 remote_build_py=os.path.join(
                     self.config.working_dir, 'scripts', 'remote_build.py'),
+                remote_agent_py=os.path.join(
+                    self.config.working_dir, 'scripts', 'remote_agent.py'),
                 localmirror_dir=_lm_dir,
             )
+            # Per-remote API token (REMOTE-API): the agent gates every request
+            # on it; absent (legacy remote) → '' degrades to tunnel-only trust.
+            _token = ''
+            _tokpath = utils.remote_token_path(self.config, _slot.get('name', ''))
+            if os.path.isfile(_tokpath):
+                with open(_tokpath) as _tfh:
+                    _token = _tfh.read().strip()
             try:
                 with open(_logpath, 'w') as _lf:
                     def _to_log(_m):
                         _lf.write(str(_m) + '\n')
                         _lf.flush()
-                    _exit, _outputs = _ro.run_remote(
+                    _exit, _outputs = _ro.run_remote_agent(
                         _slot['ssh_host'], _bundle, _remote_dir, _scratch,
-                        ssh_key=_slot.get('ssh_key') or None,
+                        token=_token, ssh_key=_slot.get('ssh_key') or None,
                         register_proc=register_proc, log=_to_log)
             except OSError as _e:
                 logger.error(f"remotebuild {_src.package}: {_e}")
@@ -1832,11 +1841,19 @@ class SourceCommandsMixin(SessionState):
                 _shutil.rmtree(_scratch, ignore_errors=True)
                 return ('failed', 0)
 
+        if _exit == 130:
+            # SIGINT abort (run_remote_agent aborted the remote build) — the
+            # scheduler is shutting down; not a failure, not a re-queue.
+            logger.warning(
+                f"remotebuild {_src.package}: aborted on {_slot['ssh_host']}")
+            _shutil.rmtree(_scratch, ignore_errors=True)
+            return ('skipped', 0)
         if _exit in (10, 11, 12):
-            # 10/11 mkdir/scp-up failure (build never ran); 12 partial
-            # scp-DOWN recovery (artifacts the remote built didn't all land).
-            # All are host transport problems → let the scheduler re-queue this
-            # package on another remote (no failed record).
+            # 10/11 mkdir/scp-up failure (build never ran); 12 = partial
+            # scp-DOWN recovery, the remote progress-WATCHDOG killing a hung
+            # build, or the agent going unreachable.  All are host transport
+            # problems → let the scheduler re-queue this package on another
+            # remote (no failed record).
             logger.warning(
                 f"remotebuild {_src.package}: transport failure (exit {_exit}) "
                 f"on {_slot['ssh_host']}")

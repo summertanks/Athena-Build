@@ -564,6 +564,26 @@ def test_remote_conf_helpers_round_trip():
         assert utils.list_remotes(cfg) == []
 
 
+def test_remote_token_generate_and_path():
+    """REMOTE-API: generate_remote_token writes a 64-hex token 0600 to
+    config/<name>.remote-token; remote_token_path derives that path; a second
+    call rotates it."""
+    import utils
+    import stat
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        _path, _tok = utils.generate_remote_token(cfg, 'bs7')
+        assert _path == utils.remote_token_path(cfg, 'bs7')
+        assert _path.endswith('bs7.remote-token')
+        assert len(_tok) == 64 and all(_c in '0123456789abcdef' for _c in _tok)
+        assert open(_path).read().strip() == _tok
+        assert stat.S_IMODE(os.stat(_path).st_mode) == 0o600
+        _, _tok2 = utils.generate_remote_token(cfg, 'bs7')
+        assert _tok2 != _tok
+
+
 class _FakeOnbSession:
     """Minimal session for onboarding tests: a config with a tmp config_path
     (so write_local_conf lands in the tmp dir) + the federation methods the
@@ -22699,6 +22719,265 @@ def test_remote_build_run_container_command_shape():
         assert os.path.isdir(os.path.join(_b, 'out'))
 
 
+def _remote_agent_spawn(bundle, build_cmd, *, hang=30, token='secret'):
+    """Start scripts/remote_agent.py as a detached subprocess against a
+    --build-cmd (no docker needed); return (proc, port)."""
+    import subprocess as _sub
+    import time
+    _tf = os.path.join(bundle, 'token')
+    with open(_tf, 'w') as _fh:
+        _fh.write(token)
+    _p = _sub.Popen(
+        [sys.executable, os.path.join(_ROOT, 'scripts', 'remote_agent.py'),
+         '--bundle', bundle, '--token-file', _tf, '--port', '0',
+         '--hang-secs', str(hang), '--build-cmd', build_cmd])
+    _portf = os.path.join(bundle, 'agent.port')
+    for _ in range(200):
+        if os.path.exists(_portf):
+            _v = open(_portf).read().strip()
+            if _v:
+                return _p, int(_v)
+        time.sleep(0.05)
+    _p.kill()
+    raise AssertionError('remote_agent did not publish its port')
+
+
+def _remote_agent_req(port, path, method='GET', token='secret'):
+    """One token-authed request to the agent; returns (status, body, headers)."""
+    import urllib.request as _u
+    _req = _u.Request(f'http://127.0.0.1:{port}{path}', method=method)
+    if token is not None:
+        _req.add_header('X-Athena-Token', token)
+    with _u.urlopen(_req, timeout=5) as _r:
+        return _r.status, _r.read(), dict(_r.headers)
+
+
+def _remote_agent_wait_terminal(port, tries=200):
+    import json as _j
+    import time
+    _st = {}
+    for _ in range(tries):
+        _st = _j.loads(_remote_agent_req(port, '/status')[1])
+        if _st['phase'] in ('done', 'failed', 'timeout', 'aborted'):
+            return _st
+        time.sleep(0.1)
+    return _st
+
+
+def test_remote_agent_helpers_name_and_log_offsets():
+    """REMOTE-API: container_name_for sanitises; read_log returns
+    (bytes-from-offset, next, size) for incremental / resumable polling."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_agent as _ra
+    assert _ra.container_name_for('/tmp/athena-remote-adduser-0') == \
+        'athena-build-athena-remote-adduser-0'
+    assert _ra.container_name_for('/p/weird name!') == 'athena-build-weird-name-'
+    with tempfile.TemporaryDirectory() as _d:
+        _f = os.path.join(_d, 'build.log')
+        with open(_f, 'wb') as _fh:
+            _fh.write(b'hello\nworld\n')
+        _data, _next, _size = _ra.read_log(_f, 0)
+        assert _data == b'hello\nworld\n' and _next == 12 and _size == 12
+        # resume from an offset → only the tail
+        _data2, _next2, _size2 = _ra.read_log(_f, 6)
+        assert _data2 == b'world\n' and _next2 == 12
+        # at/after EOF → empty, offset unchanged
+        assert _ra.read_log(_f, 12) == (b'', 12, 12)
+        # missing file → benign empties
+        assert _ra.read_log(os.path.join(_d, 'nope'), 0) == (b'', 0, 0)
+
+
+def test_remote_agent_lifecycle_success_logs_and_auth():
+    """REMOTE-API: a successful build reaches phase=done with its outputs;
+    /logs serves from an offset; a missing/wrong token is rejected 401."""
+    import json as _j
+    import urllib.error as _ue
+    with tempfile.TemporaryDirectory() as _b:
+        _p, _port = _remote_agent_spawn(
+            _b, 'echo hello; : > out/pkg_1.0_amd64.deb; echo done')
+        try:
+            _st = _remote_agent_wait_terminal(_port)
+            assert _st['phase'] == 'done', _st
+            assert _st['outputs'] == ['pkg_1.0_amd64.deb'], _st
+            assert _st['exit_code'] == 0
+            # logs from offset 0, then resume from next → empty
+            _code, _body, _hdrs = _remote_agent_req(_port, '/logs?from=0')
+            assert b'hello' in _body and b'done' in _body
+            _nxt = int(_hdrs['X-Log-Next'])
+            assert _remote_agent_req(_port, f'/logs?from={_nxt}')[1] == b''
+            # wrong token → 401
+            try:
+                _remote_agent_req(_port, '/status', token='wrong')
+                raise AssertionError('expected 401 for a bad token')
+            except _ue.HTTPError as _e:
+                assert _e.code == 401
+            # no token → 401
+            try:
+                _remote_agent_req(_port, '/status', token=None)
+                raise AssertionError('expected 401 for a missing token')
+            except _ue.HTTPError as _e:
+                assert _e.code == 401
+        finally:
+            try:
+                _remote_agent_req(_port, '/shutdown', 'POST')
+            except Exception:
+                pass
+            try:
+                _p.wait(timeout=10)
+            except Exception:
+                _p.kill()
+        assert _j is not None  # keep import used
+
+
+def test_remote_agent_watchdog_and_abort():
+    """REMOTE-API: a no-progress build is killed by the watchdog
+    (phase=timeout, watchdog=hang-killed); POST /abort stops a build
+    (phase=aborted)."""
+    # watchdog: a sleeping build emits no log growth → hang-killed after ~1s
+    with tempfile.TemporaryDirectory() as _b:
+        _p, _port = _remote_agent_spawn(_b, 'sleep 30', hang=1)
+        try:
+            _st = _remote_agent_wait_terminal(_port)
+            assert _st['phase'] == 'timeout', _st
+            assert _st['watchdog'] == 'hang-killed', _st
+        finally:
+            try:
+                _remote_agent_req(_port, '/shutdown', 'POST')
+            except Exception:
+                pass
+            try:
+                _p.wait(timeout=10)
+            except Exception:
+                _p.kill()
+    # abort: a long build, explicitly aborted → phase=aborted
+    with tempfile.TemporaryDirectory() as _b:
+        _p, _port = _remote_agent_spawn(_b, 'sleep 30', hang=300)
+        try:
+            _remote_agent_req(_port, '/abort', 'POST')
+            _st = _remote_agent_wait_terminal(_port)
+            assert _st['phase'] == 'aborted', _st
+        finally:
+            try:
+                _remote_agent_req(_port, '/shutdown', 'POST')
+            except Exception:
+                pass
+            try:
+                _p.wait(timeout=10)
+            except Exception:
+                _p.kill()
+
+
+def _run_remote_agent_fakes(out_dir, *, phase_seq):
+    """Build (subprocess-fake, agent-request-fake, calls-record) for driving
+    run_remote_agent without a real remote.  `phase_seq` is the sequence of
+    /status phases the agent reports."""
+    import types as _t
+    _calls = {'run': [], 'popen': [], 'status': 0, 'logs': 0}
+
+    class _FakeProc:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def _run(argv, **k):
+        _calls['run'].append(list(argv))
+        _joined = ' '.join(argv)
+        if 'agent.port' in _joined:
+            return _t.SimpleNamespace(returncode=0, stdout='54321\n', stderr='')
+        if 'out/*.deb' in _joined:
+            open(os.path.join(out_dir, 'adduser_1_amd64.deb'), 'w').close()
+        return _t.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    def _popen(argv, **k):
+        _calls['popen'].append(list(argv))
+        return _FakeProc()
+
+    _fake_sp = _t.SimpleNamespace(
+        run=_run, Popen=_popen, DEVNULL=-3, PIPE=-1, STDOUT=-2,
+        SubprocessError=Exception)
+
+    def _req(port, path, token, method='GET', timeout=10):
+        if path == '/status':
+            _i = min(_calls['status'], len(phase_seq) - 1)
+            _calls['status'] += 1
+            _phase = phase_seq[_i]
+            _outs = '["adduser_1_amd64.deb"]' if _phase == 'done' else '[]'
+            _code = '0' if _phase == 'done' else 'null'
+            return (200, (f'{{"phase":"{_phase}","outputs":{_outs},'
+                          f'"exit_code":{_code}}}').encode(), {})
+        if path.startswith('/logs'):
+            _calls['logs'] += 1
+            if _calls['logs'] == 1:
+                return (200, b'building adduser...\n', {'X-Log-Next': '20'})
+            return (200, b'', {'X-Log-Next': '20'})
+        return (200, b'{}', {})        # /abort /shutdown
+
+    return _fake_sp, _req, _calls
+
+
+def test_run_remote_agent_polls_to_done_ships_token_and_reaps():
+    """REMOTE-API: run_remote_agent ships the agent + token, starts it
+    detached, tunnels + polls to phase=done, recovers the .deb, and reaps the
+    named container in the finally."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+    with tempfile.TemporaryDirectory() as _bundle, \
+            tempfile.TemporaryDirectory() as _out:
+        open(os.path.join(_bundle, 'Dockerfile'), 'w').write('FROM x\n')
+        _agentpy = os.path.join(_bundle, '_agent_src.py')
+        open(_agentpy, 'w').write('# agent\n')
+        _fsp, _req, _calls = _run_remote_agent_fakes(
+            _out, phase_seq=['running', 'done'])
+        with mock.patch.object(_ro, 'subprocess', _fsp), \
+                mock.patch.object(_ro, '_agent_request', _req), \
+                mock.patch.object(_ro, 'AGENT_POLL_INTERVAL', 0):
+            _exit, _outputs = _ro.run_remote_agent(
+                'u@h', _bundle, '~/athena-remote-adduser-0', _out,
+                token='deadbeef', ssh_key='k.key',
+                remote_agent_py=_agentpy, hang_secs=1800)
+        assert (_exit, _outputs) == (0, ['adduser_1_amd64.deb']), (_exit, _outputs)
+        # token written 0600 into the bundle + agent staged
+        assert os.path.isfile(os.path.join(_bundle, 'agent.token'))
+        assert os.path.isfile(os.path.join(_bundle, 'remote_agent.py'))
+        _runs = [' '.join(_a) for _a in _calls['run']]
+        assert any('nohup python3 remote_agent.py' in _r and
+                   '--token-file agent.token' in _r for _r in _runs)
+        # tunnel forwards to the agent's reported remote port
+        assert any('-L' in _a and '127.0.0.1:54321' in ' '.join(_a)
+                   for _a in _calls['popen'])
+        # finally reaps the named container + wipes the scratch dir
+        assert any('docker rm -f athena-build-athena-remote-adduser-0' in _r and
+                   'rm -rf' in _r for _r in _runs)
+
+
+def test_run_remote_agent_watchdog_timeout_is_transport():
+    """REMOTE-API: a phase=timeout (remote watchdog killed a hung build) maps
+    to exit 12 so the fan-out scheduler re-queues it."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+    with tempfile.TemporaryDirectory() as _bundle, \
+            tempfile.TemporaryDirectory() as _out:
+        open(os.path.join(_bundle, 'Dockerfile'), 'w').write('FROM x\n')
+        _fsp, _req, _calls = _run_remote_agent_fakes(
+            _out, phase_seq=['running', 'timeout'])
+        with mock.patch.object(_ro, 'subprocess', _fsp), \
+                mock.patch.object(_ro, '_agent_request', _req), \
+                mock.patch.object(_ro, 'AGENT_POLL_INTERVAL', 0):
+            _exit, _outputs = _ro.run_remote_agent(
+                'u@h', _bundle, '~/athena-remote-x', _out, token='t')
+        assert _exit == 12 and _outputs == [], (_exit, _outputs)
+
+
 def test_remote_build_image_uses_args_and_skips_when_present():
     """build_image passes --build-arg for each param and SKIPS the build when
     the tag already exists (cached on the remote after run 1)."""
@@ -23045,17 +23324,17 @@ def test_remotebuild_command_wired():
         _cs = _f.read()
     assert 'def cmd_source_remotebuild' in _cs
     # The per-package remote build body lives in _remotebuild_one_source (the
-    # fan-out worker).  Its build STREAM (run_remote) goes to the per-package
-    # log file, NOT the console tab (N concurrent workers would interleave) —
-    # the run_remote call must use the file writer, not console.print.
+    # fan-out worker).  Its build STREAM (run_remote_agent — the REMOTE-API
+    # transport) goes to the per-package log file, NOT the console tab (N
+    # concurrent workers would interleave) — the call must use the file writer.
     _rb = _cs[_cs.index('def _remotebuild_one_source'):]
     _rb = _rb[:_rb.index('\n    def ', 1)]
-    _after = _rb[_rb.index('run_remote('):]
-    assert 'log=_to_log' in _after[:300]
+    _after = _rb[_rb.index('run_remote_agent('):]
+    assert 'log=_to_log' in _after[:400]
     assert 'log=console.print' not in _after     # build stream not to console
     assert 'buildlog_path' in _rb and '_to_log' in _rb   # → log/build/<pkg>
-    # The per-remote SSH key threads through to run_remote (vs ambient ~/.ssh).
-    assert 'ssh_key=' in _after[:300]
+    # The per-remote SSH key + API token thread through to the agent transport.
+    assert 'ssh_key=' in _after[:400] and 'token=' in _after[:400]
     with open(os.path.join(_ROOT, 'scripts', 'utils.py')) as _f:
         assert "'RemoteBuildHost'" in _f.read()
 
@@ -39511,6 +39790,11 @@ def main() -> int:
         test_cache_build_gates_on_mirror_reachability_and_config_command_wired,
         test_startup_banner_runs_config_check,
         test_remote_build_run_container_command_shape,
+        test_remote_agent_helpers_name_and_log_offsets,
+        test_remote_agent_lifecycle_success_logs_and_auth,
+        test_remote_agent_watchdog_and_abort,
+        test_run_remote_agent_polls_to_done_ships_token_and_reaps,
+        test_run_remote_agent_watchdog_timeout_is_transport,
         test_remote_build_image_uses_args_and_skips_when_present,
         test_remote_build_main_emits_result_marker,
         test_remote_orchestrate_parse_host_stage_and_result,
@@ -39538,6 +39822,7 @@ def main() -> int:
         test_write_local_conf_writes_relocated_machine_keys,
         test_mirror_conf_registration_round_trips_and_migrates,
         test_remote_conf_helpers_round_trip,
+        test_remote_token_generate_and_path,
         test_write_local_conf_round_trips,
         test_command_allowed_gates_until_configured,
         test_configured_summary_reports_state_and_warns_unregistered,

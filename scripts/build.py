@@ -1671,6 +1671,9 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         if not _ok:
             console.print(f"  {_detail}", tui.COLOR_ERROR)
             return
+        # Fresh per-remote API token for the build agent (REMOTE-API): shipped
+        # to the remote + sent back as X-Athena-Token over the SSH tunnel.
+        _tokpath, _ = utils.generate_remote_token(self.config, _name)
         self._refresh_remotes()
         console.print(f"  {_detail}", tui.COLOR_HIGHLIGHT)
         console.print("  Remote build host ready:", tui.COLOR_HIGHLIGHT)
@@ -1684,6 +1687,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                       f"cpus={_cpus or 'none'} mem={_mem or 'none'}")
         console.print(f"    localmir : {'on' if _lm else 'off'}")
         console.print(f"    key      : {_keydst}")
+        console.print(f"    token    : {_tokpath}")
         console.print("    image    : run `container remote init` to stage the "
                       "build image" + (" + local mirror" if _lm else ""))
 
@@ -1714,16 +1718,18 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         console.print(f"  {_detail}",
                       tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
         if _ok:
-            # Best-effort removal of the key we copied in at `add` time.
+            # Best-effort removal of the key + API token we copied/generated in
+            # at `add` time, so a re-add starts clean.
             _keydst = os.path.join(self.config.dir_config, f"{_name}.key")
-            try:
-                os.remove(_keydst)
-                console.print(f"  removed {_keydst}", tui.COLOR_INFO)
-            except FileNotFoundError:
-                pass
-            except OSError as _e:
-                console.print(f"  could not remove {_keydst}: {_e}",
-                              tui.COLOR_WARNING)
+            for _f in (_keydst, utils.remote_token_path(self.config, _name)):
+                try:
+                    os.remove(_f)
+                    console.print(f"  removed {_f}", tui.COLOR_INFO)
+                except FileNotFoundError:
+                    pass
+                except OSError as _e:
+                    console.print(f"  could not remove {_f}: {_e}",
+                                  tui.COLOR_WARNING)
             self._refresh_remotes()
 
     def cmd_container_remote_test(self, *args):

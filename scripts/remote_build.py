@@ -48,34 +48,53 @@ def _log(msg: str) -> None:
     print(f"[remote-build] {msg}", flush=True)
 
 
+def _emit(out, msg: str) -> None:
+    """Framing line → the build-log file handle when the agent passes one
+    (`out`), else stdout (the standalone CLI / SSH-tail path)."""
+    if out is not None:
+        try:
+            out.write(f"[remote-build] {msg}\n".encode())
+            out.flush()
+        except OSError:
+            pass
+    else:
+        _log(msg)
+
+
 def _image_exists(tag: str) -> bool:
     return subprocess.run(
         ["docker", "image", "inspect", tag],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
-def build_image(bundle: str, tag: str, build_args: dict) -> None:
+def build_image(bundle: str, tag: str, build_args: dict, out=None) -> None:
     """Build <tag> from <bundle>/Dockerfile with an EMPTY context (the Dockerfile
-    has no COPY/ADD).  Streamed via stdin so `source/` isn't sent as context."""
+    has no COPY/ADD).  Streamed via stdin so `source/` isn't sent as context.
+
+    `out` (a binary file handle), when given, captures the docker output + the
+    framing lines — the remote agent passes its build-log handle so the build
+    streams to a file it can offset-serve over the poll API."""
     if _image_exists(tag):
-        _log(f"image {tag} already present — skipping build")
+        _emit(out, f"image {tag} already present — skipping build")
         return
-    _log(f"building image {tag} ...")
+    _emit(out, f"building image {tag} ...")
     _flags: list = []
     for _k, _v in (build_args or {}).items():
         _flags += ["--build-arg", f"{_k}={_v}"]
     _dockerfile = os.path.join(bundle, "Dockerfile")
     with open(_dockerfile, "rb") as _fh:
         _r = subprocess.run(
-            ["docker", "build", "-t", tag, *_flags, "-"], stdin=_fh)
+            ["docker", "build", "-t", tag, *_flags, "-"], stdin=_fh,
+            stdout=out, stderr=(subprocess.STDOUT if out is not None else None))
     if _r.returncode != 0:
         raise SystemExit(f"docker build failed (rc={_r.returncode})")
-    _log(f"image {tag} built")
+    _emit(out, f"image {tag} built")
 
 
 def run_container(bundle: str, tag: str, cmd_str: str,
                   cpus: 'float | None', memory: 'str | None',
-                  localmirror_dir: 'str | None' = None) -> int:
+                  localmirror_dir: 'str | None' = None,
+                  container_name: 'str | None' = None, out=None) -> int:
     """Run the build container with local bind mounts; stream logs; return the
     container exit code.
 
@@ -105,21 +124,26 @@ def run_container(bundle: str, tag: str, cmd_str: str,
         _lm_abs = os.path.abspath(os.path.expanduser(localmirror_dir))
         if os.path.isdir(_lm_abs):
             _lm = ["-v", f"{_lm_abs}:/localmirror:ro"]
-            _log(f"mounting local build mirror {_lm_abs} → /localmirror")
+            _emit(out, f"mounting local build mirror {_lm_abs} → /localmirror")
         else:
-            _log(f"WARNING: localmirror {_lm_abs} not present — skipping mount "
-                 "(recipe's file:///localmirror source may fail)")
+            _emit(out, f"WARNING: localmirror {_lm_abs} not present — skipping "
+                  "mount (recipe's file:///localmirror source may fail)")
 
+    # A stable --name lets the agent's watchdog `docker kill` a wedged build
+    # and the orchestrator `docker rm -f` an orphan the client left behind.
+    _name = ["--name", container_name] if container_name else []
     _cmd = [
-        "docker", "run", "--rm", *_caps, *_lm,
+        "docker", "run", "--rm", *_name, *_caps, *_lm,
         "-v", f"{os.path.abspath(_src)}:/source:rw",
         "-v", f"{os.path.abspath(_patch)}:/patch:rw",
         "-v", f"{os.path.abspath(_out)}:/repo:rw",
         tag, "bash", "-c", cmd_str,
     ]
-    _log(f"running container ({tag}) — caps={_caps or 'none'}")
-    # inherit stdout/stderr so logs stream live back over SSH
-    return subprocess.run(_cmd).returncode
+    _emit(out, f"running container ({tag}) — caps={_caps or 'none'}")
+    # inherit stdout/stderr (SSH-tail path) or stream to the agent's log handle
+    return subprocess.run(
+        _cmd, stdout=out,
+        stderr=(subprocess.STDOUT if out is not None else None)).returncode
 
 
 def main(argv: 'list[str] | None' = None) -> int:
