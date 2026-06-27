@@ -1,21 +1,14 @@
 # Project maturity — detailed assessment
 
-This is the long-form companion to the maturity summary in the
-[README](../README.md). It scores the project by *distance to the intended
-goal* — a fully from-source, trustworthy Debian derivative — not by activity.
-Each dimension carries a score, the reasoning behind it, and the direction it is
-moving since the last assessment.
+This is the long-form companion to the maturity summary in the [README](../README.md). It scores the project by *distance to the intended goal* — a fully from-source, trustworthy Debian derivative — not by activity. Each dimension carries a score, the reasoning behind it, and the direction it is moving since the last assessment.
 
 Calibrated 2026-06-26.
 
 ## The three tracks
 
-- **Athena** — the build toolchain. The mature layer: source in, signed bootable
-  images out.
-- **Asgard** — the distribution Athena produces. Boots under virtualisation;
-  still earning its hardware stripes.
-- **Federation** — the multi-builder publishing layer. Signed and append-only;
-  the trust model is still tightening.
+- **Athena** — the build toolchain. The mature layer: source in, signed bootable images out.
+- **Asgard** — the distribution Athena produces. Boots under virtualisation; still earning its hardware stripes.
+- **Federation** — the multi-builder publishing layer. Signed and append-only; the trust model is still tightening.
 
 ## By dimension
 
