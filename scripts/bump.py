@@ -24,7 +24,7 @@ call sites keep working unchanged; new code may import from `bump`
 directly.  This module has NO dependency on `utils` (one-way:
 utils -> bump), which is what keeps the import graph acyclic.
 
-See docs/asg-bump-position-x.md for the bump-decision rationale and the
+See docs/bump-mechanics.md for the bump-decision rationale and the
 four triggers (delta / lineage; dep-constraint-only strips do NOT bump).
 """
 
@@ -666,7 +666,7 @@ def _repack_deb(work_dir: str, out_path: str, source_date_epoch: int) -> None:
     same input produced different bytes — the cause of the 2026-06 mass
     hash-divergence between rebuilds and the published mirror (the package
     CONTENT was identical; only the wrapper timestamps moved).  See
-    docs/asg-bump-position-x.md / docs/build-quirks.md.
+    docs/bump-mechanics.md / docs/build-quirks.md.
     """
     import subprocess
     _env = dict(os.environ)

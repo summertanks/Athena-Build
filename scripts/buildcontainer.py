@@ -1875,7 +1875,7 @@ class BuildContainer:
         # whole repo becomes uninstallable.  But a strip that ONLY rewrites a
         # dependency constraint (filename unchanged) is NOT a delta of THIS
         # package — its bytes are identical to pristine upstream.  Per
-        # Position-X (docs/asg-bump-position-x.md) we strip but do NOT bump on
+        # Position-X (docs/bump-mechanics.md) we strip but do NOT bump on
         # dep-constraint-only strips.  (Under self-hosting the build container
         # carries our own pristine/+asg deps, so these strips become no-ops
         # and the case vanishes entirely.)
