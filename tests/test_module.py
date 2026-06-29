@@ -9371,6 +9371,55 @@ def test_transpose_control_text_no_token_is_noop_no_provenance():
     assert _n == 0
 
 
+def test_transpose_scheme_boundary_table_and_ordering():
+    """Immutable-scheme regression: pin the worked-example outputs AND the
+    resulting dpkg ordering chain.  Self-contained (no cache/repo dependency) so
+    it guards the frozen behaviour on every run.  A change that breaks any row
+    or any inequality re-orders already-shipped releases — that is the failure
+    this test exists to catch."""
+    import shutil as _sh
+    if not _sh.which('dpkg'):
+        return
+    from utils import transposed_version as _T
+    # (upstream, patched? -> patch_level, expected) from docs/bump-mechanics.md.
+    _table = [
+        ('0.7.4-20',            0, '0.7.4-20'),                 # pristine, faithful
+        ('1.2.3-4+deb12u3',     0, '1.2.3-4+asg1u3'),           # faithful update
+        ('1.2.3-4+deb12u4',     0, '1.2.3-4+asg1u4'),           # later update
+        ('1.2.3-4+deb12u2',     0, '1.2.3-4+asg1u2'),           # lower (downgrade target)
+        ('2.4.67-1~deb12u2',    0, '2.4.67-1~asg1u2'),          # ~deb -> ~asg (below pristine)
+        ('7:5.1.9-0+deb12u1',   0, '7:5.1.9-0+asg1u1'),         # epoch preserved
+        ('1.2.3-4',             1, '1.2.3-4+asg1u0+p1'),        # patch on pristine (anchored)
+        ('1.2.3-4+deb12u3',     1, '1.2.3-4+asg1u3+p1'),        # patch on an update
+        # embedded update marker kept; only the trailing one translates
+        ('1.44~1+deb12u1+15.8-1~deb12u1', 0, '1.44~1+deb12u1+15.8-1~asg1u1'),
+    ]
+    for _up, _p, _exp in _table:
+        assert _T(_up, 'asg', 1, _p) == _exp, (_up, _p, _T(_up, 'asg', 1, _p))
+
+    import subprocess
+
+    def _lt(_a, _b):
+        return subprocess.run(['dpkg', '--compare-versions', _a, 'lt', _b]).returncode == 0
+
+    # ~asg sits BELOW its own pristine base (the chosen ~deb policy).
+    assert _lt('2.4.67-1~asg1u2', '2.4.67-1')
+    # The +asg update chain, including patch levels, is strictly increasing.
+    _asg_chain = [
+        '1.2.3-4',
+        '1.2.3-4+asg1u0+p1',
+        '1.2.3-4+asg1u2',
+        '1.2.3-4+asg1u3',
+        '1.2.3-4+asg1u3+p1',
+        '1.2.3-4+asg1u4',
+    ]
+    for _lo, _hi in zip(_asg_chain, _asg_chain[1:]):
+        assert _lt(_lo, _hi), f"ordering broken: {_lo} !< {_hi}"
+    # A forced rebuild on a pristine base is anchored too (sorts below u1).
+    assert _T('1.0-2', 'asg', 1, 0, 1) == '1.0-2+asg1u0+b1'
+    assert _lt('1.0-2+asg1u0+b1', '1.0-2+asg1u1')
+
+
 def test_strip_build_version_rejects_malformed_filename():
     """Filenames not in `name_version_arch.ext` shape raise ValueError."""
     from utils import strip_build_version
@@ -40334,6 +40383,7 @@ def main() -> int:
         test_compute_transposed_versions_per_binary_base_uniform_p,
         test_transpose_control_text_version_deps_and_provenance,
         test_transpose_control_text_no_token_is_noop_no_provenance,
+        test_transpose_scheme_boundary_table_and_ordering,
         test_strip_build_version_rejects_malformed_filename,
         test_parse_deb_filename_splits_raw_components,
         test_parse_deb_filename_returns_none_on_mismatch,

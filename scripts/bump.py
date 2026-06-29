@@ -1,31 +1,30 @@
 """Version-suffix logic — the single, manually-reviewable home for every
 rule that decides what version string an artifact carries.
 
-Two concerns live here, and nothing else should touch their internals:
+The scheme is CONTENT-ORDER: we rebuild from source and keep the upstream
+version almost unchanged, translating only a TRAILING stable-update marker
+(`+debNuK` / `~debNuK`) into our own (`+asg<R>uK` / `~asg<R>uK`).  The update
+number K is intrinsic to the upstream version, so a faithful rebuild needs no
+ledger and older content always sorts lower (true downgrades).
 
-  * **NMU strip** — remove Debian's build-environment suffixes
-    (`+bN` binNMU, `+debNuN`/`~debNuN` point-release, `~bpoN+N` backport,
-    `+rpiN`/`+rptN`) so every artifact lands on its pristine source
-    version.  `_NMU_SUFFIX_RE` is the one matcher; `strip_nmu_suffix`
-    (version string), `strip_nmu_from_control_text` (DEBIAN/control) and
-    `strip_nmu_from_deb` (a built .deb, in place) are the three apply
-    points.
+Key entry points:
 
-  * **+asg<R>u<N> stamp** — Athena's own update marker (the parallel to
-    Debian's `debNuN`), applied ONLY when a build is a genuine delta or
-    continues an existing asg lineage.  `compute_post_build_versions` is
-    the pure predictor that `BuildContainer._normalize_built_artifacts`
-    mirrors at build time; `asg_next_n` / `highest_asg_update` derive the
-    per-source uniform N from the published ledger; `restamp_asg_deb`
-    applies a chosen (R, N) to a built .deb.
+  * `transpose` — rewrite a trailing update marker in place (the core move).
+    `transpose_control_text` / `transpose_deb` apply it to a DEBIAN/control text
+    and to a built .deb (filename + control + dependency constraints + sibling
+    pins) in a single repack.
+  * `transposed_version` / `compute_transposed_versions` — the pure predictors
+    that mirror the build path without running it.
+  * `decide_patch_bump_count` — our patch level P on the current base.
+    `_append_patch_force` anchors `+pP` / `+bN` inside the update namespace so
+    they sort below the next upstream update.
 
-`utils` re-exports every public name here, so existing `utils.<name>`
-call sites keep working unchanged; new code may import from `bump`
-directly.  This module has NO dependency on `utils` (one-way:
-utils -> bump), which is what keeps the import graph acyclic.
+`utils` re-exports every public name here, so existing `utils.<name>` call
+sites keep working unchanged; new code may import from `bump` directly.  This
+module has NO dependency on `utils` (one-way: utils -> bump), which keeps the
+import graph acyclic.
 
-See docs/bump-mechanics.md for the bump-decision rationale and the
-four triggers (delta / lineage; dep-constraint-only strips do NOT bump).
+See docs/bump-mechanics.md for the full rationale and the exact rules.
 """
 
 import hashlib
@@ -278,7 +277,7 @@ def apply_asg_suffix(base: str, release: int, n: int) -> str:
 # epoch, an EMBEDDED +deb (shim's `1.44~1+deb12u1+15.8-1...`), +dfsg/+ds/+git,
 # a sourceful +nmuN, a dotted Debian revision — is preserved verbatim.  The
 # leading +/~ sign is kept (a ~deb stays ~asg, sorting BELOW pristine, by
-# design).  See docs/bump-mechanics.md and docs/versioning-algo.txt.
+# design).  See docs/bump-mechanics.md.
 # ---------------------------------------------------------------------------
 # Trailing redistribution token.  `tail` captures an optional `~` that
 # constraint floors append after the ordinal (e.g. `>= 0.8.0-2+deb12u1~`); it
@@ -931,7 +930,7 @@ def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
 # are restamped to the exact final version (the algo appends +bN to siblings
 # but a patched source needs the exact +pP too — _restamp_control_text already
 # does the exact rewrite, which is the correct, complete form).
-# See docs/versioning-algo.txt and docs/bump-mechanics.md.
+# See docs/bump-mechanics.md.
 # ===========================================================================
 def transposed_version(upstream_version: str, prefix: str, release: int,
                        patch_level: int = 0,
@@ -1142,7 +1141,7 @@ def decide_patch_bump_count(prior: 'Optional[dict]', intended_version: str,
         (we edited our patch; removing it entirely drops to 0 — faithful)
       * same version, same patch → P = prior.P  (idempotent rebuild reuses)
 
-    Mirrors docs/versioning-algo.txt Pass 1; computed at build time where the
+    Mirrors the version-decision rules in docs/bump-mechanics.md; computed at build time where the
     prior record is still on hand, so no separate cache-parse pass is needed.
     """
     _patched = bool(patch_set_hash) and patch_set_hash != EMPTY_PATCH_SET_HASH
