@@ -359,3 +359,151 @@ above the previous build and below the next upstream update.
 - **fork** — a package we own and version by hand, ending in `+athenaN`.
 - **tunnelled** — shipped as upstream's own signed binary, with only its
   metadata re-versioned.
+
+---
+
+## Appendix — the build-time pseudocode
+
+This is the canonical algorithm the build follows, kept here in sync with the
+implementation. It is deliberately written in working mnemonics (`sidecar`,
+`build_source`, `Patch_Bump_Count`, …) rather than the reader-facing prose
+above; the prose is the explanation, this is the recipe. **If the pseudocode is
+ever updated, keep these same mnemonics.**
+
+Two corrections from the first draft are folded in and marked `[FIX]`: anchoring
+the patch/force suffix inside the update namespace, and restamping same-source
+sibling pins to the sibling's exact final version (so a patched source whose
+binaries carry different bases cannot ship an unsatisfiable pin).
+
+```
+PREFIX  = BUMP_PREFIX if set, else first_letters(DISTRIBUTION)   # Asgard -> asg
+RELEASE = VERSION                                                # R, e.g. 1 (thor 1)
+
+# ── Pass 1: decide what to rebuild, and our patch level P, per Source ──
+For each Package in selected:
+
+    Source = Package.Source
+    sidecar(Source).rebuild = no
+    sidecar(Source).built   = no
+
+    # Split off a binary-only rebuild marker (kept; epoch kept):
+    #   1:1.2.3-4+deb12u4+b2 -> version = 1:1.2.3-4+deb12u4, binNMU = +b2
+    #   1:1.2.3-4+b1         -> version = 1:1.2.3-4,         binNMU = +b1
+    #   1:1.2.3-4+deb12u4    -> version = 1:1.2.3-4+deb12u4, binNMU = empty
+    #   1:1.2.3-4~bpo1+M     -> version = 1:1.2.3-4,         binNMU = ~bpo1+M
+    version = Package.version.strip_binNMU
+    binNMU  = Package.getbinNMU                  # +bN or ~bpoN+M, if present
+
+    if Package is tunneled:
+        For each binary in Source:
+            if binary not on disk:
+                download binary by binary.upstream_filename
+        continue
+
+    # first time we see this Source
+    if Source not in sidecar:
+        sidecar(Source).rebuild      = yes
+        sidecar(Source).bN_BumpCount = 0
+        if exists Source.patch_set:
+            sidecar(Source).patch_set        = current_patch_set
+            sidecar(Source).Patch_Bump_Count = 1
+        else
+            sidecar(Source).Patch_Bump_Count = 0
+            sidecar(Source).patch_set        = empty
+
+    # upstream Source version changed (base OR nmu; `>` only — downgrades are
+    # a deliberate, forced operation, handled separately)
+    else if Source.version > sidecar(Source).previous_version:
+        sidecar(Source).rebuild = yes
+        if exists Source.patch_set:
+            sidecar(Source).Patch_Bump_Count = 1   # re-baseline: our patch #1 on the new base
+        else
+            sidecar(Source).Patch_Bump_Count = 0
+
+    # same Source version, but OUR patch set changed
+    else if Source.patch_set changed:
+        sidecar(Source).rebuild = yes
+        if exists Source.patch_set:
+            sidecar(Source).Patch_Bump_Count++     # next patch revision
+        else
+            sidecar(Source).Patch_Bump_Count = 0   # patch removed -> faithful
+
+    # only a binNMU/backport moved -> no rebuild (we build from source)
+    else if binNMU != empty:
+        sidecar(Source).rebuild      = no
+        sidecar(Source).bN_BumpCount = 0
+
+# ── Pass 2: build each Source once ──
+For each Package in selected:
+    Source = Package.Source
+    if sidecar(Source).rebuild == yes:
+        sidecar(Source).rebuild = no             # dedup: build the Source once
+        build_source(Source, tunneled = no, force = no)
+    else if Package is tunneled:
+        if sidecar(Source).built == no:
+            build_source(Source, tunneled = yes, force = no)
+
+
+function transpose(version):
+    # Rewrite ONLY a TRAILING debNuN marker to our own; the leading +/~ sign and
+    # everything else (epoch, an embedded +deb, +nmuN, dotted revision) are kept.
+    #   1.2.3-4+deb12u3 -> 1.2.3-4+asg1u3 ;  2.4.67-1~deb12u2 -> 2.4.67-1~asg1u2
+    replace(version, trailing <debNuN>, <PREFIX><RELEASE>u<N>)
+    return version
+
+function append_our_suffix(version, Source, force):
+    # [FIX] Both +p and +b sort ABOVE the +asg namespace, so attaching them to a
+    # bare base would outrank every upstream update.  Anchor them: when there is
+    # no trailing +<PREFIX><RELEASE>uN / ~<PREFIX><RELEASE>uN marker (pristine
+    # base), synthesize u0 first, so they sort BELOW the next upstream update.
+    P  = sidecar(Source).Patch_Bump_Count
+    bN = sidecar(Source).bN_BumpCount
+    if (P > 0 or force == yes) and version has no trailing [+~]<PREFIX><RELEASE>uN:
+        version = version + +<PREFIX><RELEASE>u0
+    if P > 0:
+        version = version + +p<P>            # our patch level
+    if force == yes:
+        version = version + +b<bN>           # our forced rebuild (binNMU)
+    return version                           # order: transpose -> +pP -> +bN
+
+# Force a rebuild (no source change) — our own binNMU, applied to every binary.
+function force_build(Package):
+    build_source(Package.Source, tunneled = no, force = yes)
+
+
+function build_source(Source, tunneled, force):
+    if sidecar(Source).built == yes:
+        return
+
+    if tunneled == false:
+        Build Source (with patches)
+        if force == yes:
+            sidecar(Source).bN_BumpCount++
+        else
+            sidecar(Source).bN_BumpCount = 0
+
+    for each binary in Source:
+        binary.X-upstream-version = binary.version        # provenance (pre-transpose, per binary)
+        binary.version = append_our_suffix(transpose(binary.version), Source, force)
+
+        for each dep in binary:
+            dep_version = transpose(dep.version)           # trailing debNuN -> our marker
+            # [FIX] A same-source sibling pin must land on the sibling's EXACT
+            # final version (uniform P + force across the Source, incl. the u0
+            # anchor) — matched BY NAME so siblings on a DIFFERENT base are
+            # handled.  The old form added only +bN under force and dropped +pP.
+            if dep.name in Source.binaries:
+                dep_version = append_our_suffix(dep_version, Source, force)
+            dep.version = dep_version
+
+        sign binary
+
+    # persist state for next time
+    sidecar(Source).previous_version = Source.version
+    sidecar(Source).patch_set        = current_patch_set
+    sidecar(Source).built            = yes
+```
+
+(A fork is its own provider and is versioned by hand in its changelog, so it
+does not pass through `append_our_suffix` — its `+athenaN` is the recorded
+version; `transpose` still applies to a trailing upstream marker.)
