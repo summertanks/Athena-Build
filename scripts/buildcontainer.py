@@ -1913,13 +1913,23 @@ class BuildContainer:
         if was_patched and _patch_level == 0:
             _patch_level = 1
 
+        # The names of every binary this source just emitted — so transpose_deb
+        # can restamp same-source sibling `=` pins to their exact final version,
+        # including siblings that carry a different base than this binary.
+        _sibling_names = set()
+        for _path in built_files:
+            _df = utils.parse_deb_filename(os.path.basename(_path))
+            if _df is not None:
+                _sibling_names.add(_df[0])
+
         _current_paths: 'list[str]' = []
         for _path in built_files:
             _f = os.path.basename(_path)
             try:
                 _r = utils.transpose_deb(
                     _path, 'asg', _release,
-                    patch_level=_patch_level, force_bn=_force_bn)
+                    patch_level=_patch_level, force_bn=_force_bn,
+                    sibling_names=_sibling_names)
                 _new = _r.get('new_path', _path)
                 if _r['status'] == 'rewritten' and _new != _path:
                     logger.info(

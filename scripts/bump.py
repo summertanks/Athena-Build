@@ -238,11 +238,17 @@ def strip_binNMU(version: str) -> 'tuple[str, str]':
 # Sorts above pristine and is monotonic across releases (asg2u1 > asg1u9),
 # verified with `dpkg --compare-versions`.
 # ---------------------------------------------------------------------------
-ASG_SUFFIX_RE = re.compile(r'\+asg(\d+)u(\d+)$')
+# Matches our marker at the end of a version: the `+asg<R>uK` update marker OR
+# its `~asg<R>uK` below-pristine form, followed by any chain of our patch
+# (`+pP`) / force-binNMU (`+bN`) suffixes.  Anchored at `$`, with the sign and
+# the trailing chain both optional-aware, so it reduces every shape the
+# transpose scheme emits: `+asg1u3`, `~asg1u2`, `+asg1u0+p1`, `+asg1u3+p1+b1`.
+ASG_SUFFIX_RE = re.compile(r'[+~]asg(\d+)u(\d+)(?:\+p\d+|\+b\d+)*$')
 
 
 def parse_asg_suffix(version: str) -> 'Optional[tuple[int, int]]':
-    """Return (release, n) parsed from a trailing +asg<R>u<N>, else None."""
+    """Return (release, K) parsed from a trailing `+asg<R>uK` / `~asg<R>uK`
+    marker (ignoring any `+pP` / `+bN` tail), else None."""
     _m = ASG_SUFFIX_RE.search(version)
     if not _m:
         return None
@@ -250,13 +256,16 @@ def parse_asg_suffix(version: str) -> 'Optional[tuple[int, int]]':
 
 
 def pristine_base(version: str) -> str:
-    """Strip BOTH our +asg<R>u<N> marker and any upstream NMU layer,
-    yielding the pristine source base version — the grouping key for N.
+    """Strip our marker (and its `+pP` / `+bN` tail) AND any upstream NMU layer,
+    yielding the pristine source base version — the grouping key.
 
-        pristine_base('3.0.15-1')             → '3.0.15-1'
-        pristine_base('3.0.15-1+asg1u2')      → '3.0.15-1'
-        pristine_base('3.0.15-1+deb12u2')     → '3.0.15-1'
-        pristine_base('1:2.38.1-5+asg1u1')    → '1:2.38.1-5'  (epoch kept)
+        pristine_base('3.0.15-1')                → '3.0.15-1'
+        pristine_base('3.0.15-1+asg1u2')         → '3.0.15-1'
+        pristine_base('3.0.15-1+asg1u0+p1')      → '3.0.15-1'  (patch on pristine)
+        pristine_base('3.0.15-1+asg1u3+p1+b1')   → '3.0.15-1'
+        pristine_base('2.4.67-1~asg1u2+p1')      → '2.4.67-1'  (~ form)
+        pristine_base('3.0.15-1+deb12u2')        → '3.0.15-1'
+        pristine_base('1:2.38.1-5+asg1u1')       → '1:2.38.1-5'  (epoch kept)
     """
     return strip_nmu_suffix(ASG_SUFFIX_RE.sub('', version))
 
@@ -1046,9 +1055,49 @@ def transpose_control_text(content: str, prefix: str,
     return _content, _total
 
 
+# Exact-pin matcher: a `<name> (= <version>)` constraint inside a relation
+# field.  Name capture allows the Debian package-name character set.
+_EXACT_PIN_RE = re.compile(
+    r'([A-Za-z0-9][A-Za-z0-9.+-]*)(\s*\(\s*=\s*)([^)]+?)(\s*\))')
+
+
+def _restamp_sibling_pins(content: str, sibling_names: 'set',
+                          patch_level: int, force_bn: 'Optional[int]',
+                          prefix: str, release: int) -> str:
+    """Apply our patch (`+pP`) / force (`+bN`) suffix to every exact `(= V)` pin
+    in a dep-relation field whose TARGET is a same-source sibling.
+
+    A patched source stamps every binary with the same uniform P, so its
+    sibling `=` pins must land on the sibling's exact final version.  Matching by
+    TARGET NAME (not by "the version equals this binary's own version") is what
+    makes that hold when siblings carry DIFFERENT bases — the case
+    `_restamp_control_text` misses.  The pins were already transposed by
+    `transpose_control_text`, so this only appends our uniform tail.
+    """
+    if not sibling_names or (patch_level == 0 and force_bn is None):
+        return content
+
+    def _sub(_m: 're.Match') -> str:
+        _name, _lhs, _ver, _rhs = _m.groups()
+        if _name in sibling_names:
+            _ver = _append_patch_force(_ver, patch_level, force_bn,
+                                       prefix, release)
+        return f'{_name}{_lhs}{_ver}{_rhs}'
+
+    _lines: 'list[str]' = []
+    _in_target = False
+    for _line in content.splitlines(keepends=True):
+        if _line and _line[0] not in (' ', '\t'):
+            _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
+            _in_target = _m is not None and _m.group(1) in _NMU_STRIP_FIELDS
+        _lines.append(_EXACT_PIN_RE.sub(_sub, _line) if _in_target else _line)
+    return ''.join(_lines)
+
+
 def transpose_deb(deb_path: str, prefix: str, release: int,
                   patch_level: int = 0,
-                  force_bn: 'Optional[int]' = None) -> dict:
+                  force_bn: 'Optional[int]' = None,
+                  sibling_names: 'Optional[set]' = None) -> dict:
     """Transpose + stamp a built .deb/.udeb in place — the single-cycle
     replacement for ``strip_nmu_from_deb`` + ``restamp_asg_deb`` on the build
     and tunnel paths.  Updates filename, DEBIAN/control Version, dep
@@ -1097,7 +1146,19 @@ def transpose_deb(deb_path: str, prefix: str, release: int,
     _final_ver = _append_patch_force(_k_ver, patch_level, force_bn,
                                      prefix, release)
     if _final_ver != _k_ver:
-        _new_text = _restamp_control_text(_k_text, _k_ver, _final_ver)
+        if sibling_names is not None:
+            # Set the Version field, then restamp EVERY same-source sibling pin
+            # by target name — so cross-base siblings (e2fsprogs, samba, …) also
+            # land on their exact final version under a patched/force build.
+            _new_text = re.sub(
+                r'^Version: \S+\s*$', lambda _m: f'Version: {_final_ver}',
+                _k_text, count=1, flags=re.MULTILINE)
+            _new_text = _restamp_sibling_pins(
+                _new_text, sibling_names, patch_level, force_bn,
+                prefix, release)
+        else:
+            # No sibling set (tunnel / standalone): same-base own-version pins.
+            _new_text = _restamp_control_text(_k_text, _k_ver, _final_ver)
     else:
         _new_text = _k_text
 

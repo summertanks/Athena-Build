@@ -9420,6 +9420,34 @@ def test_transpose_scheme_boundary_table_and_ordering():
     assert _lt('1.0-2+asg1u0+b1', '1.0-2+asg1u1')
 
 
+def test_decide_patch_bump_count_branches():
+    """Every branch of the patch-level (P) decision against the prior record:
+    first build, version change (reset), patch-set change (++), patch removed
+    (->0), idempotent rebuild (reuse), and defensive defaults."""
+    from utils import decide_patch_bump_count as D, EMPTY_PATCH_SET_HASH as E
+    _H, _H2 = 'deadbeef', 'cafef00d'
+    # First build (no prior): patched -> 1, unpatched -> 0.
+    assert D(None, '1.0-1', _H) == 1
+    assert D(None, '1.0-1', E) == 0
+    _prior = {'intended_version': '1.0-1', 'patch_set_hash': _H,
+              'patch_bump_count': 3}
+    # Source version changed -> reset (1 if patched, else 0).
+    assert D(_prior, '1.0-2', _H) == 1
+    assert D(_prior, '1.0-2', E) == 0
+    # Same version, our patch CHANGED -> advance.
+    assert D(_prior, '1.0-1', _H2) == 4
+    # Same version, patch REMOVED -> back to faithful 0.
+    assert D(_prior, '1.0-1', E) == 0
+    # Same version, same patch -> reuse (idempotent rebuild).
+    assert D(_prior, '1.0-1', _H) == 3
+    # Defensive: missing counter defaults to 0 then advances; non-int tolerated;
+    # an empty-dict prior is treated as no-prior.
+    assert D({'intended_version': '1.0-1', 'patch_set_hash': _H}, '1.0-1', _H2) == 1
+    assert D({'intended_version': '1.0-1', 'patch_set_hash': _H,
+              'patch_bump_count': 'x'}, '1.0-1', _H2) == 1
+    assert D({}, '1.0-1', _H) == 1
+
+
 def test_strip_build_version_rejects_malformed_filename():
     """Filenames not in `name_version_arch.ext` shape raise ValueError."""
     from utils import strip_build_version
@@ -22422,6 +22450,18 @@ def test_pristine_base_strips_both_layers():
     # Both layers cannot legitimately co-occur (we strip NMU before stamping),
     # but the grouping key must still resolve to the base if they did:
     assert pristine_base('3.0.15-1+deb12u2') == pristine_base('3.0.15-1+asg9u9')
+    # The transpose scheme also ships patch (+pP) / force (+bN) tails and the
+    # below-pristine ~asg form — all must reduce to the same base, or every
+    # patched/fork package mis-groups against its pristine line.
+    assert pristine_base('3.0.15-1+asg1u0+p1') == '3.0.15-1'    # patch on pristine
+    assert pristine_base('3.0.15-1+asg1u3+p1') == '3.0.15-1'
+    assert pristine_base('3.0.15-1+asg1u3+p1+b1') == '3.0.15-1'
+    assert pristine_base('3.0.15-1+asg1u0+b1') == '3.0.15-1'    # force on pristine
+    assert pristine_base('2.4.67-1~asg1u2+p1') == '2.4.67-1'    # ~asg form
+    from utils import parse_asg_suffix
+    assert parse_asg_suffix('3.0.15-1+asg1u3+p1') == (1, 3)     # tail ignored
+    assert parse_asg_suffix('2.4.67-1~asg1u2') == (1, 2)
+    assert parse_asg_suffix('3.0.15-1+deb12u2') is None
 
 
 def test_asg_suffix_sorts_above_pristine_and_across_release():
@@ -30083,6 +30123,50 @@ def test_normalize_built_artifacts_uniform_p_across_siblings():
             _ctrl = _deb.control.get_content('control').decode()
         assert ('linux-headers-6.1.0-49-amd64 (= 6.1.174-1+asg1u1+p1)'
                 in _ctrl), _ctrl
+
+
+def test_normalize_built_artifacts_cross_base_sibling_pin_gets_patch_level():
+    """TRANSPOSE: a source whose binaries carry DIFFERENT bases (e2fsprogs-style:
+    comerr-dev at 2.1-1.47.0-2, libcom-err2 at 1.47.0-2), patched (P=1), must
+    restamp the cross-base exact `=` pin to the sibling's EXACT final version
+    INCLUDING +p1.  The old own-version-only restamp dropped the +p1 here and
+    shipped an unsatisfiable pin (the predictor masked it) — this guards it."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from debian.debfile import DebFile
+    with tempfile.TemporaryDirectory() as _tmp:
+        _dev = os.path.join(_tmp, 'comerr-dev_2.1-1.47.0-2+deb12u2_amd64.deb')
+        _lib = os.path.join(_tmp, 'libcom-err2_1.47.0-2+deb12u2_amd64.deb')
+        # comerr-dev pins its DIFFERENT-base sibling libcom-err2 exactly.
+        _build_minimal_deb(_dev, 'comerr-dev', '2.1-1.47.0-2+deb12u2', 'amd64',
+                           depends='libcom-err2 (= 1.47.0-2+deb12u2)')
+        _build_minimal_deb(_lib, 'libcom-err2', '1.47.0-2+deb12u2', 'amd64')
+
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+
+        class _Cfg:
+            build_version = '1'
+        _bc.config = _Cfg()
+
+        class _SrcPkg:
+            package = 'e2fsprogs'
+            version = '1.47.0-2+deb12u2'
+
+        _final = _bc._normalize_built_artifacts(
+            _SrcPkg(), [_dev, _lib], was_patched=True)
+        _names = sorted(os.path.basename(_f) for _f in _final)
+        # Each binary transposes its OWN base; uniform P=1.
+        assert _names == [
+            'comerr-dev_2.1-1.47.0-2+asg1u2+p1_amd64.deb',
+            'libcom-err2_1.47.0-2+asg1u2+p1_amd64.deb',
+        ], _names
+        # The cross-base pin tracks the sibling's EXACT final version (with +p1).
+        _dev_final = [_f for _f in _final if 'comerr-dev_' in _f][0]
+        with DebFile(_dev_final) as _deb:
+            _ctrl = _deb.control.get_content('control').decode()
+        assert 'libcom-err2 (= 1.47.0-2+asg1u2+p1)' in _ctrl, _ctrl
 
 
 def test_all_datetime_emission_is_utc():
@@ -40384,6 +40468,7 @@ def main() -> int:
         test_transpose_control_text_version_deps_and_provenance,
         test_transpose_control_text_no_token_is_noop_no_provenance,
         test_transpose_scheme_boundary_table_and_ordering,
+        test_decide_patch_bump_count_branches,
         test_strip_build_version_rejects_malformed_filename,
         test_parse_deb_filename_splits_raw_components,
         test_parse_deb_filename_returns_none_on_mismatch,
@@ -41178,6 +41263,7 @@ def main() -> int:
         test_source_state_tunneled_record_with_pristine_binary_returns_tunneled,
         test_normalize_built_artifacts_returns_post_rename_paths,
         test_normalize_built_artifacts_uniform_p_across_siblings,
+        test_normalize_built_artifacts_cross_base_sibling_pin_gets_patch_level,
         test_cmd_get_lists_every_gettable_param_when_called_bare,
         test_cmd_get_named_param_returns_current_value,
         test_cmd_set_mode_switches_value_and_warns_to_re_run_cache_parse,
