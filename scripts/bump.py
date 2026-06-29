@@ -28,9 +28,15 @@ See docs/bump-mechanics.md for the bump-decision rationale and the
 four triggers (delta / lineage; dep-constraint-only strips do NOT bump).
 """
 
+import hashlib
 import os
 import re
 from typing import Dict, List, Optional
+
+# sha256 of the empty byte string — the patch_set_hash an UNPATCHED source
+# carries (utils.patch_set_hash([]) hashes "").  A record whose patch_set_hash
+# differs from this carries real Athena patches.
+EMPTY_PATCH_SET_HASH = hashlib.sha256(b'').hexdigest()
 
 
 def parse_deb_filename(filename: str) -> 'Optional[tuple]':
@@ -1119,6 +1125,37 @@ def transpose_deb(deb_path: str, prefix: str, release: int,
     _result.update({'status': 'rewritten', 'new_path': _new_path,
                     'version': _final_ver})
     return _result
+
+
+def decide_patch_bump_count(prior: 'Optional[dict]', intended_version: str,
+                            patch_set_hash: str) -> int:
+    """Compute P — our patch level on the current source version — per the
+    transpose Pass-1 rules, comparing this build against the prior build record.
+
+      * patched := patch_set_hash is non-empty real patches
+      * no prior, OR the source version changed → P = 1 if patched else 0
+        (a new base re-baselines; our patch on it is patch #1)
+      * same version, patch_set changed → P = prior.P + 1 if patched else 0
+        (we edited our patch; removing it entirely drops to 0 — faithful)
+      * same version, same patch → P = prior.P  (idempotent rebuild reuses)
+
+    Mirrors docs/versioning-algo.txt Pass 1; computed at build time where the
+    prior record is still on hand, so no separate cache-parse pass is needed.
+    """
+    _patched = bool(patch_set_hash) and patch_set_hash != EMPTY_PATCH_SET_HASH
+    if not prior:
+        return 1 if _patched else 0
+    _prev_ver = prior.get('intended_version')
+    _prev_hash = prior.get('patch_set_hash')
+    try:
+        _prev_p = int(prior.get('patch_bump_count', 0) or 0)
+    except (TypeError, ValueError):
+        _prev_p = 0
+    if _prev_ver != intended_version:
+        return 1 if _patched else 0
+    if _prev_hash != patch_set_hash:
+        return (_prev_p + 1) if _patched else 0
+    return _prev_p
 
 
 def _append_patch_force(version: str, patch_level: int,
