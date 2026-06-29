@@ -9256,6 +9256,64 @@ def test_strip_build_version_no_change_when_no_binNMU():
             == 'foo_1.0-2_amd64.deb')
 
 
+# --- TRANSPOSE scheme primitives (transpose / strip_binNMU) ---------------
+
+def test_transpose_trailing_plus_deb():
+    """A trailing `+debNuK` becomes `+asg<R>uK`; epoch preserved."""
+    from utils import transpose
+    assert transpose('2.36-9+deb12u14', 'asg', 1) == '2.36-9+asg1u14'
+    assert transpose('7:5.1.9-0+deb12u1', 'asg', 1) == '7:5.1.9-0+asg1u1'
+    # a different prefix/release flow through verbatim
+    assert transpose('1.2.3-4+deb12u3', 'val', 2) == '1.2.3-4+val2u3'
+
+
+def test_transpose_trailing_tilde_deb_keeps_sign():
+    """A trailing `~debNuK` keeps its `~` → `~asg<R>uK` (sorts below pristine)."""
+    from utils import transpose
+    assert transpose('2.4.67-1~deb12u2', 'asg', 1) == '2.4.67-1~asg1u2'
+    assert transpose('1:9.18.49-1~deb12u1', 'asg', 1) == '1:9.18.49-1~asg1u1'
+
+
+def test_transpose_embedded_deb_is_left_alone():
+    """An EMBEDDED `+deb` (not the trailing token) is upstream identity — kept.
+    shim ships `1.44~1+deb12u1+15.8-1~deb12u1`: only the trailing `~deb12u1`
+    transposes; the mid-string `+deb12u1` stays."""
+    from utils import transpose
+    assert (transpose('1.44~1+deb12u1+15.8-1~deb12u1', 'asg', 1)
+            == '1.44~1+deb12u1+15.8-1~asg1u1')
+    # deb token followed by more version structure (cross-gcc) → no trailing
+    # token → unchanged.
+    assert transpose('12.2.0-14+deb12u1+25.2', 'asg', 1) == '12.2.0-14+deb12u1+25.2'
+
+
+def test_transpose_no_token_unchanged():
+    """No trailing redistribution token → version returns verbatim."""
+    from utils import transpose
+    assert transpose('0.7.4-20', 'asg', 1) == '0.7.4-20'
+    assert transpose('2.10.4+nmu1', 'asg', 1) == '2.10.4+nmu1'        # +nmu kept
+    assert transpose('2.10.4+nmu1+b1', 'asg', 1) == '2.10.4+nmu1+b1'  # trailing +b
+    assert transpose('1.0-3.3', 'asg', 1) == '1.0-3.3'                # dotted rev
+    assert transpose('0.7.0+really0.5.0-1', 'asg', 1) == '0.7.0+really0.5.0-1'
+
+
+def test_transpose_floor_tail_tilde_preserved():
+    """A constraint floor's trailing `~` (e.g. `>= 0.8.0-2+deb12u1~`) carries
+    through so the transposed floor keeps the same ordering."""
+    from utils import transpose
+    assert transpose('0.8.0-2+deb12u1~', 'asg', 1) == '0.8.0-2+asg1u1~'
+
+
+def test_strip_binNMU_splits_trailing_marker():
+    """`+bN` / `~bpoN+M` split off; +deb / +nmu / dotted-rev are NOT touched."""
+    from utils import strip_binNMU
+    assert strip_binNMU('1.0-2+b1') == ('1.0-2', '+b1')
+    assert strip_binNMU('1.0-2~bpo12+1') == ('1.0-2', '~bpo12+1')
+    assert strip_binNMU('1.0-2+deb12u3+b1') == ('1.0-2+deb12u3', '+b1')
+    assert strip_binNMU('1.0-2+deb12u3') == ('1.0-2+deb12u3', '')   # +deb kept
+    assert strip_binNMU('2.10.4+nmu1') == ('2.10.4+nmu1', '')       # +nmu kept
+    assert strip_binNMU('1.0-3.3') == ('1.0-3.3', '')              # dotted rev kept
+
+
 def test_strip_build_version_rejects_malformed_filename():
     """Filenames not in `name_version_arch.ext` shape raise ValueError."""
     from utils import strip_build_version
@@ -29106,6 +29164,10 @@ def test_build_record_schema_v3_field_set():
     container_exited phase with {peak_rss_bytes, peak_rss_mb,
     mem_limit_bytes, peak_cpu_pct, samples} from the per-build poll).
 
+    v5→v6 (transpose scheme): added `patch_bump_count` (P — our patch level
+    on the current upstream base) and `bn_bump_count` (our force-binNMU level),
+    the per-source sidecar counters the content-order version decision reads.
+
     `athena_build_version` is INFORMATIONAL provenance (which Athena-Build
     produced the record), NOT a functional schema field: no consumer gates on
     it and the migration ignores it, so it does NOT carry a schema bump — but it
@@ -29115,8 +29177,8 @@ def test_build_record_schema_v3_field_set():
         package='libwmf', intended_version='0.2.12-5.1',
         patch_set_hash='abc123', started='2026-06-02T14:00:00Z',
     )
-    assert _u.BUILD_RECORD_SCHEMA_VERSION == 5
-    assert _rec['schema_version'] == 5
+    assert _u.BUILD_RECORD_SCHEMA_VERSION == 6
+    assert _rec['schema_version'] == 6
     _required = {
         'schema_version', 'package', 'intended_version', 'built_version',
         'patch_set_hash', 'phase', 'status', 'started', 'finished',
@@ -29126,9 +29188,10 @@ def test_build_record_schema_v3_field_set():
         'lifecycle_v', 'history',   # LEDGER-01 v4 baseline
         'resources',                # OBS-03 v5
         'athena_build_version',     # toolchain provenance (informational)
+        'patch_bump_count', 'bn_bump_count',   # transpose-scheme v6 sidecar
     }
     assert set(_rec.keys()) == _required, (
-        f"v5 schema drift: {set(_rec.keys()) ^ _required}")
+        f"v6 schema drift: {set(_rec.keys()) ^ _required}")
     assert _rec['phase'] == 'entry'
     assert _rec['status'] is None
     assert _rec['republished_from'] == {}
@@ -30782,7 +30845,7 @@ def test_backfill_output_hashes_upgrades_v1_record():
         # Verify the upgraded record.
         _rec = _u.read_build_record(_log, 'libfoo')
         assert _rec is not None
-        assert _rec['schema_version'] == 5
+        assert _rec['schema_version'] == 6
         import hashlib as _hashlib
         _h1 = _hashlib.sha256(b'fake-deb-1').hexdigest()
         _h2 = _hashlib.sha256(b'fake-deb-2').hexdigest()
@@ -30828,7 +30891,7 @@ def test_backfill_output_hashes_reports_missing_files():
         assert _stats['upgraded'] == 1
         _rec = _u.read_build_record(_log, 'ghost')
         assert _rec is not None
-        assert _rec['schema_version'] == 5
+        assert _rec['schema_version'] == 6
         assert _rec['output_hashes'] == {}  # nothing on disk to hash
         assert _rec['republished_from'] == {}  # MIRROR-02 v3 default
         assert _rec['pulled_from'] is None    # MIRROR-02 v3 default
@@ -40197,6 +40260,12 @@ def main() -> int:
         test_strip_build_version_leaves_embedded_binNMU_alone,
         test_strip_build_version_handles_udeb_extension,
         test_strip_build_version_no_change_when_no_binNMU,
+        test_transpose_trailing_plus_deb,
+        test_transpose_trailing_tilde_deb_keeps_sign,
+        test_transpose_embedded_deb_is_left_alone,
+        test_transpose_no_token_unchanged,
+        test_transpose_floor_tail_tilde_preserved,
+        test_strip_binNMU_splits_trailing_marker,
         test_strip_build_version_rejects_malformed_filename,
         test_parse_deb_filename_splits_raw_components,
         test_parse_deb_filename_returns_none_on_mismatch,

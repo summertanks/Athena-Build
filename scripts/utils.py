@@ -42,9 +42,11 @@ from bump import (
     pristine_base as pristine_base,
     restamp_asg_deb as restamp_asg_deb,
     strip_build_version as strip_build_version,
+    strip_binNMU as strip_binNMU,
     strip_nmu_from_control_text as strip_nmu_from_control_text,
     strip_nmu_from_deb as strip_nmu_from_deb,
     strip_nmu_suffix as strip_nmu_suffix,
+    transpose as transpose,
 )
 
 if TYPE_CHECKING:
@@ -755,7 +757,7 @@ def patch_set_hash(patch_dir: str, patch_files: list) -> str:
 # fsync → os.replace.  POSIX rename(2) guarantees readers see either the
 # old valid file or the new valid file, never a torn write.
 
-BUILD_RECORD_SCHEMA_VERSION = 5
+BUILD_RECORD_SCHEMA_VERSION = 6
 BUILD_RECORD_SUFFIX = '.build.json'
 # v1 → v2: adds output_hashes {filename: sha256_hex}, the
 # per-emitted-binary digest that the coord layer pins into its claim
@@ -1128,6 +1130,17 @@ def new_build_record(*, package: str,
         # mem_limit_bytes, peak_cpu_pct, samples}.  None until the build
         # runs (or for pulled/tunneled records that never ran a container).
         'resources':        None,
+        # TRANSPOSE-scheme per-source sidecar counters (the algo's
+        # sidecar(Source)).  patch_bump_count = P, our patch level on the
+        # current upstream base (0 = faithful; bumps when patch_set_hash
+        # changes within a base, resets to 1 on a base change / 0 when the
+        # patch is removed).  bn_bump_count = our force-binNMU level (0 unless
+        # we deliberately force-rebuild).  Additive + .get()-defaulted at every
+        # read, so no schema bump / migration needed (cf. athena_build_version);
+        # the patch identity itself rides in the existing patch_set_hash, and
+        # the prior upstream base in built_version/intended_version.
+        'patch_bump_count': 0,
+        'bn_bump_count':    0,
     }
 
 
@@ -1683,9 +1696,11 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
                           and 'pulled_from' in _rec
                           and 'component' in _rec)
         _has_v4_fields = 'lifecycle_v' in _rec and 'history' in _rec
+        _has_v6_fields = ('patch_bump_count' in _rec
+                          and 'bn_bump_count' in _rec)
         if (_current_version >= BUILD_RECORD_SCHEMA_VERSION
                 and all(_o in _existing for _o in _outputs)
-                and _has_v3_fields and _has_v4_fields):
+                and _has_v3_fields and _has_v4_fields and _has_v6_fields):
             _stats['skipped'] += 1
             continue
         _new_hashes = dict(_existing)
@@ -1723,6 +1738,10 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
         # `cache parse` touch; here we only mark the record migrated.
         _rec.setdefault('lifecycle_v', 1)
         _rec.setdefault('history', [])
+        # v6 fields — transpose-scheme per-source sidecar counters; default 0
+        # on backfill (older records pre-date the content-order scheme).
+        _rec.setdefault('patch_bump_count', 0)
+        _rec.setdefault('bn_bump_count', 0)
         try:
             write_build_record(buildlog_dir, _rec)
             _stats['upgraded'] += 1

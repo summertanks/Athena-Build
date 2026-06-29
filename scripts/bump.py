@@ -186,6 +186,36 @@ def strip_nmu_suffix(version: str) -> str:
     return _NMU_SUFFIX_RE.sub('', version)
 
 
+# Trailing binary-only rebuild marker: +bN (modern binNMU) or ~bpoN+M
+# (backport).  NARROWER than _NMU_SUFFIX_RE — it deliberately does NOT touch
+# +debNuN/~debNuN (redistribution ordinals, which the TRANSPOSE scheme rewrites
+# rather than strips) nor +nmuN / dotted Debian revisions / +really (real
+# source identity).  Used by the Pass-1 rebuild decision to compare a source
+# version independent of a buildd's binary-only rebuild.
+_BINNMU_SUFFIX_RE = re.compile(r'(?:\+b\d+|~bpo\d+\+\d+)$')
+
+
+def strip_binNMU(version: str) -> 'tuple[str, str]':
+    """Split a trailing binary-only rebuild marker off a version string.
+
+    Returns ``(base, marker)`` where *marker* is the trailing ``+bN`` /
+    ``~bpoN+M`` (``''`` when absent) and *base* is the version with that marker
+    removed.  Unlike :func:`strip_nmu_suffix` this does NOT touch
+    ``+debNuN``/``~debNuN`` (transposed, not stripped) nor ``+nmuN`` / a dotted
+    Debian revision / ``+really`` (real source identity — kept verbatim).
+
+        strip_binNMU('1.0-2+b1')          → ('1.0-2', '+b1')
+        strip_binNMU('1.0-2~bpo12+1')     → ('1.0-2', '~bpo12+1')
+        strip_binNMU('1.0-2+deb12u3+b1')  → ('1.0-2+deb12u3', '+b1')
+        strip_binNMU('1.0-2+deb12u3')     → ('1.0-2+deb12u3', '')
+        strip_binNMU('2.10.4+nmu1')       → ('2.10.4+nmu1', '')
+    """
+    _m = _BINNMU_SUFFIX_RE.search(version)
+    if not _m:
+        return version, ''
+    return version[:_m.start()], _m.group(0)
+
+
 # ---------------------------------------------------------------------------
 # Athena update-version suffix:  +asg<R>u<N>
 #
@@ -230,6 +260,44 @@ def apply_asg_suffix(base: str, release: int, n: int) -> str:
     """Stamp a pristine base version with our update marker → base+asg<R>u<N>.
     Epoch (if any) is preserved — the suffix only appends to the end."""
     return f'{base}+asg{release}u{n}'
+
+
+# ---------------------------------------------------------------------------
+# TRANSPOSE — the content-order scheme.  Rather than strip a +debNuN to
+# pristine and re-stamp a ship-order +asg<R>u<N>, we rewrite ONLY the TRAILING
+# redistribution token (+debNuK / ~debNuK) to our own +asg<R>uK / ~asg<R>uK,
+# in place.  K (the upstream point-release ordinal) is intrinsic — it rides in
+# the upstream version, so a faithful rebuild needs no ledger and older content
+# always sorts lower (true downgrades).  Everything before the trailing token —
+# epoch, an EMBEDDED +deb (shim's `1.44~1+deb12u1+15.8-1...`), +dfsg/+ds/+git,
+# a sourceful +nmuN, a dotted Debian revision — is preserved verbatim.  The
+# leading +/~ sign is kept (a ~deb stays ~asg, sorting BELOW pristine, by
+# design).  See docs/bump-mechanics.md and docs/versioning-algo.txt.
+# ---------------------------------------------------------------------------
+# Trailing redistribution token.  `tail` captures an optional `~` that
+# constraint floors append after the ordinal (e.g. `>= 0.8.0-2+deb12u1~`); it
+# is carried through so a transposed floor keeps sorting the same way.
+_TRANSPOSE_RE = re.compile(r'(?P<sign>[+~])deb\d+u(?P<k>\d+)(?P<tail>~?)$')
+
+
+def transpose(version: str, prefix: str, release: int) -> str:
+    """Rewrite a TRAILING +debNuK / ~debNuK token to +<prefix><R>uK /
+    ~<prefix><R>uK, in place.  Returns *version* unchanged when it carries no
+    trailing redistribution token.
+
+        transpose('2.36-9+deb12u14', 'asg', 1)  → '2.36-9+asg1u14'
+        transpose('2.4.67-1~deb12u2', 'asg', 1) → '2.4.67-1~asg1u2'   (~ kept)
+        transpose('7:5.1.9-0+deb12u1', 'asg', 1)→ '7:5.1.9-0+asg1u1'  (epoch kept)
+        transpose('1.44~1+deb12u1+15.8-1~deb12u1', 'asg', 1)
+                                 → '1.44~1+deb12u1+15.8-1~asg1u1' (embedded kept)
+        transpose('2.10.4+nmu1', 'asg', 1)       → '2.10.4+nmu1'   (no trailing deb)
+        transpose('2.10.4+nmu1+b1', 'asg', 1)    → '2.10.4+nmu1+b1'(trailing +b1)
+        transpose('0.8.0-2+deb12u1~', 'asg', 1)  → '0.8.0-2+asg1u1~' (floor tail)
+    """
+    return _TRANSPOSE_RE.sub(
+        lambda m: f"{m.group('sign')}{prefix}{release}u{m.group('k')}{m.group('tail')}",
+        version,
+    )
 
 
 def asg_filename(filename: str, release: int, n: int) -> str:
