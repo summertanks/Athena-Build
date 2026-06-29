@@ -27259,19 +27259,26 @@ def test_generate_top_release_avoids_self_reference_via_tempfile():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_needs_bump_build_per_file_exact_un():
-    """_needs_bump_build: a same-base re-spin (source version strips smaller)
-    is a bump-target only while its EXACT current-generation +asg<R>u<N> file
-    is absent — per file, and not satisfied by a stale older +asg.  A clean
-    new-base source is never a target."""
+def test_needs_bump_build_predicts_transpose_filename():
+    """_needs_bump_build under the content-order scheme: the expected filename
+    is INTRINSIC — the binary's pristine base + the source's transposed update
+    marker (uniform K across the source) + our patch level — exactly what the
+    stamper writes.  The published ledger is NOT consulted; a stale older +asg
+    on disk does not satisfy the current generation; a clean new base is never
+    a target."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build  # noqa: F401
     from build import BuildSession
+    import utils as _u
     with tempfile.TemporaryDirectory() as _tmp:
+        _log = os.path.join(_tmp, 'log')
+        _bl = os.path.join(_log, 'build')
+        os.makedirs(_bl)
         _sess = BuildSession.__new__(BuildSession)
 
         class _Cfg:
             build_version = '1'
+            dir_log = _log
             def deb_dest_for_filename(self, f, component='main'):
                 return _tmp
         _sess.config = _Cfg()
@@ -27287,29 +27294,41 @@ def test_needs_bump_build_per_file_exact_un():
         _sess._predicted_files_for_source = lambda n: ['foo_1.3-1_amd64.deb']
         assert _sess._needs_bump_build('foo', _Src('1.3-1'), {}, 1) is False
 
-        # (2) security re-spin, expected u1 absent → target
+        # (2) security re-spin +deb1u1 → expected intrinsic +asg1u1; absent → target
         _sess._predicted_files_for_source = lambda n: ['foo_1.2-3_amd64.deb']
-        _delta = _Src('1.2-3+deb1u1')        # strips to 1.2-3 (same base)
+        _delta = _Src('1.2-3+deb1u1')        # strips to 1.2-3, K=1
         assert _sess._needs_bump_build('foo', _delta, {}, 1) is True
-        # plant the EXACT u1 → no longer a target (idempotent)
-        _plant('foo_1.2-3+asg1u1_amd64.deb')
+        _plant('foo_1.2-3+asg1u1_amd64.deb')                 # plant the exact gen
         assert _sess._needs_bump_build('foo', _delta, {}, 1) is False
 
-        # (3) cumulative + exact-uN: ledger already at u1 → need u2; the
-        # on-disk u1 must NOT satisfy the u2 check (exact os.path.isfile, not
-        # find_matching_artifact).
-        _ledger = {'foo': ['1.2-3+asg1u1']}
-        assert _sess._needs_bump_build('foo', _delta, _ledger, 1) is True
+        # (3) a NEWER upstream re-spin +deb1u2 (K=2) expects +asg1u2; the stale
+        # on-disk u1 must NOT satisfy it (exact check, ledger-independent).
+        _delta2 = _Src('1.2-3+deb1u2')
+        assert _sess._needs_bump_build('foo', _delta2, {}, 1) is True
         _plant('foo_1.2-3+asg1u2_amd64.deb')
-        assert _sess._needs_bump_build('foo', _delta, _ledger, 1) is False
+        assert _sess._needs_bump_build('foo', _delta2, {}, 1) is False
 
-        # (4) per-file divergence: foo→u2 present, foo-data→u5 missing → target
+        # (4) uniform K across a source's binaries: both expect +asg1u1 (same
+        # source suffix); one present, one missing → still a target.
         _sess._predicted_files_for_source = lambda n: [
             'foo_1.2-3_amd64.deb', 'foo-data_1.2-3_amd64.deb']
-        _led2 = {'foo': ['1.2-3+asg1u1'], 'foo-data': ['1.2-3+asg1u4']}
-        assert _sess._needs_bump_build('foo', _delta, _led2, 1) is True
-        _plant('foo-data_1.2-3+asg1u5_amd64.deb')   # each at its OWN next N
-        assert _sess._needs_bump_build('foo', _delta, _led2, 1) is False
+        assert _sess._needs_bump_build('foo', _delta, {}, 1) is True
+        _plant('foo-data_1.2-3+asg1u1_amd64.deb')
+        assert _sess._needs_bump_build('foo', _delta, {}, 1) is False
+
+        # (5) a PATCHED re-spin: the build record's patch level makes the
+        # expected filename +asg1u1+p1 — read from the prior record, not minted.
+        _sess._predicted_files_for_source = lambda n: ['bar_1.2-3_amd64.deb']
+        _rec = _u.new_build_record(package='bar',
+                                   intended_version='1.2-3+deb1u1',
+                                   patch_set_hash='deadbeef',
+                                   started='2026-06-29T00:00:00Z')
+        _rec['patch_bump_count'] = 1
+        _rec.update({'phase': 'done', 'status': 'PASS'})
+        _u.write_build_record(_bl, _rec)
+        assert _sess._needs_bump_build('bar', _delta, {}, 1) is True
+        _plant('bar_1.2-3+asg1u1+p1_amd64.deb')
+        assert _sess._needs_bump_build('bar', _delta, {}, 1) is False
 
 
 def test_audit_state_reclassifies_security_respin_as_needs_bump():
@@ -40887,7 +40906,7 @@ def main() -> int:
         test_generate_top_release_subprocess_text_mode_consistency,
         test_generate_top_release_avoids_self_reference_via_tempfile,
         # UPD-01 step 6: workload + Guard A preflight
-        test_needs_bump_build_per_file_exact_un,
+        test_needs_bump_build_predicts_transpose_filename,
         test_audit_state_reclassifies_security_respin_as_needs_bump,
         test_preflight_stamp_invariant_roundtrips_and_flags_bad_version,
         # UPD-01 steps 7-8: snapshot commands + repo refresh orchestrator

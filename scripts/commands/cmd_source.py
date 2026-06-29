@@ -641,30 +641,39 @@ class SourceCommandsMixin(SessionState):
 
     def _needs_bump_build(self, name: str, src, ledger: dict,
                           release: int) -> bool:
-        """True when a workload source is a same-base re-spin (security/NMU)
-        whose THIS-generation +asg<R>u<N> artifact is not yet on disk — the one
-        case the un-forced skip-gate wrongly skips, because the rebuilt
-        pristine filename collides with the prior build's.  PER-FILE: a target
-        if ANY predicted main binary's exact uN is missing.
+        """True when a workload source is a same-base upstream re-spin
+        (security/NMU) whose THIS-generation transpose artifact is not yet on
+        disk — the one case the fuzzy skip-gate wrongly skips, because
+        match_pristine_base accepts ANY +asg at the base and so can't tell a
+        stale generation from the current one.  PER-FILE: a target if ANY
+        predicted main binary's exact current-generation file is missing.
 
-        NOT a target when the source isn't a delta (a clean new-base upload
+        NOT a target when the source isn't a re-spin (a clean new-base upload
         ships pristine and the un-forced gate builds it normally), nor when
-        every main binary already carries this generation's exact uN
-        (idempotent: a re-run skips).
+        every main binary already carries this generation (idempotent re-run).
 
-        N is per-file (`utils.asg_next_n` against the local signed manifest), so
-        the EXACT expected uN is checked with os.path.isfile — NOT
-        find_matching_artifact, which would accept a stale older +asg and wrongly
-        skip a needed re-bump.  The same-base test mirrors buildcontainer's
-        `_src_is_delta` so this decision and the post-build stamp agree.
+        Content-order: the expected filename is INTRINSIC — each binary's
+        pristine base + the source's transposed update marker + our patch level,
+        i.e. exactly what `transposed_version` (the stamper) writes.  The update
+        number is NOT minted from the published manifest, so `ledger` is unused
+        (kept for call-site compatibility).
         """
-        if utils.strip_nmu_suffix(str(src.version)) == str(src.version):
+        _src_ver = str(src.version)
+        if utils.strip_nmu_suffix(_src_ver) == _src_ver:
             return False                      # clean new base — not a re-spin
+        # The raw redistribution suffix the source carries (uniform across its
+        # binaries — Debian stamps one +debNuK per upload) plus our patch level
+        # from the last build reproduce the exact transpose filename the build
+        # will write.  src.version never carries a +bN (binNMU is binary-only).
+        _src_suffix = _src_ver[len(utils.pristine_base(_src_ver)):]
+        _prior = utils.read_build_record(
+            os.path.join(self.config.dir_log, 'build'), name)
+        try:
+            _patch_level = int((_prior or {}).get('patch_bump_count', 0) or 0)
+        except (TypeError, ValueError):
+            _patch_level = 0
         # Component from origin mirror so non-main packages (contrib /
-        # non-free / non-free-firmware) look up the correct dir.
-        # Without this, every non-main re-spin would report "bump
-        # missing" on every run (file IS there, just under the right
-        # component) and force a needless rebuild loop.  Mirrors
+        # non-free / non-free-firmware) look up the correct dir.  Mirrors
         # check_build / _source_state.
         _comp = getattr(getattr(src, '_mirror', None), 'component', '') or 'main'
         for _f in self._predicted_files_for_source(name):
@@ -676,12 +685,16 @@ class SourceCommandsMixin(SessionState):
             if len(_parts) != 3:
                 continue
             _bin, _ver, _arch = _parts
-            _n = utils.asg_next_n(
-                ledger.get(_bin, []), utils.pristine_base(_ver), release)
-            _expected = utils.asg_filename(_f, release, _n)
+            _ext = os.path.splitext(_f)[1]
+            # Reconstruct this binary's upstream version (its pristine base +
+            # the source's redistribution suffix) and transpose it exactly as
+            # the build will.
+            _expected_ver = utils.transposed_version(
+                _ver + _src_suffix, 'asg', release, _patch_level)
+            _expected = f'{_bin}_{_expected_ver}_{_arch}{_ext}'
             _dst = self.config.deb_dest_for_filename(_f, _comp)
             if not os.path.isfile(os.path.join(_dst, _expected)):
-                return True                   # this file's current-gen bump missing
+                return True                   # this generation's file missing
         return False
 
     def _do_update_build(self, remote: bool = False):
