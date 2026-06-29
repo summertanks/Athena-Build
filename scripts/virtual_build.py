@@ -500,9 +500,9 @@ def synthesize_source_binaries(
     The wrapper helper :func:`from_cache` packs cache.package_hashtable
     into this shape automatically.
 
-    `asg_ledger` is the published-versions map keyed by binary name
-    (the same shape `compute_post_build_versions` expects).  None →
-    treat as empty.
+    `asg_ledger` is retained for call-site compatibility but is no longer
+    consulted for the version decision — the update number is intrinsic to each
+    binary's upstream version under the transpose scheme.
 
     `arch` is the build architecture for filename synthesis (the
     BuildConfig.arch).  We don't actually filter by Architecture: here
@@ -739,101 +739,6 @@ def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
 # ─────────────────────────── Self-validation against build records ──
 
 
-def _reconstruct_historical_ledger(
-    output_hashes: 'Dict[str, str]',
-    current_ledger: 'Dict[str, List[str]]',
-) -> 'Dict[str, List[str]]':
-    """Reconstruct what `published_ledger()` saw at the time this
-    source was built, using the source's own ``output_hashes`` as the
-    temporal boundary.  Eliminates the asg-drift class in validate
-    output without requiring per-entry ledger timestamps.
-
-    Per-binary algorithm:
-
-    1. For each binary B this source emitted (visible in output_hashes),
-       find the highest +asgRuN suffix on its filename (call it N_built).
-       That N IS this binary's build-time stamp.  By construction (asg_next_n
-       = highest_published + 1) a build that stamped uN was built when the
-       at-build ledger's high-water for B's base was exactly u(N-1).
-
-    2. Filter ``current_ledger[B]`` keeping only entries whose pristine
-       base differs from B's pristine OR whose parsed N is strictly
-       less than N_built.
-
-    3. SEED the at-build high-water deterministically: ensure the kept
-       set contains B's base at u(N_built-1) when N_built>=2.  This is the
-       load-bearing step.  ``current_ledger`` is the LOCAL signed manifest,
-       which holds ONE version per package; once a publish advances it to
-       uN_built it drops u(N_built-1), so step 2's filter alone comes up
-       empty and the synthesizer resets N to 1 — predicting u1 for a real
-       u2 build.  Seeding from N_built (the build's own receipt) makes the
-       prediction reproduce the real artifact regardless of how far the
-       manifest has since advanced.  No-op when the filter already kept the
-       u(N_built-1) entry (manifest not yet advanced past the build).
-
-    Comparison is **epoch-aware**: ledger entries can carry epochs
-    (``1:9.18.49-1+asg1u1`` from bind9), but filenames OMIT epoch
-    (``bind9_9.18.49-1+asg1u1_amd64.deb``).  Both sides are
-    epoch-stripped before comparison so the pristine match works
-    across the inconsistency.
-
-    Returns the filtered + seeded ledger.  Pass to
-    ``synthesize_source_binaries``; the prediction matches the
-    historical artifact exactly when synth's math is correct.
-    """
-    def _no_epoch(_v: str) -> str:
-        return _v.split(':', 1)[-1] if ':' in _v else _v
-
-    # Per-binary build state from output_hashes:
-    #   {binary_name: (pristine_no_epoch, highest_built_N, release)}
-    _per_binary: 'Dict[str, Tuple[str, int, int]]' = {}
-    for _fn in output_hashes:
-        _df = utils.parse_deb_filename(_fn)
-        if _df is None:
-            continue
-        _name, _ver, _arch, _ext = _df
-        _pristine = _no_epoch(utils.pristine_base(_ver))
-        _asg = utils.parse_asg_suffix(_ver)
-        _n = _asg[1] if _asg is not None else 0
-        _r = _asg[0] if _asg is not None else 0
-        _prev = _per_binary.get(_name)
-        if _prev is None or _n > _prev[1]:
-            _per_binary[_name] = (_pristine, _n, _r)
-
-    if not _per_binary:
-        return current_ledger
-
-    _filtered: 'Dict[str, List[str]]' = dict(current_ledger)
-    for _binary, (_b_pristine, _b_n, _b_r) in _per_binary.items():
-        _entries = current_ledger.get(_binary, [])
-        _kept: 'List[str]' = []
-        for _entry in _entries:
-            _entry_pristine = _no_epoch(utils.pristine_base(_entry))
-            if _entry_pristine != _b_pristine:
-                _kept.append(_entry)
-                continue
-            _asg_parsed = utils.parse_asg_suffix(_entry)
-            if _asg_parsed is None:
-                _kept.append(_entry)
-                continue
-            _, _n_entry = _asg_parsed
-            if _n_entry < _b_n:
-                _kept.append(_entry)
-        # Deterministic seed (step 3): a build stamped at u(_b_n) was built
-        # when the at-build high-water for this base was u(_b_n - 1).  Ensure
-        # that entry is present so asg_next_n predicts _b_n even after a
-        # publish advanced the local manifest past the build (dropping the
-        # prior generation).  Manifest-independent — the build's own N is the
-        # authority, not the volatile single-version manifest.
-        if _b_n >= 2 and not any(
-                utils.parse_asg_suffix(_e) == (_b_r, _b_n - 1)
-                and _no_epoch(utils.pristine_base(_e)) == _b_pristine
-                for _e in _kept):
-            _kept.append(utils.apply_asg_suffix(_b_pristine, _b_r, _b_n - 1))
-        _filtered[_binary] = _kept
-    return _filtered
-
-
 def _index_repo_emissions(repo_dir: str) -> 'Dict[str, set]':
     """One-shot walk of ``repo_dir`` (every subdir under dists/) →
     ``{binary_name: set(basenames)}`` for every ``.deb`` and ``.udeb``
@@ -951,9 +856,8 @@ def validate_against_build_records(
         # Use repo-walk-derived files (authoritative) for the
         # at-build-time signals too.  `output_hashes` would miss
         # udebs from the reconstruction's per-binary N detection.
-        _emission_dict = dict.fromkeys(_real_files, '')
-        _historical_ledger = _reconstruct_historical_ledger(
-            _emission_dict, asg_ledger or {})
+        # asg_ledger is no longer consulted for the version decision (K is
+        # intrinsic), so no historical reconstruction is needed.
         # Derive at-build-time SOURCE state from the same set — the
         # only authoritative record of what actually got built.
         #   _src_pristine_at_build: pristine_base of any output's
@@ -989,7 +893,7 @@ def validate_against_build_records(
             _rec_patch_level = 0
         _virt = synthesize_source_binaries(
             source=_src, package_universe=package_universe,
-            asg_ledger=_historical_ledger, release=release,
+            asg_ledger=None, release=release,
             arch=arch,
             was_patched=_at_build_delta or _was_patched,
             peer_sources=set(source_names),

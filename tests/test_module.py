@@ -9610,9 +9610,9 @@ def test_bump_is_canonical_home_for_version_logic():
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import bump
     import utils
-    for _name in ('strip_nmu_suffix', 'strip_nmu_from_deb', 'restamp_asg_deb',
-                  'compute_post_build_versions', 'asg_next_n',
-                  'apply_asg_suffix', 'normalize_repo_filename',
+    for _name in ('strip_nmu_suffix', 'strip_nmu_from_deb', 'transpose',
+                  'transposed_version', 'transpose_deb', 'asg_next_n',
+                  'decide_patch_bump_count', 'normalize_repo_filename',
                   'find_matching_artifact', 'parse_asg_suffix'):
         assert getattr(utils, _name) is getattr(bump, _name), (
             f"utils.{_name} is not bump.{_name} — version logic has forked "
@@ -22518,55 +22518,6 @@ def test_match_pristine_base_reconciles_stamped_artifact():
     assert not match_pristine_base(pred, 'openssl_3.0.15-1_amd64.udeb')
 
 
-def test_restamp_asg_deb_bumps_version_and_intra_source_deps():
-    """Build a .deb at a pristine base with a collapsed intra-source sibling
-    pin `(= base)`, restamp to +asg<R>u<N>, and verify: filename, internal
-    Version, and the sibling pin all carry the suffix — while a foreign
-    `>=` dep stays pristine.  Epoch preserved."""
-    import subprocess, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import restamp_asg_deb
-    try:
-        subprocess.run(['dpkg-deb', '--version'],
-                       check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("SKIP test_restamp_asg_deb (no dpkg-deb)")
-        return
-    with tempfile.TemporaryDirectory() as _tmp:
-        _work = os.path.join(_tmp, 'src')
-        os.makedirs(os.path.join(_work, 'DEBIAN'))
-        os.makedirs(os.path.join(_work, 'usr', 'lib'))
-        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
-            fh.write(
-                'Package: openssl\n'
-                'Version: 1:3.0.15-1\n'                       # epoch + pristine
-                'Architecture: amd64\n'
-                'Maintainer: T <t@l>\n'
-                # sibling pin (collapsed idiom) at THIS binary's version:
-                'Depends: libssl3 (= 1:3.0.15-1), libc6 (>= 2.36)\n'
-                'Description: restamp test\n'
-            )
-        with open(os.path.join(_work, 'usr', 'lib', 'p'), 'w') as fh:
-            fh.write('x\n')
-        _orig = os.path.join(_tmp, 'openssl_3.0.15-1_amd64.deb')   # filename: no epoch
-        subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _orig],
-                       check=True, capture_output=True)
-
-        _r = restamp_asg_deb(_orig, 1, 1)
-        assert _r['status'] == 'rewritten', _r
-        assert os.path.basename(_r['new_path']) == 'openssl_3.0.15-1+asg1u1_amd64.deb'
-        assert _r['version'] == '1:3.0.15-1+asg1u1', _r
-        _ver = subprocess.run(['dpkg-deb', '-f', _r['new_path'], 'Version'],
-                              check=True, capture_output=True, text=True).stdout.strip()
-        assert _ver == '1:3.0.15-1+asg1u1', f"epoch/suffix wrong: {_ver!r}"
-        _deps = subprocess.run(['dpkg-deb', '-f', _r['new_path'], 'Depends'],
-                               check=True, capture_output=True, text=True).stdout.strip()
-        assert 'libssl3 (= 1:3.0.15-1+asg1u1)' in _deps, (
-            f"sibling pin not bumped: {_deps!r}")
-        assert 'libc6 (>= 2.36)' in _deps, (
-            f"foreign dep should stay pristine: {_deps!r}")
-
-
 def test_validate_canonical_attribution_tunnel_and_build_config():
     """virtual validate, deterministic comparison:
       - a binary DECLARED by two sources but whose canonical upstream
@@ -22700,29 +22651,6 @@ def test_validate_transpose_prediction_matches_built_asg():
         assert _stats['sources_drifted'] == 0, (_stats, _findings)
         assert _stats['sources_matched'] == 1, (_stats, _findings)
         assert _stats.get('asg_drift_sources', 0) == 0, _stats
-
-
-def test_reconstruct_historical_ledger_seeds_prior_generation_from_recorded_n():
-    """Unit test for the seed step: when the current manifest has been advanced
-    to the build's own generation (only u2 present, u1 gone), reconstruction
-    must synthesize the u1 entry from the recorded N so asg_next_n predicts u2."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import virtual_build as _vb
-    from bump import asg_next_n
-    import types
-    _src = types.SimpleNamespace(package='python3.11')
-    # Manifest advanced past the build: only u2 present, u1 dropped.
-    _cur = {'python3.11': ['3.11.2-6+asg1u2']}
-    _emis = {'python3.11_3.11.2-6+asg1u2_amd64.deb': ''}
-    _hist = _vb._reconstruct_historical_ledger(_emis, _cur)
-    # Seed recovers u1 → asg_next_n predicts u2 (== reality), manifest-independent.
-    assert '3.11.2-6+asg1u1' in _hist['python3.11'], _hist
-    assert asg_next_n(_hist['python3.11'], '3.11.2-6', 1) == 2, _hist
-    # First-generation build (u1) seeds nothing — at-build high-water was empty.
-    _hist1 = _vb._reconstruct_historical_ledger(
-        {'python3.11_3.11.2-6+asg1u1_amd64.deb': ''},
-        {'python3.11': ['3.11.2-6+asg1u1']})
-    assert asg_next_n(_hist1['python3.11'], '3.11.2-6', 1) == 1, _hist1
 
 
 def test_verify_output_hashes_flags_only_present_drift_not_pruned_absent():
@@ -25374,106 +25302,6 @@ def test_asg_next_n_is_per_file_and_cumulative():
     assert asg_next_n(['3.0.15-1+asg1u1'], '3.0.15-1', 2) == 1      # R differs
 
 
-def test_compute_post_build_versions_pristine_when_no_delta_no_lineage():
-    """No NMU suffix, no patch, no ledger entry → every binary stays
-    at pristine source version."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import compute_post_build_versions
-    _v = compute_post_build_versions(
-        source_version='3.0.15-1',
-        binaries=['openssl', 'libssl3'],
-        asg_ledger=None, release=1,
-    )
-    assert _v == {'openssl': '3.0.15-1', 'libssl3': '3.0.15-1'}
-
-
-def test_compute_post_build_versions_stamps_when_was_patched():
-    """Fork patches applied → was_patched=True → asg stamp at N=1 for
-    every binary, uniform per source."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import compute_post_build_versions
-    _v = compute_post_build_versions(
-        source_version='2.0.0-1',
-        binaries=['fork-a', 'fork-a-data'],
-        asg_ledger={}, release=1, was_patched=True,
-    )
-    assert _v == {'fork-a': '2.0.0-1+asg1u1',
-                  'fork-a-data': '2.0.0-1+asg1u1'}
-
-
-def test_compute_post_build_versions_stamps_when_nmu_stripped():
-    """Source has NMU layer → pristine differs from raw → delta → stamp."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import compute_post_build_versions
-    _v = compute_post_build_versions(
-        source_version='3.0.15-1+deb12u1',
-        binaries=['openssl', 'libssl3'],
-        asg_ledger={'openssl': []}, release=1,
-    )
-    assert _v == {'openssl': '3.0.15-1+asg1u1',
-                  'libssl3': '3.0.15-1+asg1u1'}
-
-
-def test_compute_post_build_versions_lineage_continuation_no_delta():
-    """No NMU, no patch, but ledger has prior +asg entry at this base
-    → MUST continue stamping (the linux-signed kernel-meta scenario,
-    [[asg-lineage-continuation]]).  N advances per-binary individually
-    then unified to max."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import compute_post_build_versions
-    _v = compute_post_build_versions(
-        source_version='6.1.174-1',
-        binaries=['linux-image', 'linux-headers'],
-        asg_ledger={
-            'linux-image':   ['6.1.174-1+asg1u1', '6.1.174-1+asg1u2'],
-            'linux-headers': ['6.1.174-1+asg1u1'],
-        },
-        release=1,
-    )
-    # image candidate=3, headers candidate=2 → uniform N=3.
-    assert _v == {'linux-image':   '6.1.174-1+asg1u3',
-                  'linux-headers': '6.1.174-1+asg1u3'}
-
-
-def test_compute_post_build_versions_lineage_ignores_unrelated_base():
-    """Ledger has +asg entries at a DIFFERENT base (older kernel) →
-    lineage NOT triggered; we ship pristine."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import compute_post_build_versions
-    _v = compute_post_build_versions(
-        source_version='6.1.174-1',
-        binaries=['linux-image'],
-        asg_ledger={'linux-image': ['6.1.140-1+asg1u5']},  # OLD base
-        release=1,
-    )
-    assert _v == {'linux-image': '6.1.174-1'}
-
-
-def test_compute_post_build_versions_uniform_n_across_siblings():
-    """Two binaries from one source — one has a long ledger (N candidate=5),
-    sibling is fresh (candidate=1) — both stamp at MAX(5, 1) = 5 so the
-    intra-source `(= ver)` pin in the meta package resolves on disk."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import compute_post_build_versions
-    _v = compute_post_build_versions(
-        source_version='6.1.174-1',
-        binaries=['linux-headers-amd64',           # name-stable, long history
-                  'linux-headers-6.1.0-49-amd64'], # ABI-pinned, fresh name
-        asg_ledger={
-            'linux-headers-amd64': [
-                '6.1.174-1+asg1u1', '6.1.174-1+asg1u2',
-                '6.1.174-1+asg1u3', '6.1.174-1+asg1u4',
-            ],
-            'linux-headers-6.1.0-49-amd64': [],
-        },
-        release=1, was_patched=True,  # ensure stamp triggers
-    )
-    assert _v == {
-        'linux-headers-amd64':           '6.1.174-1+asg1u5',
-        'linux-headers-6.1.0-49-amd64':  '6.1.174-1+asg1u5',
-    }
-
-
 def test_virtual_arch_gate_dpkg_table_semantics():
     """virtual_build._binary_active_for_arch delegates to dpkg's
     DpkgArchTable.matches_architecture — pins the two delta families the
@@ -26659,51 +26487,6 @@ def test_virtual_build_build_profile_filter_positive_profile_required():
         frozenset({'stage1'})) is True
 
 
-def test_virtual_build_reconstruct_historical_ledger_pristine_build():
-    """Source built at pristine (no asg suffix), ledger has since
-    accumulated entries.  Reconstruction must strip ALL asg-stamped
-    entries at this pristine base so synth predicts the historical
-    pristine artifact."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import virtual_build as _vb
-
-    class _Src:
-        binary = ['libfoo', 'libfoo-data']
-
-    _outputs = {
-        'libfoo_1.0-1_amd64.deb': 'x',
-        'libfoo-data_1.0-1_all.deb': 'y',
-    }
-    _current = {
-        'libfoo':      ['1.0-1', '1.0-1+asg1u1', '1.0-1+asg1u2'],
-        'libfoo-data': ['1.0-1', '1.0-1+asg1u1'],
-    }
-    _hist = _vb._reconstruct_historical_ledger(
-        _outputs, _current)
-    # Source N = 0 → keep entries with N < 0 (none) + non-asg entries.
-    assert _hist['libfoo'] == ['1.0-1']
-    assert _hist['libfoo-data'] == ['1.0-1']
-
-
-def test_virtual_build_reconstruct_historical_ledger_stamped_build():
-    """Source built at +asg1u2 → reconstruction keeps u1 entries,
-    drops u2 + u3+.  Synth then predicts u2, matching real build."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import virtual_build as _vb
-
-    class _Src:
-        binary = ['libfoo']
-
-    _outputs = {'libfoo_1.0-1+asg1u2_amd64.deb': 'x'}
-    _current = {'libfoo': [
-        '1.0-1+asg1u1', '1.0-1+asg1u2', '1.0-1+asg1u3',
-    ]}
-    _hist = _vb._reconstruct_historical_ledger(
-        _outputs, _current)
-    # N=2 → keep N<2 (only u1).
-    assert _hist['libfoo'] == ['1.0-1+asg1u1']
-
-
 def test_virtual_build_delta_uses_source_version_not_per_binary():
     """bash-class bug: binary upstream Version is `5.2.15-2+b13`
     (binNMU rebuild) while source.version is pristine `5.2.15-2`.
@@ -26808,53 +26591,6 @@ def test_virtual_build_transpose_preserves_epoch():
         'bind9_9.18.49-1+asg1u3_amd64.deb')
 
 
-def test_virtual_build_reconstruct_historical_ledger_epoch_aware():
-    """Ledger entries can carry epoch (`1:9.18.49-1+asg1u1`) but
-    output_hashes filenames OMIT epoch (`bind9_9.18.49-1+asg1u1_amd64.deb`).
-    Reconstruction MUST epoch-strip both sides to compare pristines.
-    Without this, epoched sources see ALL entries kept (different
-    pristine) and asg drift is never filtered."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import virtual_build as _vb
-
-    class _Bind9:
-        binary = ['bind9', 'bind9-libs']
-
-    _outputs = {
-        'bind9_9.18.49-1+asg1u1_amd64.deb': 'a',
-        'bind9-libs_9.18.49-1+asg1u1_amd64.deb': 'b',
-    }
-    _current = {
-        'bind9':      ['1:9.18.49-1+asg1u1', '1:9.18.49-1+asg1u2'],
-        'bind9-libs': ['1:9.18.49-1+asg1u1', '1:9.18.49-1+asg1u2'],
-    }
-    _hist = _vb._reconstruct_historical_ledger(
-        _outputs, _current)
-    # N_built=1 → keep N<1 (nothing).
-    assert _hist['bind9'] == []
-    assert _hist['bind9-libs'] == []
-
-
-def test_virtual_build_reconstruct_historical_ledger_preserves_other_pristine():
-    """Entries at a DIFFERENT pristine base must pass through
-    untouched — they're unrelated to this build's lineage."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import virtual_build as _vb
-
-    class _Src:
-        binary = ['libfoo']
-
-    _outputs = {'libfoo_2.0-1_amd64.deb': 'x'}
-    _current = {'libfoo': [
-        '1.0-1+asg1u5',   # older pristine, keep
-        '2.0-1+asg1u1',   # this pristine, N>=0 → drop
-    ]}
-    _hist = _vb._reconstruct_historical_ledger(
-        _outputs, _current)
-    # Old-pristine u5 kept; current-pristine u1 dropped (N=0 floor).
-    assert _hist['libfoo'] == ['1.0-1+asg1u5']
-
-
 def test_virtual_build_synthesize_source_filters_by_profile():
     """End-to-end: synthesize_source_binaries with active profiles
     drops binaries whose package_list profile annotation excludes
@@ -26929,20 +26665,6 @@ def test_virtual_build_from_cache_merges_udeb_hashtable():
     # The udeb's Source field survives — canonical filter can fire.
     _udeb_rec = _u['kernel-image-6.1.0-49-amd64-di']['6.1.174-1']
     assert _udeb_rec['Source'] == 'linux-signed-amd64'
-
-
-def test_compute_post_build_versions_release_advances_resets_n():
-    """A new release R bumps the major; N resets to 1 against the same
-    base because asg_next_n is keyed on (base, release)."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import compute_post_build_versions
-    _v = compute_post_build_versions(
-        source_version='3.0.15-1',
-        binaries=['openssl'],
-        asg_ledger={'openssl': ['3.0.15-1+asg1u3']},  # release=1 entries
-        release=2, was_patched=True,
-    )
-    assert _v == {'openssl': '3.0.15-1+asg2u1'}
 
 
 def test_check_build_matches_asg_variant_of_prediction():
@@ -40924,11 +40646,9 @@ def main() -> int:
         test_asg_suffix_sorts_above_pristine_and_across_release,
         test_asg_filename_maps_pristine_to_stamped,
         test_match_pristine_base_reconciles_stamped_artifact,
-        test_restamp_asg_deb_bumps_version_and_intra_source_deps,
         test_validate_canonical_attribution_tunnel_and_build_config,
         # SELECT-LOCK asg determinism (seeded reconstruction)
         test_validate_transpose_prediction_matches_built_asg,
-        test_reconstruct_historical_ledger_seeds_prior_generation_from_recorded_n,
         # SELECT-LOCK Chunk 1 — signed selection lockfile
         test_selection_lock_roundtrip_signs_and_verifies,
         test_federation_state_adopts_owner_payload_and_local_seeds,
@@ -41097,13 +40817,6 @@ def main() -> int:
         test_highest_asg_update_reads_remote_ledger,
         test_asg_next_n_is_per_file_and_cumulative,
         # virtual-build chunk 1 — compute_post_build_versions pure helper
-        test_compute_post_build_versions_pristine_when_no_delta_no_lineage,
-        test_compute_post_build_versions_stamps_when_was_patched,
-        test_compute_post_build_versions_stamps_when_nmu_stripped,
-        test_compute_post_build_versions_lineage_continuation_no_delta,
-        test_compute_post_build_versions_lineage_ignores_unrelated_base,
-        test_compute_post_build_versions_uniform_n_across_siblings,
-        test_compute_post_build_versions_release_advances_resets_n,
         # virtual-build chunk 2 — binary record synthesizer
         test_virtual_arch_gate_dpkg_table_semantics,
         test_tunnel_filenames_full_set_arch_profile_filtered,
@@ -41152,10 +40865,6 @@ def main() -> int:
         test_virtual_build_delta_uses_source_version_not_per_binary,
         test_virtual_build_per_binary_version_is_intrinsic,
         test_virtual_build_transpose_preserves_epoch,
-        test_virtual_build_reconstruct_historical_ledger_pristine_build,
-        test_virtual_build_reconstruct_historical_ledger_stamped_build,
-        test_virtual_build_reconstruct_historical_ledger_epoch_aware,
-        test_virtual_build_reconstruct_historical_ledger_preserves_other_pristine,
         test_virtual_build_synthesize_source_filters_by_profile,
         test_check_build_matches_asg_variant_of_prediction,
         test_check_build_locates_non_main_component_deb,

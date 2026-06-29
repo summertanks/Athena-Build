@@ -241,8 +241,8 @@ class VirtualCommandsMixin(SessionState):
           1. cache parse  — REAL (operator-interactive).  We just read
              the already-populated cache + dep_tree.
           2. source sync  — virtual (trust cache.source_hashtable)
-          3. source build — virtual (compute_post_build_versions math
-             + per-binary upstream-inherit + sibling pin rewrite)
+          3. source build — virtual (per-binary transpose
+             + upstream-inherit + sibling pin rewrite)
           4. source audit — covered implicitly: every selected source
              must have a synthesizable binary set
           5. repo audit   — REAL audit_dep_closure + audit_conflict_cohort
