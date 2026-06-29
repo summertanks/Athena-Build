@@ -1119,20 +1119,21 @@ def test_sta36_mirror_add_confirmation_declines_on_no():
     assert "not in ('y', 'yes')" in _src or 'not in ("y", "yes")' in _src, _src
 
 
-def test_sta35_standalone_tunnel_loads_published_ledger():
-    """STA-35: when no container ledger is present (standalone
-    `source tunnel`), _do_tunnel must fall back to
-    repo_audit.published_ledger so a delta source still gets its asg
-    stamp instead of regressing to pristine."""
+def test_tunnel_transposes_and_needs_no_ledger():
+    """Under TRANSPOSE the tunnel path transposes each downloaded .deb in place
+    (trailing +debNuK → +asg<R>uK, K intrinsic) and therefore needs NO published
+    ledger — the ship-order asg_next_n / lineage machinery is gone.  Supersedes
+    STA-35 (which loaded published_ledger for the ship-order stamp)."""
     import inspect, sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
     _src = inspect.getsource(BuildSession._do_tunnel)
-    assert 'published_ledger' in _src, (
-        "_do_tunnel must load published_ledger when the container ledger "
-        "is absent (STA-35)")
-    # The fallback is gated on the container ledger being None.
-    assert 'if _ledger is None' in _src, _src
+    assert 'transpose_deb' in _src, (
+        "_do_tunnel must transpose each tunnelled .deb (transpose_deb)")
+    assert 'asg_next_n' not in _src and 'restamp_asg_deb' not in _src, (
+        "tunnel must not use the ship-order asg_next_n / restamp stack")
+    assert 'published_ledger' not in _src, (
+        "tunnel no longer needs the ledger (K is intrinsic)")
 
 
 def test_sta33_build_depends_serialises_apt_pkg_profile_global():
@@ -40083,7 +40084,7 @@ def main() -> int:
         test_cmd_auto_run_build_refuses_in_dist_mode,
         test_sta34_autorun_build_calls_source_build_bare_not_invalid_token,
         test_sta36_mirror_add_confirmation_declines_on_no,
-        test_sta35_standalone_tunnel_loads_published_ledger,
+        test_tunnel_transposes_and_needs_no_ledger,
         test_sta33_build_depends_serialises_apt_pkg_profile_global,
         test_parse_source_build_args_recognises_indl_subset,
         test_cmd_source_build_indl_subset_rejected_in_dist_mode,
