@@ -42,11 +42,15 @@ from bump import (
     pristine_base as pristine_base,
     restamp_asg_deb as restamp_asg_deb,
     strip_build_version as strip_build_version,
+    compute_transposed_versions as compute_transposed_versions,
     strip_binNMU as strip_binNMU,
     strip_nmu_from_control_text as strip_nmu_from_control_text,
     strip_nmu_from_deb as strip_nmu_from_deb,
     strip_nmu_suffix as strip_nmu_suffix,
     transpose as transpose,
+    transpose_control_text as transpose_control_text,
+    transpose_deb as transpose_deb,
+    transposed_version as transposed_version,
 )
 
 if TYPE_CHECKING:

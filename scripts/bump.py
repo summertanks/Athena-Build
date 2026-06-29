@@ -913,3 +913,221 @@ def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
     _result.update({'status': 'rewritten', 'new_path': _new_path,
                     'version': _new_ctrl_ver})
     return _result
+
+
+# ===========================================================================
+# TRANSPOSE scheme — the content-order replacement for the strip→restamp
+# two-step above.  Instead of stripping a +debNuK to pristine and re-stamping a
+# ship-order +asg<R>u<N>, a built binary's version is TRANSPOSED in place
+# (trailing +debNuK → +asg<R>uK, K intrinsic), then our patch level P (+pP) and
+# any force-binNMU (+bN) are appended.  Dep constraints are transposed the same
+# way (so a cross-source floor stays satisfiable), and same-source sibling pins
+# are restamped to the exact final version (the algo appends +bN to siblings
+# but a patched source needs the exact +pP too — _restamp_control_text already
+# does the exact rewrite, which is the correct, complete form).
+# See docs/versioning-algo.txt and docs/bump-mechanics.md.
+# ===========================================================================
+def transposed_version(upstream_version: str, prefix: str, release: int,
+                       patch_level: int = 0,
+                       force_bn: 'Optional[int]' = None) -> str:
+    """Pure predictor: the Version a binary at *upstream_version* carries under
+    the transpose scheme.  ``V = transpose(upstream) [+ +p<P>] [+ +b<bN>]``.
+
+        transposed_version('2.36-9+deb12u14', 'asg', 1)       → '2.36-9+asg1u14'
+        transposed_version('5.36.0-7+deb12u3', 'asg', 1, 1)   → '5.36.0-7+asg1u3+p1'
+        transposed_version('5.2.15-2', 'asg', 1, 1)           → '5.2.15-2+p1'
+        transposed_version('1.0-2', 'asg', 1, force_bn=1)     → '1.0-2+b1'
+    """
+    return _append_patch_force(
+        transpose(upstream_version, prefix, release), patch_level, force_bn)
+
+
+def compute_transposed_versions(
+    binary_versions: 'Dict[str, str]', prefix: str, release: int,
+    patch_level: int = 0, force_bn: 'Optional[int]' = None,
+) -> 'Dict[str, str]':
+    """Pure version math mirroring the build path: transpose each binary's OWN
+    upstream version (so a binary whose base differs from its source — e2fsprogs
+    comerr-dev, lvm2 libdevmapper, samba ldb — is handled correctly), applying
+    the SAME per-source ``patch_level`` / ``force_bn`` to every binary (uniform
+    P/bN per source keeps sibling pins consistent).  Needs no ledger: K is
+    intrinsic to each upstream version.
+
+    `binary_versions` shape: ``{binary_name: upstream_version_str}``.
+    Returns ``{binary_name: predicted_version_str}``.
+    """
+    return {
+        _name: transposed_version(_up, prefix, release, patch_level, force_bn)
+        for _name, _up in binary_versions.items()
+    }
+
+
+def transpose_control_text(content: str, prefix: str,
+                           release: int) -> 'tuple[str, int]':
+    """Return (new_text, change_count) — TRANSPOSE the Version field and every
+    version constraint in dep-related fields of a DEBIAN/control text (trailing
+    +debNuK → +<prefix><R>uK only).  The Version's pre-transpose upstream value
+    is recorded in ``X-Athena-Upstream-Version`` (CVE-tracking provenance) when
+    it changed.  The same-upstream-sibling ``>>/<<`` idiom is collapsed to
+    ``(= <transposed Version>)``.
+
+    The +pP / +bN patch/force suffix is NOT applied here — that is the deb-level
+    step (:func:`transpose_deb`), which restamps the collapsed sibling pins to
+    the exact final version.  Idempotent on already-transposed text.
+    """
+    _total = 0
+    _content = content
+
+    _orig_match = re.search(r'^Version: (\S+)\s*$', _content, re.MULTILINE)
+    _orig_version = _orig_match.group(1) if _orig_match else ''
+    _transposed_version = (
+        transpose(_orig_version, prefix, release) if _orig_version else ''
+    )
+    _version_changed = (
+        bool(_transposed_version) and _transposed_version != _orig_version
+    )
+
+    def _sub_version(_m: 're.Match') -> str:
+        nonlocal _total
+        _old = _m.group(1)
+        _new = transpose(_old, prefix, release)
+        if _new != _old:
+            _total += 1
+        return f'Version: {_new}'
+
+    _content = re.sub(
+        r'^Version: (\S+)\s*$',
+        _sub_version, _content, count=1, flags=re.MULTILINE,
+    )
+
+    if _version_changed and 'X-Athena-Upstream-Version:' not in _content:
+        _content = re.sub(
+            r'^(Version: \S+)\s*$',
+            lambda _m: (
+                f'{_m.group(1)}\n'
+                f'X-Athena-Upstream-Version: {_orig_version}'
+            ),
+            _content, count=1, flags=re.MULTILINE,
+        )
+
+    _constraint_re = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
+
+    def _sub_constraint(_m: 're.Match') -> str:
+        nonlocal _total
+        _op, _ver = _m.group(1), _m.group(2)
+        _new_ver = transpose(_ver, prefix, release)
+        if _new_ver != _ver:
+            _total += 1
+        return f'({_op} {_new_ver})'
+
+    _new_lines: 'list[str]' = []
+    _in_target = False
+    for _line in _content.splitlines(keepends=True):
+        if _line and _line[0] not in (' ', '\t'):
+            _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
+            _in_target = _m is not None and _m.group(1) in _NMU_STRIP_FIELDS
+        if _in_target:
+            _new_lines.append(_constraint_re.sub(_sub_constraint, _line))
+        else:
+            _new_lines.append(_line)
+    _content = ''.join(_new_lines)
+
+    _our_version = _extract_version(_content)
+    if _our_version:
+        _content, _pairs = _rewrite_sibling_idiom_in_text(_content, _our_version)
+        _total += _pairs
+
+    return _content, _total
+
+
+def transpose_deb(deb_path: str, prefix: str, release: int,
+                  patch_level: int = 0,
+                  force_bn: 'Optional[int]' = None) -> dict:
+    """Transpose + stamp a built .deb/.udeb in place — the single-cycle
+    replacement for ``strip_nmu_from_deb`` + ``restamp_asg_deb`` on the build
+    and tunnel paths.  Updates filename, DEBIAN/control Version, dep
+    constraints, X-Athena-Upstream-Version, and same-source sibling pins.
+
+    Returns ``{'status': 'rewritten'|'unchanged'|'malformed'|'skipped',
+                'new_path': str, 'version': Optional[str]}``.
+
+    A binary whose only trailing token is a binNMU (a tunnelled ``X+deb…+b1``)
+    transposes to a no-op on the embedded +deb and KEEPS the +bN — by design
+    (its frozen sibling pins reference that +bN).  Idempotent.
+    """
+    import subprocess
+    import tempfile
+    from debian.debfile import DebFile
+
+    _result = {'status': 'unchanged', 'new_path': deb_path, 'version': None}
+    _base = os.path.basename(deb_path)
+    if not _base.endswith(('.deb', '.udeb')):
+        _result['status'] = 'skipped'
+        return _result
+    _r = parse_deb_filename(_base)
+    if _r is None:
+        _result['status'] = 'malformed'
+        return _result
+    _pkg, _old_file_ver, _arch, _ext = _r
+
+    try:
+        with DebFile(deb_path) as _deb:
+            _ctrl_bytes = _deb.control.get_content('control')
+    except Exception:
+        _result['status'] = 'malformed'
+        return _result
+    if _ctrl_bytes is None:
+        _result['status'] = 'malformed'
+        return _result
+    _ctrl_text = _ctrl_bytes.decode('utf-8', errors='replace')
+
+    # Step 1: transpose Version + constraints to the K-version (no P/bN yet).
+    _k_text, _changes = transpose_control_text(_ctrl_text, prefix, release)
+    _k_ver = _extract_version(_k_text)
+    if not _k_ver:
+        _result['status'] = 'malformed'
+        return _result
+    # Step 2: append +pP / +bN and restamp sibling pins to the exact final.
+    _final_ver = _append_patch_force(_k_ver, patch_level, force_bn)
+    if _final_ver != _k_ver:
+        _new_text = _restamp_control_text(_k_text, _k_ver, _final_ver)
+    else:
+        _new_text = _k_text
+
+    _new_file_ver = _append_patch_force(
+        transpose(_old_file_ver, prefix, release), patch_level, force_bn)
+    _filename_changed = _new_file_ver != _old_file_ver
+
+    if not _filename_changed and _changes == 0 and _final_ver == _k_ver:
+        return _result      # 'unchanged'
+
+    _new_base = (f'{_pkg}_{_new_file_ver}_{_arch}{_ext}'
+                 if _filename_changed else _base)
+    _new_path = os.path.join(os.path.dirname(deb_path), _new_base)
+
+    with tempfile.TemporaryDirectory(prefix='transpose-') as _work:
+        subprocess.run(['dpkg-deb', '-R', deb_path, _work],
+                       check=True, capture_output=True)
+        _sde = _content_date_epoch(_work)   # before the control rewrite
+        _ctrl_disk = os.path.join(_work, 'DEBIAN', 'control')
+        with open(_ctrl_disk, 'w') as _fh:
+            _fh.write(_new_text)
+        _repack_deb(_work, _new_path, _sde)
+
+    if _new_path != deb_path:
+        os.remove(deb_path)
+    _result.update({'status': 'rewritten', 'new_path': _new_path,
+                    'version': _final_ver})
+    return _result
+
+
+def _append_patch_force(version: str, patch_level: int,
+                        force_bn: 'Optional[int]') -> str:
+    """Append our patch (+pP) and/or force-binNMU (+bN) suffix to an
+    already-transposed version.  Order: +p then +b (matches the algo's
+    transpose → +pP → +bN sequence)."""
+    if patch_level > 0:
+        version = f'{version}+p{patch_level}'
+    if force_bn is not None:
+        version = f'{version}+b{force_bn}'
+    return version

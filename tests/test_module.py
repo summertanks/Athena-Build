@@ -9314,6 +9314,60 @@ def test_strip_binNMU_splits_trailing_marker():
     assert strip_binNMU('1.0-3.3') == ('1.0-3.3', '')              # dotted rev kept
 
 
+def test_transposed_version_appends_p_and_b():
+    """V = transpose(upstream) [+ +p<P>] [+ +b<bN>]."""
+    from utils import transposed_version
+    assert transposed_version('2.36-9+deb12u14', 'asg', 1) == '2.36-9+asg1u14'
+    assert transposed_version('5.36.0-7+deb12u3', 'asg', 1, 1) == '5.36.0-7+asg1u3+p1'
+    assert transposed_version('5.2.15-2', 'asg', 1, 1) == '5.2.15-2+p1'   # patch on pristine
+    assert transposed_version('1.0-2', 'asg', 1, force_bn=1) == '1.0-2+b1'
+    # patch + force together: transpose → +p → +b
+    assert transposed_version('1.0-2+deb12u3', 'asg', 1, 2, 1) == '1.0-2+asg1u3+p2+b1'
+
+
+def test_compute_transposed_versions_per_binary_base_uniform_p():
+    """Each binary transposes its OWN base (source-base != binary-base), with a
+    uniform per-source P applied to all."""
+    from utils import compute_transposed_versions
+    # samba: samba-common at the source base, ldb binaries at their own base —
+    # both carry +deb12u4 → both u4, with the same P.
+    out = compute_transposed_versions({
+        'samba-common': '2:4.17.12+dfsg-0+deb12u4',
+        'libldb2': '2:2.6.2+samba4.17.12+dfsg-0+deb12u4',
+    }, 'asg', 1, patch_level=1)
+    assert out == {
+        'samba-common': '2:4.17.12+dfsg-0+asg1u4+p1',
+        'libldb2': '2:2.6.2+samba4.17.12+dfsg-0+asg1u4+p1',
+    }
+
+
+def test_transpose_control_text_version_deps_and_provenance():
+    """Version + constraints transposed; pre-transpose upstream recorded."""
+    from utils import transpose_control_text
+    _ctrl = (
+        'Package: apache2\n'
+        'Version: 2.4.67-1~deb12u2\n'
+        'Depends: libc6 (>= 2.36-9+deb12u14), perl (>= 5.36.0-7+deb12u3)\n'
+        'Description: x\n'
+    )
+    _out, _n = transpose_control_text(_ctrl, 'asg', 1)
+    assert 'Version: 2.4.67-1~asg1u2' in _out            # ~deb → ~asg
+    assert 'X-Athena-Upstream-Version: 2.4.67-1~deb12u2' in _out
+    assert '(>= 2.36-9+asg1u14)' in _out                 # cross-source floor transposed
+    assert '(>= 5.36.0-7+asg1u3)' in _out
+    assert _n >= 3
+
+
+def test_transpose_control_text_no_token_is_noop_no_provenance():
+    """A pristine / +nmu version is unchanged and gets no X-upstream field."""
+    from utils import transpose_control_text
+    _out, _n = transpose_control_text(
+        'Package: cupt\nVersion: 2.10.4+nmu1\nDescription: x\n', 'asg', 1)
+    assert 'Version: 2.10.4+nmu1' in _out
+    assert 'X-Athena-Upstream-Version:' not in _out
+    assert _n == 0
+
+
 def test_strip_build_version_rejects_malformed_filename():
     """Filenames not in `name_version_arch.ext` shape raise ValueError."""
     from utils import strip_build_version
@@ -9810,6 +9864,67 @@ def test_strip_nmu_from_deb_idempotent():
         _r = strip_nmu_from_deb(_p)
         assert _r['status'] == 'unchanged', _r
         assert _r['strips_count'] == 0, _r
+
+
+def test_transpose_deb_round_trip():
+    """End-to-end transpose+stamp: a built .deb with a +deb Version, a patched
+    source (P=1), a cross-source floor and a same-source sibling pin →
+    transpose to +asg, append +p1, restamp the sibling to the exact final,
+    transpose the cross-source floor, preserve epoch."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import transpose_deb
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_transpose_deb_round_trip (no dpkg-deb)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'lib'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: git\n'
+                'Version: 1:2.39.5-0+deb12u3\n'                 # epoch + trailing +deb
+                'Architecture: amd64\n'
+                'Maintainer: T <t@l>\n'
+                # sibling pin (same source, at this binary's version) +
+                # cross-source floor.
+                'Depends: git-man (= 1:2.39.5-0+deb12u3), libc6 (>= 2.36-9+deb12u14)\n'
+                'Description: transpose round-trip\n'
+            )
+        with open(os.path.join(_work, 'usr', 'lib', 'p'), 'w') as fh:
+            fh.write('x\n')
+        _orig = os.path.join(_tmp, 'git_2.39.5-0+deb12u3_amd64.deb')  # epoch dropped in fn
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _orig],
+            check=True, capture_output=True,
+        )
+
+        _r = transpose_deb(_orig, 'asg', 1, patch_level=1)
+        assert _r['status'] == 'rewritten', _r
+        assert _r['version'] == '1:2.39.5-0+asg1u3+p1', _r
+        assert (os.path.basename(_r['new_path'])
+                == 'git_2.39.5-0+asg1u3+p1_amd64.deb'), _r['new_path']
+        _ver = subprocess.run(
+            ['dpkg-deb', '-f', _r['new_path'], 'Version'],
+            check=True, capture_output=True, text=True).stdout.strip()
+        assert _ver == '1:2.39.5-0+asg1u3+p1', f"epoch/version? {_ver!r}"
+        _deps = subprocess.run(
+            ['dpkg-deb', '-f', _r['new_path'], 'Depends'],
+            check=True, capture_output=True, text=True).stdout.strip()
+        # sibling pin restamped to the EXACT final version (incl. +p1)
+        assert 'git-man (= 1:2.39.5-0+asg1u3+p1)' in _deps, _deps
+        # cross-source floor transposed (no +p — not a sibling)
+        assert 'libc6 (>= 2.36-9+asg1u14)' in _deps, _deps
+        assert '+deb12u' not in _deps, f"deb residue: {_deps!r}"
+        # provenance recorded
+        _xup = subprocess.run(
+            ['dpkg-deb', '-f', _r['new_path'], 'X-Athena-Upstream-Version'],
+            check=True, capture_output=True, text=True).stdout.strip()
+        assert _xup == '1:2.39.5-0+deb12u3', _xup
 
 
 def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
@@ -40266,6 +40381,10 @@ def main() -> int:
         test_transpose_no_token_unchanged,
         test_transpose_floor_tail_tilde_preserved,
         test_strip_binNMU_splits_trailing_marker,
+        test_transposed_version_appends_p_and_b,
+        test_compute_transposed_versions_per_binary_base_uniform_p,
+        test_transpose_control_text_version_deps_and_provenance,
+        test_transpose_control_text_no_token_is_noop_no_provenance,
         test_strip_build_version_rejects_malformed_filename,
         test_parse_deb_filename_splits_raw_components,
         test_parse_deb_filename_returns_none_on_mismatch,
@@ -40284,6 +40403,7 @@ def main() -> int:
         test_strip_nmu_pair_rewrite_scoped_to_depends_pre_depends,
         test_strip_nmu_from_deb_round_trip,
         test_strip_nmu_from_deb_idempotent,
+        test_transpose_deb_round_trip,
         test_audit_nmu_residue_skips_tunneled_sources,
         test_cmd_audit_nmu_residue_absorbed_into_cmd_audit,
         test_cmd_strip_repo_registered_in_repo_dispatcher,
