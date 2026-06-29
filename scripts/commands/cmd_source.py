@@ -185,7 +185,7 @@ class SourceCommandsMixin(SessionState):
                           # it's simply superseded by an upstream update).
     )
 
-    def _audit_state(self, pkg: str, src, bump_ledger: dict,
+    def _audit_state(self, pkg: str, src,
                      bump_release: 'int | None',
                      workload_set: 'set[str]') -> str:
         """`_source_state` + the UPDATE-mode re-spin reclassification.
@@ -203,9 +203,8 @@ class SourceCommandsMixin(SessionState):
         that actually changed between mirror floor and current).
         `_needs_bump_build` is only meaningful for a workload source:
         run on the WHOLE corpus it false-flags every adopted ~debNuN
-        package, because `asg_next_n` predicts a NEXT-generation +asg-N
-        that isn't on disk for a source whose adopted binary is already
-        current.  `_do_update_build` only checks the workload too — so
+        package whose transposed file is already on disk at the current
+        generation.  `_do_update_build` only checks the workload too — so
         scoping here is what keeps the two in lock-step (178-false-flag
         regression, 2026-06-21).
 
@@ -216,8 +215,7 @@ class SourceCommandsMixin(SessionState):
         _state = self._source_state(pkg, src)
         if (_state == 'ok' and bump_release is not None
                 and pkg in workload_set
-                and self._needs_bump_build(
-                    pkg, src, bump_ledger, bump_release)):
+                and self._needs_bump_build(pkg, src, bump_release)):
             return 'needs_bump'
         return _state
 
@@ -639,8 +637,7 @@ class SourceCommandsMixin(SessionState):
             return True
         return apt_pkg.version_compare(_cur, _floor) > 0
 
-    def _needs_bump_build(self, name: str, src, ledger: dict,
-                          release: int) -> bool:
+    def _needs_bump_build(self, name: str, src, release: int) -> bool:
         """True when a workload source is a same-base upstream re-spin
         (security/NMU) whose THIS-generation transpose artifact is not yet on
         disk — the one case the fuzzy skip-gate wrongly skips, because
@@ -654,9 +651,8 @@ class SourceCommandsMixin(SessionState):
 
         Content-order: the expected filename is INTRINSIC — each binary's
         pristine base + the source's transposed update marker + our patch level,
-        i.e. exactly what `transposed_version` (the stamper) writes.  The update
-        number is NOT minted from the published manifest, so `ledger` is unused
-        (kept for call-site compatibility).
+        i.e. exactly what `transposed_version` (the stamper) writes.  No
+        published manifest / ledger is consulted.
         """
         _src_ver = str(src.version)
         if utils.strip_nmu_suffix(_src_ver) == _src_ver:
@@ -698,11 +694,11 @@ class SourceCommandsMixin(SessionState):
         return False
 
     def _do_update_build(self, remote: bool = False):
-        """Rebuild the published→current source delta (+asg<R>u<N>-stamped,
-        per-file N from the published manifest) AND build any OTHER selected
-        source that needs building — forks etc. that aren't part of the upstream
-        snapshot delta — so update-mode `source build` builds everything the
-        audit lists, not just the delta.
+        """Rebuild the published→current source delta (transpose-stamped, with
+        the update number intrinsic to each upstream version) AND build any
+        OTHER selected source that needs building — forks etc. that aren't part
+        of the upstream snapshot delta — so update-mode `source build` builds
+        everything the audit lists, not just the delta.
 
         NO blanket force: the un-forced skip gate skips packages already built
         for this generation; same-base security/NMU re-spins (whose rebuilt
@@ -720,107 +716,94 @@ class SourceCommandsMixin(SessionState):
         console.print(
             f"source build: UPDATE mode{' (remote)' if remote else ''} — floor "
             f"{_floor or '(none)'} → current {_current}; rebuilding the changed "
-            f"source delta (+asg-stamped on recovery, per-file N) plus any other "
-            f"source needing a build.",
+            "source delta (transpose-stamped on recovery) plus any other "
+            "source needing a build.",
             tui.COLOR_HIGHLIGHT)
         _workload, _err = self._workload_since_snapshot(_floor)
         if _err:
             console.print(f"source build (update): {_err}", tui.COLOR_ERROR)
             return
-        # N authority = the PUBLISHED manifest only.  N is a published-generation
-        # counter (advances on `mirror publish`, not per build): the next-to-mint
-        # is one past the highest PUBLISHED uN; local rebuilds of the still-
-        # pending update keep the same N.  (A build-ledger union was tried +
-        # reverted — recording locally-built uN made asg_next_n overshoot by 1,
-        # turning every same-base delta into a perpetual bump-target.)
-        _ledger = repo_audit.published_ledger(self.config)
-        if self.container is not None:
-            self.container.asg_ledger = _ledger
+        _release = None
         try:
-            _release = None
-            try:
-                _release = int(
-                    str(self.config.build_version).strip('"').strip("'"))
-            except (TypeError, ValueError):
-                pass
-            assert self.dep_tree is not None
-            _srcs = dict(self.dep_tree.selected_srcs)
-            if self.udeb_dep_tree is not None:
-                for _n, _us in self.udeb_dep_tree.selected_srcs.items():
-                    _srcs.setdefault(_n, _us)
-            _wset = set(_workload)
+            _release = int(
+                str(self.config.build_version).strip('"').strip("'"))
+        except (TypeError, ValueError):
+            pass
+        assert self.dep_tree is not None
+        _srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _n, _us in self.udeb_dep_tree.selected_srcs.items():
+                _srcs.setdefault(_n, _us)
+        _wset = set(_workload)
 
-            # (1) the snapshot delta: respins rebuilt+stamped, current ones
-            # skipped.  Mirrors the loop's exact skip rule (skip iff check_build
-            # AND not a bump-target) so the report matches what will build.
-            _delta_to_build = []
-            for _n in _workload:
-                _s = _srcs.get(_n)
-                if _s is None:
-                    _delta_to_build.append(_n)
-                    continue
-                _is_bump = (
-                    _release is not None and self.container is not None
-                    and self._needs_bump_build(_n, _s, _ledger, _release))
-                _expected = self._predicted_files_for_source(_n)
-                if _is_bump or not (
-                        self.container is not None
-                        and self.container.check_build(_s, _expected)):
-                    _delta_to_build.append(_n)
+        # (1) the snapshot delta: respins rebuilt+stamped, current ones
+        # skipped.  Mirrors the loop's exact skip rule (skip iff check_build
+        # AND not a bump-target) so the report matches what will build.
+        _delta_to_build = []
+        for _n in _workload:
+            _s = _srcs.get(_n)
+            if _s is None:
+                _delta_to_build.append(_n)
+                continue
+            _is_bump = (
+                _release is not None and self.container is not None
+                and self._needs_bump_build(_n, _s, _release))
+            _expected = self._predicted_files_for_source(_n)
+            if _is_bump or not (
+                    self.container is not None
+                    and self.container.check_build(_s, _expected)):
+                _delta_to_build.append(_n)
 
-            # (2) any OTHER selected source that needs building (forks, or any
-            # source with missing/invalid binaries) — NOT in the upstream delta.
-            # These build pristine (not deltas → not +asg-stamped).
-            _extra = []
-            if self.container is not None:
-                _extra = [
-                    _n for _n, _s in sorted(_srcs.items())
-                    if _n not in _wset
-                    and self._source_state(_n, _s) in ('needs_build', 'stale_pass')
-                ]
+        # (2) any OTHER selected source that needs building (forks, or any
+        # source with missing/invalid binaries) — NOT in the upstream delta.
+        # These build pristine (not deltas → not +asg-stamped).
+        _extra = []
+        if self.container is not None:
+            _extra = [
+                _n for _n, _s in sorted(_srcs.items())
+                if _n not in _wset
+                and self._source_state(_n, _s) in ('needs_build', 'stale_pass')
+            ]
 
+        console.print(
+            f"  {len(_workload)} changed source(s): "
+            f"{len(_workload) - len(_delta_to_build)} already up-to-date, "
+            f"{len(_delta_to_build)} to (re)build"
+            + (f": {', '.join(_delta_to_build)}" if _delta_to_build else ""))
+        if _extra:
             console.print(
-                f"  {len(_workload)} changed source(s): "
-                f"{len(_workload) - len(_delta_to_build)} already up-to-date, "
-                f"{len(_delta_to_build)} to (re)build"
-                + (f": {', '.join(_delta_to_build)}" if _delta_to_build else ""))
-            if _extra:
-                console.print(
-                    f"  + {len(_extra)} other source(s) needing a build "
-                    f"(not in the delta — e.g. forks): {', '.join(_extra)}")
+                f"  + {len(_extra)} other source(s) needing a build "
+                f"(not in the delta — e.g. forks): {', '.join(_extra)}")
 
-            if not _delta_to_build and not _extra:
-                console.print("source build: everything already up-to-date for "
-                              "this generation — nothing to build.")
-                # Treat "nothing to build" as success — the workload is in
-                # the published state, repo/ has the binaries, downstream
-                # stages can proceed.  cmd_source_build's entry guard at
-                # ~L7381 reset the flag to False; if we don't re-arm it
-                # here, autorun aborts at the next step thinking the
-                # build didn't complete.
-                self.flags.source_build_ready = True
-                return
-            # Pass the full delta workload (the loop skips the up-to-date and
-            # rebuilds bump-targets) plus the extra needs_build sources.  Ledger
-            # loaded → delta respins get +asg-stamped; forks build pristine.
-            # _in_update_build=True enables _bump_active inside cmd_source_build
-            # / cmd_source_remotebuild — the bump-target predicate (same-base
-            # re-spin → exact `+asg<R>u<N>` missing) only makes sense in this
-            # workflow.  Dispatch to the remote fan-out when remote=True; the
-            # explicit workload names mean the inner call's _resolve_build_workload
-            # won't re-detect update mode (so no recursion), and the +asg stamp
-            # is applied locally on recovery either way.
-            self._in_update_build = True
-            try:
-                if remote:
-                    self.cmd_source_remotebuild(*(list(_workload) + _extra))
-                else:
-                    self.cmd_source_build(*(list(_workload) + _extra))
-            finally:
-                self._in_update_build = False
+        if not _delta_to_build and not _extra:
+            console.print("source build: everything already up-to-date for "
+                          "this generation — nothing to build.")
+            # Treat "nothing to build" as success — the workload is in
+            # the published state, repo/ has the binaries, downstream
+            # stages can proceed.  cmd_source_build's entry guard at
+            # ~L7381 reset the flag to False; if we don't re-arm it
+            # here, autorun aborts at the next step thinking the
+            # build didn't complete.
+            self.flags.source_build_ready = True
+            return
+        # Pass the full delta workload (the loop skips the up-to-date and
+        # rebuilds bump-targets) plus the extra needs_build sources.  Delta
+        # re-spins transpose to their intrinsic +asg marker; forks build from
+        # their changelog version.  _in_update_build=True enables _bump_active
+        # inside cmd_source_build / cmd_source_remotebuild — the bump-target
+        # predicate (same-base re-spin → its exact transposed file missing) only
+        # makes sense in this workflow.  Dispatch to the remote fan-out when
+        # remote=True; the explicit workload names mean the inner call's
+        # _resolve_build_workload won't re-detect update mode (so no recursion),
+        # and the stamp is applied locally on recovery either way.
+        self._in_update_build = True
+        try:
+            if remote:
+                self.cmd_source_remotebuild(*(list(_workload) + _extra))
+            else:
+                self.cmd_source_build(*(list(_workload) + _extra))
         finally:
-            if self.container is not None:
-                self.container.asg_ledger = None
+            self._in_update_build = False
 
     def _preflight_stamp_invariant(self, names) -> 'list[tuple[str, str]]':
         """Guard A (preemptive, zero builds): for each source's predicted
@@ -925,7 +908,6 @@ class SourceCommandsMixin(SessionState):
         # rebuild queue matches UPDATE-mode `source build`.  N authority is
         # the PUBLISHED manifest only (mirrors `_do_update_build`).
         # Read-only, no container required.
-        _bump_ledger = repo_audit.published_ledger(self.config)
         _bump_release: 'int | None' = None
         try:
             _bump_release = int(
@@ -936,9 +918,9 @@ class SourceCommandsMixin(SessionState):
         # Re-spin (+asg bump) targets are ONLY the snapshot-delta workload —
         # sources whose version actually changed between the mirror floor and
         # current.  Running _needs_bump_build over the WHOLE corpus false-flags
-        # every adopted ~debNuN package (asg_next_n predicts a next-gen +asg
-        # that isn't on disk); _do_update_build only checks the workload, so
-        # scope to it to keep audit ⇄ build in lock-step.  Gated on the cheap
+        # every adopted ~debNuN package (its transposed file is already on disk
+        # at the current generation); _do_update_build only checks the workload,
+        # so scope to it to keep audit ⇄ build in lock-step.  Gated on the cheap
         # _update_build_pending() so a non-UPDATE-mode audit skips the
         # floor-Sources fetch entirely.  A fetch failure degrades to "no
         # bump targets" (under-report) — never the 178-false-flag over-report.
@@ -969,7 +951,7 @@ class SourceCommandsMixin(SessionState):
             for _name, _src in sorted(_srcs.items()):
                 _bar.step(1)
                 _state = self._audit_state(
-                    _name, _src, _bump_ledger, _bump_release, _workload_set)
+                    _name, _src, _bump_release, _workload_set)
                 _by_state[_state].append(_name)
         finally:
             _bar.close()
@@ -1200,7 +1182,6 @@ class SourceCommandsMixin(SessionState):
                 f"  WARN: cannot compute snapshot delta — {_err}",
                 tui.COLOR_WARNING)
             return
-        _ledger = repo_audit.published_ledger(self.config)
         try:
             _release = int(
                 str(self.config.build_version).strip('"').strip("'"))
@@ -1216,8 +1197,7 @@ class SourceCommandsMixin(SessionState):
                 continue
             _is_bump = (
                 _release is not None
-                and self._needs_bump_build(
-                    _n, _s, _ledger, _release))
+                and self._needs_bump_build(_n, _s, _release))
             if _is_bump:
                 _bump_targets.append(_n)
                 _delta_to_build.append(_n)
@@ -1632,8 +1612,7 @@ class SourceCommandsMixin(SessionState):
         # a target.
         _bump_target = (
             _bump_active and self._needs_bump_build(
-                _src_pkg.package, _src_pkg,
-                self.container.asg_ledger or {}, _bump_release))
+                _src_pkg.package, _src_pkg, _bump_release))
 
         # Skip packages with a valid existing build result unless force
         # is set — but never skip a bump-target.
@@ -1656,8 +1635,7 @@ class SourceCommandsMixin(SessionState):
             # now present).  If still missing, the predicate and the
             # post-build stamper disagreed — warn so it's visible.
             if _bump_target and self._needs_bump_build(
-                    _src_pkg.package, _src_pkg,
-                    self.container.asg_ledger or {}, _bump_release):
+                    _src_pkg.package, _src_pkg, _bump_release):
                 logger.warning(
                     f"asg-bump: {_src_pkg.package} built but its +asg uN "
                     f"artifact is still absent — bump predicate/stamper "
@@ -1757,10 +1735,8 @@ class SourceCommandsMixin(SessionState):
 
         Thread-safety: per-call scratch + bundle dirs; build records are
         per-package atomic writes; repo dest writes are serialized by
-        buildcontainer._REPO_DEST_LOCK; asg_ledger is loaded ONCE by the caller
-        (_resolve_build_workload) before the pool, never reloaded here.
-        'transport' signals an ssh/scp failure so the scheduler can re-queue this
-        package on another remote.
+        buildcontainer._REPO_DEST_LOCK.  'transport' signals an ssh/scp failure
+        so the scheduler can re-queue this package on another remote.
         """
         import shutil as _shutil
         import tempfile as _tempfile
@@ -1778,9 +1754,7 @@ class SourceCommandsMixin(SessionState):
         _expected = self._predicted_files_for_source(_src.package)
         _bump_target = (
             bump_active and bump_release is not None
-            and self._needs_bump_build(
-                _src.package, _src, self.container.asg_ledger or {},
-                bump_release))
+            and self._needs_bump_build(_src.package, _src, bump_release))
         if (not _force and not _bump_target
                 and self.container.check_build(_src, _expected)):
             logger.info(f"Package {_src.package} already built [SKIPPED]")
@@ -1881,8 +1855,7 @@ class SourceCommandsMixin(SessionState):
             _shutil.rmtree(_scratch, ignore_errors=True)
             return ('failed', 0)
 
-        # local post-build pipeline — identical bookkeeping to a local build
-        # (asg_ledger already loaded once by _resolve_build_workload).
+        # local post-build pipeline — identical bookkeeping to a local build.
         _emitted = self.container._segregate_built_artifacts(_src, _scratch)
         _final = self.container._normalize_built_artifacts(
             _src, _emitted, bool(_recipe['patch_list']))
@@ -1893,8 +1866,7 @@ class SourceCommandsMixin(SessionState):
         # post-build stamper disagreed — surface it rather than silently
         # shipping the re-spin unstamped.
         if _bump_target and self._needs_bump_build(
-                _src.package, _src, self.container.asg_ledger or {},
-                bump_release):
+                _src.package, _src, bump_release):
             logger.warning(
                 f"asg-bump: {_src.package} built on remote but its +asg uN "
                 f"artifact is still absent — bump predicate/stamper mismatch; "
@@ -2138,14 +2110,6 @@ class SourceCommandsMixin(SessionState):
             console.print(_err)
             return ('error', None)
 
-        # Load the asg ledger from the LOCAL signed manifest BEFORE any build
-        # path branches (lineage continuation; see the long note this replaces).
-        # Loading it here ALSO satisfies the fan-out's "load once before the
-        # worker pool" requirement — a per-worker reload would race N ways.
-        if self.container is not None:
-            self.container.asg_ledger = repo_audit.published_ledger(
-                self.config)
-
         # A subset/all/bare invocation AUTO-DETECTS update mode — for LOCAL and
         # REMOTE builds alike.  The bump is decided here on the build system and
         # the +asg stamp is applied locally on artifact recovery
@@ -2267,9 +2231,9 @@ class SourceCommandsMixin(SessionState):
             return ('error', None)
 
         # bump-aware build: only meaningful inside _do_update_build's
-        # snapshot-delta workflow (gated on _in_update_build).
+        # snapshot-delta workflow (gated on _in_update_build).  The update
+        # number is intrinsic (transpose), so no ledger needs loading first.
         _bump_active = (self.container is not None
-                        and getattr(self.container, 'asg_ledger', None) is not None
                         and self._in_update_build)
         _bump_release = None
         if _bump_active:

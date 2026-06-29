@@ -27267,29 +27267,29 @@ def test_needs_bump_build_predicts_transpose_filename():
 
         # (1) clean new base (strip is a no-op) → never a bump-target
         _sess._predicted_files_for_source = lambda n: ['foo_1.3-1_amd64.deb']
-        assert _sess._needs_bump_build('foo', _Src('1.3-1'), {}, 1) is False
+        assert _sess._needs_bump_build('foo', _Src('1.3-1'), 1) is False
 
         # (2) security re-spin +deb1u1 → expected intrinsic +asg1u1; absent → target
         _sess._predicted_files_for_source = lambda n: ['foo_1.2-3_amd64.deb']
         _delta = _Src('1.2-3+deb1u1')        # strips to 1.2-3, K=1
-        assert _sess._needs_bump_build('foo', _delta, {}, 1) is True
+        assert _sess._needs_bump_build('foo', _delta, 1) is True
         _plant('foo_1.2-3+asg1u1_amd64.deb')                 # plant the exact gen
-        assert _sess._needs_bump_build('foo', _delta, {}, 1) is False
+        assert _sess._needs_bump_build('foo', _delta, 1) is False
 
         # (3) a NEWER upstream re-spin +deb1u2 (K=2) expects +asg1u2; the stale
         # on-disk u1 must NOT satisfy it (exact check, ledger-independent).
         _delta2 = _Src('1.2-3+deb1u2')
-        assert _sess._needs_bump_build('foo', _delta2, {}, 1) is True
+        assert _sess._needs_bump_build('foo', _delta2, 1) is True
         _plant('foo_1.2-3+asg1u2_amd64.deb')
-        assert _sess._needs_bump_build('foo', _delta2, {}, 1) is False
+        assert _sess._needs_bump_build('foo', _delta2, 1) is False
 
         # (4) uniform K across a source's binaries: both expect +asg1u1 (same
         # source suffix); one present, one missing → still a target.
         _sess._predicted_files_for_source = lambda n: [
             'foo_1.2-3_amd64.deb', 'foo-data_1.2-3_amd64.deb']
-        assert _sess._needs_bump_build('foo', _delta, {}, 1) is True
+        assert _sess._needs_bump_build('foo', _delta, 1) is True
         _plant('foo-data_1.2-3+asg1u1_amd64.deb')
-        assert _sess._needs_bump_build('foo', _delta, {}, 1) is False
+        assert _sess._needs_bump_build('foo', _delta, 1) is False
 
         # (5) a PATCHED re-spin: the build record's patch level makes the
         # expected filename +asg1u1+p1 — read from the prior record, not minted.
@@ -27301,9 +27301,9 @@ def test_needs_bump_build_predicts_transpose_filename():
         _rec['patch_bump_count'] = 1
         _rec.update({'phase': 'done', 'status': 'PASS'})
         _u.write_build_record(_bl, _rec)
-        assert _sess._needs_bump_build('bar', _delta, {}, 1) is True
+        assert _sess._needs_bump_build('bar', _delta, 1) is True
         _plant('bar_1.2-3+asg1u1+p1_amd64.deb')
-        assert _sess._needs_bump_build('bar', _delta, {}, 1) is False
+        assert _sess._needs_bump_build('bar', _delta, 1) is False
 
 
 def test_audit_state_reclassifies_security_respin_as_needs_bump():
@@ -27322,26 +27322,26 @@ def test_audit_state_reclassifies_security_respin_as_needs_bump():
 
     # 'ok' + bump due + IN workload → 'needs_bump'
     _sess._source_state = lambda p, s: 'ok'
-    _sess._needs_bump_build = lambda p, s, lg, rl: True
-    assert _sess._audit_state('apache2', _src, {}, 1, _wl) == 'needs_bump'
+    _sess._needs_bump_build = lambda p, s, rl: True
+    assert _sess._audit_state('apache2', _src, 1, _wl) == 'needs_bump'
 
     # bump due but NOT in workload (adopted ~debNuN that didn't change) →
     # stays 'ok' — the 178-false-flag regression guard
-    assert _sess._audit_state('glibc', _src, {}, 1, _wl) == 'ok'
+    assert _sess._audit_state('glibc', _src, 1, _wl) == 'ok'
 
     # 'ok' but NO bump due → stays 'ok'
-    _sess._needs_bump_build = lambda p, s, lg, rl: False
-    assert _sess._audit_state('apache2', _src, {}, 1, _wl) == 'ok'
+    _sess._needs_bump_build = lambda p, s, rl: False
+    assert _sess._audit_state('apache2', _src, 1, _wl) == 'ok'
 
     # a hard state is NEVER reclassified, even if a bump would be due
     _sess._source_state = lambda p, s: 'needs_build'
-    _sess._needs_bump_build = lambda p, s, lg, rl: True
-    assert _sess._audit_state('apache2', _src, {}, 1, _wl) == 'needs_build'
+    _sess._needs_bump_build = lambda p, s, rl: True
+    assert _sess._audit_state('apache2', _src, 1, _wl) == 'needs_build'
 
     # release=None (non-integer VERSION) → bump check skipped, returns 'ok'
     _sess._source_state = lambda p, s: 'ok'
-    _sess._needs_bump_build = lambda p, s, lg, rl: True
-    assert _sess._audit_state('apache2', _src, {}, None, _wl) == 'ok'
+    _sess._needs_bump_build = lambda p, s, rl: True
+    assert _sess._audit_state('apache2', _src, None, _wl) == 'ok'
 
 
 def test_preflight_stamp_invariant_roundtrips_and_flags_bad_version():
@@ -27968,10 +27968,11 @@ def test_cache_build_gates_on_snapshot_pins():
 def test_source_build_autodetects_update_mode():
     """source build self-detects update mode (gotcha G): a subset/bare call
     routes to _do_update_build when a delta is pending; _do_update_build uses
-    the published→current diff + the manifest ledger, and rebuilds WITHOUT
-    blanket force — the loaded ledger makes the per-source build path bump-
-    aware (already-built skipped; same-base re-spins rebuilt as bump-targets).
-    COMP-03 Phase 4 extracted the per-source unit into _build_one_source."""
+    the published→current diff, and rebuilds WITHOUT blanket force — the
+    per-source build path is bump-aware (already-built skipped; same-base
+    re-spins rebuilt as bump-targets, their expected filename derived intrinsically
+    by transpose).  COMP-03 Phase 4 extracted the per-source unit into
+    _build_one_source."""
     import re
     _body = _session_source()
     # Update-mode DETECTION moved into the shared _resolve_build_workload helper
@@ -28002,8 +28003,6 @@ def test_source_build_autodetects_update_mode():
     _u = re.search(r'def _do_update_build\(self.*?(?=\n    def )', _body, re.DOTALL)
     _ub = _u.group(0)
     assert '_workload_since_snapshot(' in _ub, "update build diffs published→current"
-    assert 'published_ledger(' in _ub and 'asg_ledger' in _ub, (
-        "update build loads the manifest ledger for +asg stamping")
     assert "cmd_source_build('force'" not in _ub, (
         "update build must NOT blanket-force — it relies on bump-aware skipping")
     assert '_source_state(' in _ub and 'needs_build' in _ub, (
