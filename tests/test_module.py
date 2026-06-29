@@ -9611,7 +9611,7 @@ def test_bump_is_canonical_home_for_version_logic():
     import bump
     import utils
     for _name in ('strip_nmu_suffix', 'strip_nmu_from_deb', 'transpose',
-                  'transposed_version', 'transpose_deb', 'asg_next_n',
+                  'transposed_version', 'transpose_deb', 'pristine_base',
                   'decide_patch_bump_count', 'normalize_repo_filename',
                   'find_matching_artifact', 'parse_asg_suffix'):
         assert getattr(utils, _name) is getattr(bump, _name), (
@@ -25277,31 +25277,6 @@ def test_comp03_buildcontainer_init_sweeps_build_stage_survivors():
 # UPD-01 step 3 — build-side stamping + check_build matching + Guard B
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_highest_asg_update_reads_remote_ledger():
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import highest_asg_update
-    pub = ['3.0.15-1', '3.0.15-1+asg1u1', '3.0.15-1+asg1u2',
-           '3.0.16-1+asg1u1', '3.0.15-1+asg2u1']
-    assert highest_asg_update(pub, '3.0.15-1', 1) == 2   # u1,u2 at R=1
-    assert highest_asg_update(pub, '3.0.15-1', 2) == 1   # only asg2u1 at R=2
-    assert highest_asg_update(pub, '3.0.16-1', 1) == 1
-    assert highest_asg_update([], '3.0.15-1', 1) == 0
-    assert highest_asg_update(['3.0.15-1'], '3.0.15-1', 1) == 0   # pristine only
-
-
-def test_asg_next_n_is_per_file_and_cumulative():
-    """asg_next_n = highest published +1, derived PER FILE (per the binary's
-    own ledger entry) so a file updated more often carries a higher N; resets
-    per release R."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import asg_next_n
-    assert asg_next_n([], '3.0.15-1', 1) == 1                       # first → u1
-    assert asg_next_n(['3.0.15-1+asg1u1'], '3.0.15-1', 1) == 2      # u1 → u2
-    assert asg_next_n(['3.0.15-1+asg1u1', '3.0.15-1+asg1u2'],
-                      '3.0.15-1', 1) == 3                           # cumulative
-    assert asg_next_n(['3.0.15-1+asg1u1'], '3.0.15-1', 2) == 1      # R differs
-
-
 def test_virtual_arch_gate_dpkg_table_semantics():
     """virtual_build._binary_active_for_arch delegates to dpkg's
     DpkgArchTable.matches_architecture — pins the two delta families the
@@ -40833,8 +40808,6 @@ def main() -> int:
         test_comp03_phase6_uses_cf_wait_first_completed_for_drain,
         test_comp03_phase6_empty_heavy_set_does_not_change_serial_for_heavy,
         # UPD-01 step 3: build-side stamping + check_build matching + Guard B
-        test_highest_asg_update_reads_remote_ledger,
-        test_asg_next_n_is_per_file_and_cumulative,
         # virtual-build chunk 1 — compute_post_build_versions pure helper
         # virtual-build chunk 2 — binary record synthesizer
         test_virtual_arch_gate_dpkg_table_semantics,
