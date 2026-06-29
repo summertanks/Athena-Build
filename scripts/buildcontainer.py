@@ -1835,42 +1835,26 @@ class BuildContainer:
                                    was_patched: bool = False,
                                    events: 'Optional[list]' = None
                                    ) -> 'list[str]':
-        """Normalise every just-emitted artifact: strip upstream NMU layers
-        to pristine, then (when there's an asg lineage to continue OR this
-        build is a fresh delta) stamp our `+asg<R>u<N>` update marker.
+        """Normalise every just-emitted artifact by TRANSPOSING its version in
+        place: a trailing upstream update marker (`+debNuK` / `~debNuK`) becomes
+        our own (`+asg<R>uK` / `~asg<R>uK`), then our patch level (`+pP`) and any
+        forced rebuild (`+bN`) are appended.
 
         `built_files` is the list of post-segregate absolute paths returned by
-        _segregate_built_artifacts — the files this source build just
-        produced.
+        _segregate_built_artifacts — the files this source build just produced.
 
-        STAMP DECISION.  Two independent triggers:
+        The update number K is intrinsic to each binary's own upstream version,
+        so there is no ledger and no ship-order counter, and a faithful pristine
+        rebuild (no trailing marker) stays pristine — no delta/lineage decision.
+        K is uniform across a source's binaries; P/force come from the build
+        record.  Dependency constraints are transposed the same way and
+        same-source sibling pins are restamped to their exact final version,
+        all inside `transpose_deb`.
 
-        (a) Fresh delta — this build itself is a delta vs. pristine upstream:
-            an NMU layer got stripped, a fork patch was applied, OR the
-            selected source version carries an NMU suffix.
+        Failures are logged but don't propagate — best-effort normalisation.
 
-        (b) Lineage continuation — the LOCAL signed published manifest
-            (self.asg_ledger) already contains a `+asg<R>u<N>` entry for
-            one of this build's outputs at this binary's pristine base.
-            This means we've previously SHIPPED an asg generation; landing
-            this build at pristine would silently REGRESS sibling-source
-            metas (e.g. linux-signed-amd64's linux-headers-amd64 meta) that
-            captured the prior version.  Continuing the lineage avoids the
-            regression — asg_next_n returns highest_published_N + 1.
-
-        Either trigger is sufficient.  When neither holds AND no ledger
-        entry exists for any output, we ship pristine.
-
-        Uniform N per source: every sibling binary stamps at max(per-file
-        asg_next_n) — see [[asg-stamp-uniform-n-per-source]].
-
-        Failures are logged but don't propagate — best-effort normalisation;
-        a missed strip surfaces later via `repo audit_nmu`.
-
-        When ``events`` is a list, this appends observability tuples
-        ``('strip', old_name, new_name)`` and
-        ``('stamp', old_name, new_name, '+asgRuN')`` — purely additive,
-        never alters the strip/stamp control flow.
+        When ``events`` is a list, this appends ``('stamp', old, new, version)``
+        observability tuples — purely additive, never alters control flow.
         """
         if not built_files:
             return []
