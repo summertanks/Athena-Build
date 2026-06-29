@@ -1119,20 +1119,21 @@ def test_sta36_mirror_add_confirmation_declines_on_no():
     assert "not in ('y', 'yes')" in _src or 'not in ("y", "yes")' in _src, _src
 
 
-def test_sta35_standalone_tunnel_loads_published_ledger():
-    """STA-35: when no container ledger is present (standalone
-    `source tunnel`), _do_tunnel must fall back to
-    repo_audit.published_ledger so a delta source still gets its asg
-    stamp instead of regressing to pristine."""
+def test_tunnel_transposes_and_needs_no_ledger():
+    """Under TRANSPOSE the tunnel path transposes each downloaded .deb in place
+    (trailing +debNuK → +asg<R>uK, K intrinsic) and therefore needs NO published
+    ledger — the ship-order asg_next_n / lineage machinery is gone.  Supersedes
+    STA-35 (which loaded published_ledger for the ship-order stamp)."""
     import inspect, sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
     _src = inspect.getsource(BuildSession._do_tunnel)
-    assert 'published_ledger' in _src, (
-        "_do_tunnel must load published_ledger when the container ledger "
-        "is absent (STA-35)")
-    # The fallback is gated on the container ledger being None.
-    assert 'if _ledger is None' in _src, _src
+    assert 'transpose_deb' in _src, (
+        "_do_tunnel must transpose each tunnelled .deb (transpose_deb)")
+    assert 'asg_next_n' not in _src and 'restamp_asg_deb' not in _src, (
+        "tunnel must not use the ship-order asg_next_n / restamp stack")
+    assert 'published_ledger' not in _src, (
+        "tunnel no longer needs the ledger (K is intrinsic)")
 
 
 def test_sta33_build_depends_serialises_apt_pkg_profile_global():
@@ -9256,6 +9257,169 @@ def test_strip_build_version_no_change_when_no_binNMU():
             == 'foo_1.0-2_amd64.deb')
 
 
+# --- TRANSPOSE scheme primitives (transpose / strip_binNMU) ---------------
+
+def test_transpose_trailing_plus_deb():
+    """A trailing `+debNuK` becomes `+asg<R>uK`; epoch preserved."""
+    from utils import transpose
+    assert transpose('2.36-9+deb12u14', 'asg', 1) == '2.36-9+asg1u14'
+    assert transpose('7:5.1.9-0+deb12u1', 'asg', 1) == '7:5.1.9-0+asg1u1'
+    # a different prefix/release flow through verbatim
+    assert transpose('1.2.3-4+deb12u3', 'val', 2) == '1.2.3-4+val2u3'
+
+
+def test_transpose_trailing_tilde_deb_keeps_sign():
+    """A trailing `~debNuK` keeps its `~` → `~asg<R>uK` (sorts below pristine)."""
+    from utils import transpose
+    assert transpose('2.4.67-1~deb12u2', 'asg', 1) == '2.4.67-1~asg1u2'
+    assert transpose('1:9.18.49-1~deb12u1', 'asg', 1) == '1:9.18.49-1~asg1u1'
+
+
+def test_transpose_embedded_deb_is_left_alone():
+    """An EMBEDDED `+deb` (not the trailing token) is upstream identity — kept.
+    shim ships `1.44~1+deb12u1+15.8-1~deb12u1`: only the trailing `~deb12u1`
+    transposes; the mid-string `+deb12u1` stays."""
+    from utils import transpose
+    assert (transpose('1.44~1+deb12u1+15.8-1~deb12u1', 'asg', 1)
+            == '1.44~1+deb12u1+15.8-1~asg1u1')
+    # deb token followed by more version structure (cross-gcc) → no trailing
+    # token → unchanged.
+    assert transpose('12.2.0-14+deb12u1+25.2', 'asg', 1) == '12.2.0-14+deb12u1+25.2'
+
+
+def test_transpose_no_token_unchanged():
+    """No trailing redistribution token → version returns verbatim."""
+    from utils import transpose
+    assert transpose('0.7.4-20', 'asg', 1) == '0.7.4-20'
+    assert transpose('2.10.4+nmu1', 'asg', 1) == '2.10.4+nmu1'        # +nmu kept
+    assert transpose('2.10.4+nmu1+b1', 'asg', 1) == '2.10.4+nmu1+b1'  # trailing +b
+    assert transpose('1.0-3.3', 'asg', 1) == '1.0-3.3'                # dotted rev
+    assert transpose('0.7.0+really0.5.0-1', 'asg', 1) == '0.7.0+really0.5.0-1'
+
+
+def test_transpose_floor_tail_tilde_preserved():
+    """A constraint floor's trailing `~` (e.g. `>= 0.8.0-2+deb12u1~`) carries
+    through so the transposed floor keeps the same ordering."""
+    from utils import transpose
+    assert transpose('0.8.0-2+deb12u1~', 'asg', 1) == '0.8.0-2+asg1u1~'
+
+
+def test_strip_binNMU_splits_trailing_marker():
+    """`+bN` / `~bpoN+M` split off; +deb / +nmu / dotted-rev are NOT touched."""
+    from utils import strip_binNMU
+    assert strip_binNMU('1.0-2+b1') == ('1.0-2', '+b1')
+    assert strip_binNMU('1.0-2~bpo12+1') == ('1.0-2', '~bpo12+1')
+    assert strip_binNMU('1.0-2+deb12u3+b1') == ('1.0-2+deb12u3', '+b1')
+    assert strip_binNMU('1.0-2+deb12u3') == ('1.0-2+deb12u3', '')   # +deb kept
+    assert strip_binNMU('2.10.4+nmu1') == ('2.10.4+nmu1', '')       # +nmu kept
+    assert strip_binNMU('1.0-3.3') == ('1.0-3.3', '')              # dotted rev kept
+
+
+def test_transposed_version_appends_p_and_b():
+    """V = transpose(upstream) [+ +p<P>] [+ +b<bN>]."""
+    from utils import transposed_version
+    assert transposed_version('2.36-9+deb12u14', 'asg', 1) == '2.36-9+asg1u14'
+    assert transposed_version('5.36.0-7+deb12u3', 'asg', 1, 1) == '5.36.0-7+asg1u3+p1'
+    # patch / force on a pristine base anchor to u0 so they sort BELOW the
+    # first upstream update (+p / +b would otherwise outrank the +asg namespace).
+    assert transposed_version('5.2.15-2', 'asg', 1, 1) == '5.2.15-2+asg1u0+p1'
+    assert transposed_version('1.0-2', 'asg', 1, force_bn=1) == '1.0-2+asg1u0+b1'
+    # patch + force on an updated base: anchor already present (u3).
+    assert transposed_version('1.0-2+deb12u3', 'asg', 1, 2, 1) == '1.0-2+asg1u3+p2+b1'
+
+
+def test_compute_transposed_versions_per_binary_base_uniform_p():
+    """Each binary transposes its OWN base (source-base != binary-base), with a
+    uniform per-source P applied to all."""
+    from utils import compute_transposed_versions
+    # samba: samba-common at the source base, ldb binaries at their own base —
+    # both carry +deb12u4 → both u4, with the same P.
+    out = compute_transposed_versions({
+        'samba-common': '2:4.17.12+dfsg-0+deb12u4',
+        'libldb2': '2:2.6.2+samba4.17.12+dfsg-0+deb12u4',
+    }, 'asg', 1, patch_level=1)
+    assert out == {
+        'samba-common': '2:4.17.12+dfsg-0+asg1u4+p1',
+        'libldb2': '2:2.6.2+samba4.17.12+dfsg-0+asg1u4+p1',
+    }
+
+
+def test_transpose_control_text_version_deps_and_provenance():
+    """Version + constraints transposed; pre-transpose upstream recorded."""
+    from utils import transpose_control_text
+    _ctrl = (
+        'Package: apache2\n'
+        'Version: 2.4.67-1~deb12u2\n'
+        'Depends: libc6 (>= 2.36-9+deb12u14), perl (>= 5.36.0-7+deb12u3)\n'
+        'Description: x\n'
+    )
+    _out, _n = transpose_control_text(_ctrl, 'asg', 1)
+    assert 'Version: 2.4.67-1~asg1u2' in _out            # ~deb → ~asg
+    assert 'X-Athena-Upstream-Version: 2.4.67-1~deb12u2' in _out
+    assert '(>= 2.36-9+asg1u14)' in _out                 # cross-source floor transposed
+    assert '(>= 5.36.0-7+asg1u3)' in _out
+    assert _n >= 3
+
+
+def test_transpose_control_text_no_token_is_noop_no_provenance():
+    """A pristine / +nmu version is unchanged and gets no X-upstream field."""
+    from utils import transpose_control_text
+    _out, _n = transpose_control_text(
+        'Package: cupt\nVersion: 2.10.4+nmu1\nDescription: x\n', 'asg', 1)
+    assert 'Version: 2.10.4+nmu1' in _out
+    assert 'X-Athena-Upstream-Version:' not in _out
+    assert _n == 0
+
+
+def test_transpose_scheme_boundary_table_and_ordering():
+    """Immutable-scheme regression: pin the worked-example outputs AND the
+    resulting dpkg ordering chain.  Self-contained (no cache/repo dependency) so
+    it guards the frozen behaviour on every run.  A change that breaks any row
+    or any inequality re-orders already-shipped releases — that is the failure
+    this test exists to catch."""
+    import shutil as _sh
+    if not _sh.which('dpkg'):
+        return
+    from utils import transposed_version as _T
+    # (upstream, patched? -> patch_level, expected) from docs/bump-mechanics.md.
+    _table = [
+        ('0.7.4-20',            0, '0.7.4-20'),                 # pristine, faithful
+        ('1.2.3-4+deb12u3',     0, '1.2.3-4+asg1u3'),           # faithful update
+        ('1.2.3-4+deb12u4',     0, '1.2.3-4+asg1u4'),           # later update
+        ('1.2.3-4+deb12u2',     0, '1.2.3-4+asg1u2'),           # lower (downgrade target)
+        ('2.4.67-1~deb12u2',    0, '2.4.67-1~asg1u2'),          # ~deb -> ~asg (below pristine)
+        ('7:5.1.9-0+deb12u1',   0, '7:5.1.9-0+asg1u1'),         # epoch preserved
+        ('1.2.3-4',             1, '1.2.3-4+asg1u0+p1'),        # patch on pristine (anchored)
+        ('1.2.3-4+deb12u3',     1, '1.2.3-4+asg1u3+p1'),        # patch on an update
+        # embedded update marker kept; only the trailing one translates
+        ('1.44~1+deb12u1+15.8-1~deb12u1', 0, '1.44~1+deb12u1+15.8-1~asg1u1'),
+    ]
+    for _up, _p, _exp in _table:
+        assert _T(_up, 'asg', 1, _p) == _exp, (_up, _p, _T(_up, 'asg', 1, _p))
+
+    import subprocess
+
+    def _lt(_a, _b):
+        return subprocess.run(['dpkg', '--compare-versions', _a, 'lt', _b]).returncode == 0
+
+    # ~asg sits BELOW its own pristine base (the chosen ~deb policy).
+    assert _lt('2.4.67-1~asg1u2', '2.4.67-1')
+    # The +asg update chain, including patch levels, is strictly increasing.
+    _asg_chain = [
+        '1.2.3-4',
+        '1.2.3-4+asg1u0+p1',
+        '1.2.3-4+asg1u2',
+        '1.2.3-4+asg1u3',
+        '1.2.3-4+asg1u3+p1',
+        '1.2.3-4+asg1u4',
+    ]
+    for _lo, _hi in zip(_asg_chain, _asg_chain[1:]):
+        assert _lt(_lo, _hi), f"ordering broken: {_lo} !< {_hi}"
+    # A forced rebuild on a pristine base is anchored too (sorts below u1).
+    assert _T('1.0-2', 'asg', 1, 0, 1) == '1.0-2+asg1u0+b1'
+    assert _lt('1.0-2+asg1u0+b1', '1.0-2+asg1u1')
+
+
 def test_strip_build_version_rejects_malformed_filename():
     """Filenames not in `name_version_arch.ext` shape raise ValueError."""
     from utils import strip_build_version
@@ -9752,6 +9916,67 @@ def test_strip_nmu_from_deb_idempotent():
         _r = strip_nmu_from_deb(_p)
         assert _r['status'] == 'unchanged', _r
         assert _r['strips_count'] == 0, _r
+
+
+def test_transpose_deb_round_trip():
+    """End-to-end transpose+stamp: a built .deb with a +deb Version, a patched
+    source (P=1), a cross-source floor and a same-source sibling pin →
+    transpose to +asg, append +p1, restamp the sibling to the exact final,
+    transpose the cross-source floor, preserve epoch."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import transpose_deb
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_transpose_deb_round_trip (no dpkg-deb)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'lib'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: git\n'
+                'Version: 1:2.39.5-0+deb12u3\n'                 # epoch + trailing +deb
+                'Architecture: amd64\n'
+                'Maintainer: T <t@l>\n'
+                # sibling pin (same source, at this binary's version) +
+                # cross-source floor.
+                'Depends: git-man (= 1:2.39.5-0+deb12u3), libc6 (>= 2.36-9+deb12u14)\n'
+                'Description: transpose round-trip\n'
+            )
+        with open(os.path.join(_work, 'usr', 'lib', 'p'), 'w') as fh:
+            fh.write('x\n')
+        _orig = os.path.join(_tmp, 'git_2.39.5-0+deb12u3_amd64.deb')  # epoch dropped in fn
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _orig],
+            check=True, capture_output=True,
+        )
+
+        _r = transpose_deb(_orig, 'asg', 1, patch_level=1)
+        assert _r['status'] == 'rewritten', _r
+        assert _r['version'] == '1:2.39.5-0+asg1u3+p1', _r
+        assert (os.path.basename(_r['new_path'])
+                == 'git_2.39.5-0+asg1u3+p1_amd64.deb'), _r['new_path']
+        _ver = subprocess.run(
+            ['dpkg-deb', '-f', _r['new_path'], 'Version'],
+            check=True, capture_output=True, text=True).stdout.strip()
+        assert _ver == '1:2.39.5-0+asg1u3+p1', f"epoch/version? {_ver!r}"
+        _deps = subprocess.run(
+            ['dpkg-deb', '-f', _r['new_path'], 'Depends'],
+            check=True, capture_output=True, text=True).stdout.strip()
+        # sibling pin restamped to the EXACT final version (incl. +p1)
+        assert 'git-man (= 1:2.39.5-0+asg1u3+p1)' in _deps, _deps
+        # cross-source floor transposed (no +p — not a sibling)
+        assert 'libc6 (>= 2.36-9+asg1u14)' in _deps, _deps
+        assert '+deb12u' not in _deps, f"deb residue: {_deps!r}"
+        # provenance recorded
+        _xup = subprocess.run(
+            ['dpkg-deb', '-f', _r['new_path'], 'X-Athena-Upstream-Version'],
+            check=True, capture_output=True, text=True).stdout.strip()
+        assert _xup == '1:2.39.5-0+deb12u3', _xup
 
 
 def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
@@ -20634,18 +20859,14 @@ def test_mat11_mirror_help_subcommands_all_dispatch():
 
 
 def test_mat10c_bump_decision_parity_triggers():
-    """MAT-10(c): the +asg stamp decision (DELTA or LINEAGE) is duplicated in
-    the real-build path (buildcontainer._normalize_built_artifacts) and the
-    virtual-build path (virtual_build.synthesize_source_binaries) — documented
-    as aligned but with no test guarding against future DRIFT.
+    """MAT-10(c): the version decision is duplicated in the real-build path
+    (buildcontainer._normalize_built_artifacts) and the virtual-build path
+    (virtual_build.synthesize_source_binaries) — guard against DRIFT.
 
-    Structural parity canary: BOTH decisions must reference the SAME two
-    triggers — DELTA (`was_patched` + `strip_nmu_suffix`) and LINEAGE
-    (`pristine_base` + `parse_asg_suffix` over the ledger).  A future edit that
-    drops a trigger from one path fails here, forcing a re-sync — or the
-    deferred consolidation into one shared predicate.  (Source-level by
-    necessity: the inline-duplicated decision can't be behaviourally
-    parity-tested without extracting it first.)"""
+    Under the TRANSPOSE scheme both paths must reference the SAME machinery:
+    the trailing-token `transpose` and the per-source patch level P (the
+    `patch_bump_count` / was_patched signal).  A future edit that switches one
+    path back to a ship-order/strip decision fails here, forcing a re-sync."""
     import inspect
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import buildcontainer as _bc
@@ -20653,10 +20874,11 @@ def test_mat10c_bump_decision_parity_triggers():
     _real = inspect.getsource(_bc.BuildContainer._normalize_built_artifacts)
     _virt = inspect.getsource(_vb.synthesize_source_binaries)
     for _src, _name in ((_real, 'real-build'), (_virt, 'virtual-build')):
-        assert 'was_patched' in _src and 'strip_nmu_suffix' in _src, \
-            f'{_name}: DELTA trigger (was_patched/strip_nmu_suffix) missing'
-        assert 'pristine_base' in _src and 'parse_asg_suffix' in _src, \
-            f'{_name}: LINEAGE trigger (pristine_base/parse_asg_suffix) missing'
+        assert 'transpose' in _src, \
+            f'{_name}: transpose machinery missing (ship-order regression?)'
+        assert ('patch_level' in _src or 'patch_bump_count' in _src
+                or 'was_patched' in _src), \
+            f'{_name}: patch-level P signal missing'
 
 
 def test_fed01_ledger_stranded_claims_detector():
@@ -22382,14 +22604,11 @@ def test_validate_canonical_attribution_tunnel_and_build_config():
         assert 'virtual_validate_synth_over_predicted' not in _kinds, _findings
 
 
-def test_validate_asg_seeded_reconstruction_matches_after_publish_advance():
-    """When a publish advances published.manifest to a build's OWN +asgRuN
-    generation, the local manifest holds only u2 (u1 dropped).  The at-build
-    ledger reconstruction must SEED the prior generation from the build's own
-    recorded N (u2 ⇒ at-build high-water u1) so the synthesizer deterministically
-    reproduces the real u2 artifact — manifest-independent.  Result: the source
-    MATCHES; no asg_drift, no special bucket.  Mirrors the live python3.11 state
-    (real u2, manifest u2 only, prior u1 gone)."""
+def test_validate_transpose_prediction_matches_built_asg():
+    """TRANSPOSE validate round-trip: the cache universe holds the +debNuK
+    upstream version; the build emitted +asgK.  The synth transposes the
+    universe version to the SAME +asgK, so the source MATCHES with no drift —
+    deterministic from the upstream version, no ledger reconstruction needed."""
     import shutil as _sh
     if not _sh.which('dpkg-deb'):
         return
@@ -22402,7 +22621,7 @@ def test_validate_asg_seeded_reconstruction_matches_after_publish_advance():
         _log = os.path.join(_root, 'log', 'build')
         os.makedirs(_repo)
         os.makedirs(_log)
-        # On disk: foosrc emitted two binaries at +asg1u2 (the published gen).
+        # On disk: foosrc emitted two binaries transposed to +asg1u2.
         for _n in ('foo', 'foo-lib'):
             _build_minimal_deb(
                 os.path.join(_repo, f'{_n}_1.0-1+asg1u2_amd64.deb'),
@@ -22415,19 +22634,20 @@ def test_validate_asg_seeded_reconstruction_matches_after_publish_advance():
 
         _sources = {
             'foosrc': types.SimpleNamespace(
-                package='foosrc', version='1.0-1', binary=['foo', 'foo-lib'],
+                package='foosrc', version='1.0-1+deb12u2',
+                binary=['foo', 'foo-lib'],
                 patch_list=[], package_list=[], files={}, _mirror=None),
         }
-        # The cache universe holds PRISTINE upstream versions (our +asgRuN
-        # stamps live only on built .debs, never in the upstream index).
+        # The cache universe holds the +deb upstream the binaries were built
+        # from; transpose maps it to the +asg the build emitted.
         _universe = {
-            'foo':     {'1.0-1': {'Package': 'foo', 'Source': 'foosrc',
-                                  'Version': '1.0-1', 'Architecture': 'amd64'}},
-            'foo-lib': {'1.0-1': {'Package': 'foo-lib', 'Source': 'foosrc',
-                                  'Version': '1.0-1', 'Architecture': 'amd64'}},
+            'foo':     {'1.0-1+deb12u2': {
+                'Package': 'foo', 'Source': 'foosrc',
+                'Version': '1.0-1+deb12u2', 'Architecture': 'amd64'}},
+            'foo-lib': {'1.0-1+deb12u2': {
+                'Package': 'foo-lib', 'Source': 'foosrc',
+                'Version': '1.0-1+deb12u2', 'Architecture': 'amd64'}},
         }
-        # published.manifest holds exactly this build's generation (u2 only) —
-        # the prior generation (u1) is gone.  Seeding must recover it.
         _led = {'foo': ['1.0-1+asg1u2'], 'foo-lib': ['1.0-1+asg1u2']}
         _canon = {'foo': 'foosrc', 'foo-lib': 'foosrc'}
         _stats, _findings = _vb.validate_against_build_records(
@@ -22437,12 +22657,9 @@ def test_validate_asg_seeded_reconstruction_matches_after_publish_advance():
             arch='amd64', buildlog_dir=_log,
             repo_dir=os.path.join(_root, 'repo'),
             canonical_src_map=_canon)
-        # Seeded reconstruction → synth predicts u2 → MATCH, not drift.
         assert _stats['sources_drifted'] == 0, (_stats, _findings)
         assert _stats['sources_matched'] == 1, (_stats, _findings)
         assert _stats.get('asg_drift_sources', 0) == 0, _stats
-        _kinds = {_k for _s, _k, _m in _findings}
-        assert 'virtual_validate_asg_drift' not in _kinds, _findings
 
 
 def test_reconstruct_historical_ledger_seeds_prior_generation_from_recorded_n():
@@ -25564,11 +25781,11 @@ def test_virtual_build_metapackage_uses_binary_upstream_version():
     assert 'gcc-12 (>= 12.2.0-14~)' in _by_name['gcc']['Depends']
 
 
-def test_virtual_build_metapackage_stamps_when_lineage_present():
-    """gcc-defaults case under asg-stamp: ledger has prior +asg entry
-    at the COMPILER pristine base, lineage continuation triggers,
-    every binary stamps at uniform N over its own pristine base, and
-    sibling pins rewrite to the stamped version."""
+def test_virtual_build_metapackage_per_binary_transpose():
+    """gcc-defaults case under TRANSPOSE: each binary transposes its OWN
+    upstream version.  cpp/gcc at 4:12.2.0-3 carry NO trailing +deb, so they
+    ship pristine (the ledger is irrelevant — K is intrinsic, no lineage), and
+    the sibling pin stays at the (transpose-no-op) sibling version."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
 
@@ -25590,10 +25807,7 @@ def test_virtual_build_metapackage_stamps_when_lineage_present():
             'Depends': 'cpp (= 4:12.2.0-3)',
         }},
     }
-    # Production ledger entries are epoch-stripped by
-    # `repo_audit.parse_packages_to_ledger` (matches real-build's
-    # filename-based comparison; filenames omit epoch).  Fixture
-    # mirrors that — no `4:` prefix on entries.
+    # A prior +asg in the ledger is now ignored (no lineage trigger).
     _ledger = {
         'cpp': ['12.2.0-3+asg1u1'],
         'gcc': ['12.2.0-3+asg1u1', '12.2.0-3+asg1u2'],
@@ -25603,19 +25817,19 @@ def test_virtual_build_metapackage_stamps_when_lineage_present():
         asg_ledger=_ledger, release=1, arch='amd64',
     )
     _by_name = {_r['Package']: _r for _r in _recs}
-    # Uniform N = max(cpp_next=2, gcc_next=3) = 3.
-    assert _by_name['cpp']['Version'] == '4:12.2.0-3+asg1u3'
-    assert _by_name['gcc']['Version'] == '4:12.2.0-3+asg1u3'
-    # gcc's sibling pin → stamped cpp version.
-    assert 'cpp (= 4:12.2.0-3+asg1u3)' in _by_name['gcc']['Depends']
+    # No trailing +deb on either binary → both ship pristine.
+    assert _by_name['cpp']['Version'] == '4:12.2.0-3'
+    assert _by_name['gcc']['Version'] == '4:12.2.0-3'
+    # gcc's sibling pin stays at the sibling's (pristine) version.
+    assert 'cpp (= 4:12.2.0-3)' in _by_name['gcc']['Depends']
 
 
-def test_virtual_build_strips_nmu_from_inherited_depends_constraint():
-    """Upstream consumer pins to an NMU-stamped target version
-    (``grub-common (>= 2.06-13+deb12u2)``).  Real build's
-    strip_nmu_from_control_text strips this to ``(>= 2.06-13)``
-    so our asg-stamped target (``2.06-13+asg1u1``) satisfies it.
-    Virtual synth MUST do the same to avoid false closure breaks."""
+def test_virtual_build_transposes_inherited_depends_constraint():
+    """Upstream consumer pins to a +deb target version
+    (``grub-common (>= 2.06-13+deb12u2)``).  Under TRANSPOSE the synth
+    rewrites this to ``(>= 2.06-13+asg1u2)`` — exactly what our rebuilt
+    grub-common (2.06-13+asg1u2) ships at — so the floor stays satisfiable
+    and the ordinal is preserved (the old strip-to-pristine discarded it)."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
 
@@ -25638,10 +25852,8 @@ def test_virtual_build_strips_nmu_from_inherited_depends_constraint():
         asg_ledger={}, release=1, arch='amd64',
     )
     assert len(_recs) == 1
-    # Constraint version got NMU-stripped: now '2.06-13', not
-    # '2.06-13+deb12u2'.  apt's version_compare on '2.06-13+asg1u1'
-    # vs '2.06-13' returns positive → satisfied.
-    assert 'grub-common (>= 2.06-13)' in _recs[0]['Depends']
+    # Constraint transposed: now '2.06-13+asg1u2', not '+deb12u2'.
+    assert 'grub-common (>= 2.06-13+asg1u2)' in _recs[0]['Depends']
     assert '+deb12u2' not in _recs[0]['Depends']
 
 
@@ -26487,49 +26699,42 @@ def test_virtual_build_delta_uses_source_version_not_per_binary():
         assert '+asg' not in _r['Version'], _r['Version']
 
 
-def test_virtual_build_override_source_version_uses_at_build_pristine():
-    """For validate (historical comparison): today's source.version
-    may carry NMU suffix from a snapshot roll-forward AFTER the
-    original build (curl: cache today `7.88.1-10+deb12u14`, built
-    historically at `7.88.1-10` pristine).  `override_source_version`
-    kwarg lets validate pass the at-build-time pristine derived from
-    output_hashes — synth's delta check uses that, not today's
-    drifted version."""
+def test_virtual_build_per_binary_version_is_intrinsic():
+    """Under TRANSPOSE the predicted version comes from each BINARY's own
+    upstream version (intrinsic K), not the source version.  curl's binary at
+    7.88.1-10+deb12u14 → 7.88.1-10+asg1u14, and override_source_version (a
+    validate-path device for the at-build source) no longer changes the
+    binary's transposed version — the K rides in the binary's own +deb."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
 
     class _Curl:
         package = 'curl'
-        version = '7.88.1-10+deb12u14'  # today's NMU-stamped source
+        version = '7.88.1-10+deb12u14'
         binary = ['curl']
 
     _universe = {'curl': {'7.88.1-10+deb12u14': {
         'Package': 'curl', 'Version': '7.88.1-10+deb12u14',
         'Source': 'curl', 'Architecture': 'amd64'}}}
     _ledger: 'dict' = {'curl': ['7.88.1-10']}
-    # Without override: today's source.version triggers delta → stamp.
     _r1 = _vb.synthesize_source_binaries(
         source=_Curl(), package_universe=_universe,
         asg_ledger=_ledger, release=1, arch='amd64',
         peer_sources={'curl'})
-    assert '+asg' in _r1[0]['Version']
-    # With override (at-build-time pristine '7.88.1-10'): no delta.
+    assert _r1[0]['Version'] == '7.88.1-10+asg1u14'
+    # override_source_version does not alter the per-binary transpose.
     _r2 = _vb.synthesize_source_binaries(
         source=_Curl(), package_universe=_universe,
         asg_ledger=_ledger, release=1, arch='amd64',
         peer_sources={'curl'},
         override_source_version='7.88.1-10')
-    assert '+asg' not in _r2[0]['Version']
+    assert _r2[0]['Version'] == '7.88.1-10+asg1u14'
 
 
-def test_virtual_build_synthesize_lineage_matches_epoch_stripped_ledger():
-    """Production ledger (via `parse_packages_to_ledger`) returns
-    epoch-stripped entries.  Upstream Package records for epoched
-    sources (bind9, libcurl, openssl) carry epoch in their Version.
-    Synth's lineage scan + asg_next_n MUST epoch-strip the per-binary
-    pristine before comparing against the ledger or lineage NEVER
-    triggers for epoched sources → predicts pristine → asg drift on
-    every epoched binary."""
+def test_virtual_build_transpose_preserves_epoch():
+    """TRANSPOSE on an epoched source: each binary at 1:9.18.49-1+deb12u3 →
+    1:9.18.49-1+asg1u3 (epoch kept in the internal Version, K=3 intrinsic, no
+    ledger).  The on-disk Filename is epoch-stripped (dpkg convention)."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
 
@@ -26546,7 +26751,6 @@ def test_virtual_build_synthesize_lineage_matches_epoch_stripped_ledger():
             'Package': 'bind9-libs', 'Version': '1:9.18.49-1+deb12u3',
             'Source': 'bind9', 'Architecture': 'amd64'}},
     }
-    # Production ledger: epoch-stripped.
     _ledger = {
         'bind9':      ['9.18.47-1', '9.18.49-1+asg1u1'],
         'bind9-libs': ['9.18.47-1', '9.18.49-1+asg1u1'],
@@ -26557,14 +26761,11 @@ def test_virtual_build_synthesize_lineage_matches_epoch_stripped_ledger():
         peer_sources={'bind9'},
     )
     _by_name = {_r['Package']: _r for _r in _recs}
-    # Lineage triggered → uniform N = asg_next_n(...,9.18.49-1,1)=2
-    # → all binaries stamp at +asg1u2.  Internal Version retains
-    # epoch.
-    assert _by_name['bind9']['Version'] == '1:9.18.49-1+asg1u2'
-    assert _by_name['bind9-libs']['Version'] == '1:9.18.49-1+asg1u2'
+    assert _by_name['bind9']['Version'] == '1:9.18.49-1+asg1u3'
+    assert _by_name['bind9-libs']['Version'] == '1:9.18.49-1+asg1u3'
     # Filename is epoch-stripped.
     assert _by_name['bind9']['Filename'].endswith(
-        'bind9_9.18.49-1+asg1u2_amd64.deb')
+        'bind9_9.18.49-1+asg1u3_amd64.deb')
 
 
 def test_virtual_build_reconstruct_historical_ledger_epoch_aware():
@@ -26829,46 +27030,47 @@ def test_tunnel_filenames_falls_back_when_binary_not_in_cache():
         ['ghost-bin_1.0_amd64.deb']
 
 
-def test_normalize_built_artifacts_stamps_delta_when_ledger_present():
-    """A delta build (here forced via was_patched) with a remote ledger loaded
-    gets +asg<R>u<N> stamped; N derives from the ledger."""
+def test_normalize_built_artifacts_transposes_deb_to_asg_no_ledger():
+    """TRANSPOSE: a binary whose upstream version carries a trailing +debNuK
+    is transposed to +asg<R>uK in place — K is intrinsic to the upstream
+    version, so NO ledger is consulted (the old ship-order asg_next_n is gone).
+    +deb12u2 → +asg1u2."""
     import shutil as _sh
     if not _sh.which('dpkg-deb'):
         return
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     with tempfile.TemporaryDirectory() as _tmp:
-        _p = os.path.join(_tmp, 'openssl_3.0.15-1_amd64.deb')
-        _build_minimal_deb(_p, 'openssl', '3.0.15-1', 'amd64')
+        _p = os.path.join(_tmp, 'openssl_3.0.15-1+deb12u2_amd64.deb')
+        _build_minimal_deb(_p, 'openssl', '3.0.15-1+deb12u2', 'amd64')
         _bc = _make_buildcontainer_stub(repo=_tmp)
-        # ledger already has the pristine published → next update is u1
-        _bc.asg_ledger = {'openssl': ['3.0.15-1']}
+        # No ledger needed — intentionally left unset.
 
         class _FakeConfig:
             build_version = '1'
 
         class _Src:
             package = 'openssl'
-            version = '3.0.15-1'
+            version = '3.0.15-1+deb12u2'
 
         _bc.config = _FakeConfig()
-        _bc._normalize_built_artifacts(_Src(), [_p], was_patched=True)
-        assert not os.path.exists(_p), "pristine file should be renamed"
-        _stamped = os.path.join(_tmp, 'openssl_3.0.15-1+asg1u1_amd64.deb')
-        assert os.path.exists(_stamped), "delta build was not asg-stamped"
+        _bc._normalize_built_artifacts(_Src(), [_p], was_patched=False)
+        assert not os.path.exists(_p), "+deb file should be transposed + renamed"
+        _stamped = os.path.join(_tmp, 'openssl_3.0.15-1+asg1u2_amd64.deb')
+        assert os.path.exists(_stamped), "+deb build was not transposed to +asg"
         import subprocess
         _ver = subprocess.run(['dpkg-deb', '-f', _stamped, 'Version'],
                               check=True, capture_output=True, text=True).stdout.strip()
-        assert _ver == '3.0.15-1+asg1u1', _ver
+        assert _ver == '3.0.15-1+asg1u2', _ver
 
 
-def test_normalize_built_artifacts_stamps_lineage_continuation_when_ledger_has_prior_asg():
-    """The fix shipped 2026-06-05: even when this build has NO
-    delta-shape signal (pristine source version, no patches applied,
-    no NMU strip), if the ledger has a prior `+asg<R>u<N>` entry at
-    THIS binary's pristine base, we must stamp the rebuild to continue
-    the lineage — otherwise sibling-source metas (e.g. linux-signed-
-    amd64 → linux-headers-amd64) that captured the prior `+asg<R>u<N>`
-    silently dangle.
+def test_normalize_built_artifacts_transpose_has_no_lineage_trigger():
+    """TRANSPOSE: the ship-order lineage-continuation trigger is GONE.  A
+    faithful PRISTINE rebuild (binary version has no trailing +deb) stays
+    pristine REGARDLESS of what the ledger holds — the old regression
+    (a pristine rebuild dangling against a sibling meta's prior +asg pin)
+    cannot arise, because +deb→+asg is deterministic from the upstream
+    version: the sibling meta also transposes to the same pristine version,
+    so the pins stay consistent without any ledger-driven stamp.
     """
     import shutil as _sh
     if not _sh.which('dpkg-deb'):
@@ -26879,9 +27081,8 @@ def test_normalize_built_artifacts_stamps_lineage_continuation_when_ledger_has_p
         _build_minimal_deb(_p, 'linux-headers-6.1.0-49-common',
                            '6.1.174-1', 'all')
         _bc = _make_buildcontainer_stub(repo=_tmp)
-        # Ledger reflects a prior publish at +asg1u1 — the lineage we
-        # must continue.  Without this fix, _was_delta=False short-
-        # circuited the stamp and the rebuild shipped pristine.
+        # A prior +asg publish in the ledger is now IRRELEVANT — transpose does
+        # not consult it.  The binary version (6.1.174-1) has no trailing +deb.
         _bc.asg_ledger = {
             'linux-headers-6.1.0-49-common': ['6.1.174-1+asg1u1'],
         }
@@ -26891,23 +27092,14 @@ def test_normalize_built_artifacts_stamps_lineage_continuation_when_ledger_has_p
 
         class _Src:
             package = 'linux'         # source name
-            version = '6.1.174-1'      # PRISTINE — no NMU suffix
+            version = '6.1.174-1'      # PRISTINE — no redistribution suffix
 
         _bc.config = _FakeConfig()
-        # was_patched=False, no strip happens (filename already pristine).
-        # Old logic: _was_delta=False → no stamp → ships pristine.
-        # New logic: ledger has +asg1u1 at this base → lineage
-        # continuation → stamp to +asg1u2.
         _bc._normalize_built_artifacts(_Src(), [_p], was_patched=False)
 
-        assert not os.path.exists(_p), (
-            "pristine file should have been stamped + renamed")
-        _stamped = os.path.join(
-            _tmp, 'linux-headers-6.1.0-49-common_6.1.174-1+asg1u2_all.deb')
-        assert os.path.exists(_stamped), (
-            f"lineage-continuation stamp not applied; "
-            f"expected {os.path.basename(_stamped)} on disk, "
-            f"got: {sorted(os.listdir(_tmp))}")
+        assert os.path.exists(_p), (
+            "pristine rebuild must stay pristine under transpose (no lineage "
+            f"trigger); got: {sorted(os.listdir(_tmp))}")
 
 
 def test_normalize_built_artifacts_no_stamp_when_ledger_has_no_lineage():
@@ -26945,9 +27137,10 @@ def test_normalize_built_artifacts_no_stamp_when_ledger_has_no_lineage():
             "no lineage in ledger → should ship pristine, no rename")
 
 
-def test_normalize_built_artifacts_no_stamp_without_ledger():
-    """No remote ledger (a plain `source build`, not a refresh) → strip only,
-    NO asg stamp, even for a delta build."""
+def test_normalize_built_artifacts_patch_on_pristine_gets_p1_no_ledger():
+    """TRANSPOSE: a PATCHED build on a pristine (no-+deb) base gets +p1 with NO
+    ledger — P comes from was_patched (floored to 1 so patched bytes never ship
+    unmarked), and there is no +asg because the upstream ordinal K is 0."""
     import shutil as _sh
     if not _sh.which('dpkg-deb'):
         return
@@ -26956,7 +27149,7 @@ def test_normalize_built_artifacts_no_stamp_without_ledger():
         _p = os.path.join(_tmp, 'openssl_3.0.15-1_amd64.deb')
         _build_minimal_deb(_p, 'openssl', '3.0.15-1', 'amd64')
         _bc = _make_buildcontainer_stub(repo=_tmp)
-        # no asg_ledger attribute set → getattr returns None → no stamping
+        # no asg_ledger — irrelevant under transpose
 
         class _FakeConfig:
             build_version = '1'
@@ -26967,21 +27160,25 @@ def test_normalize_built_artifacts_no_stamp_without_ledger():
 
         _bc.config = _FakeConfig()
         _bc._normalize_built_artifacts(_Src(), [_p], was_patched=True)
-        assert os.path.exists(_p), "without a ledger the file must stay pristine"
+        assert not os.path.exists(_p), "patched build should be stamped + renamed"
+        # Anchored to u0 so it sorts below a future upstream update (+asg1u1).
+        _stamped = os.path.join(_tmp, 'openssl_3.0.15-1+asg1u0+p1_amd64.deb')
+        assert os.path.exists(_stamped), (
+            f"patch-on-pristine should ship +asg1u0+p1; "
+            f"got {sorted(os.listdir(_tmp))}")
+        import subprocess
+        _ver = subprocess.run(['dpkg-deb', '-f', _stamped, 'Version'],
+                              check=True, capture_output=True, text=True).stdout.strip()
+        assert _ver == '3.0.15-1+asg1u0+p1', _ver
 
 
-def test_normalize_built_artifacts_dep_only_strip_does_not_bump():
-    """Position-X: a strip that rewrites ONLY a dependency constraint
-    (the package's own filename/version is already pristine) is NOT a
-    delta.  The dep constraint is still normalised (the strip is
-    load-bearing — `+asg` < `+deb` lexically, so an unstripped floor would
-    make the repo uninstallable), but the binary ships pristine, no +asg
-    stamp.  This is the libclone-perl / perl-XS scenario (the former
-    "Case C"): building against a security-suffixed build-dep
-    (`perl (>= 5.36.0-7+deb12u3)`) must not mint a spurious +asg
-    generation on a byte-identical package, and must agree with
-    compute_post_build_versions / virtual_build (neither bumps here).
-    """
+def test_normalize_built_artifacts_cross_source_dep_is_transposed():
+    """TRANSPOSE: a pristine binary stays pristine (no +asg / +p), but its
+    cross-source floor onto a +deb dependency is TRANSPOSED (not stripped) so
+    it stays satisfiable by our +asg-versioned dependency.  This is the
+    libclone-perl → perl floor: `perl (>= 5.36.0-7+deb12u3)` becomes
+    `perl (>= 5.36.0-7+asg1u3)` — which our rebuilt perl (5.36.0-7+asg1u3)
+    satisfies, whereas the old strip-to-pristine discarded the ordinal."""
     import shutil as _sh
     if not _sh.which('dpkg-deb'):
         return
@@ -26992,9 +27189,6 @@ def test_normalize_built_artifacts_dep_only_strip_does_not_bump():
         _build_minimal_deb(_p, 'libclone-perl', '0.46-1', 'amd64',
                            depends='perl (>= 5.36.0-7+deb12u3)')
         _bc = _make_buildcontainer_stub(repo=_tmp)
-        # Ledger present (a refresh build) but NO lineage at this base — so
-        # under the old Case-C logic ONLY the dep-strip could have bumped.
-        _bc.asg_ledger = {'libclone-perl': ['0.46-1']}
 
         class _FakeConfig:
             build_version = '1'
@@ -27005,16 +27199,16 @@ def test_normalize_built_artifacts_dep_only_strip_does_not_bump():
 
         _bc.config = _FakeConfig()
         _final = _bc._normalize_built_artifacts(_Src(), [_p], was_patched=False)
-        # (1) No +asg rename — the pristine artifact stays put.
+        # (1) The binary itself is pristine (no trailing +deb) → no +asg / +p.
         assert os.path.exists(_p), (
-            "dep-only strip must NOT mint a +asg stamp (Position-X)")
-        assert not any('+asg' in os.path.basename(_f) for _f in _final), (
-            f"no sibling should be +asg-stamped, got {_final}")
-        # (2) The strip itself still ran — the +deb12u3 dep was normalised.
+            "pristine binary must stay pristine — no stamp")
+        assert not any(('+asg' in os.path.basename(_f)
+                        or '+p1' in os.path.basename(_f)) for _f in _final), _final
+        # (2) The cross-source floor is TRANSPOSED to +asg (not stripped).
         with DebFile(_p) as _deb:
             _ctrl = _deb.control.get_content('control').decode()
-        assert 'perl (>= 5.36.0-7)' in _ctrl, (
-            f"dep constraint must be stripped to pristine, got: {_ctrl}")
+        assert 'perl (>= 5.36.0-7+asg1u3)' in _ctrl, (
+            f"dep constraint must be transposed to +asg, got: {_ctrl}")
         assert '+deb12u3' not in _ctrl, (
             "Debian suffix must be gone from the dep constraint")
 
@@ -29106,6 +29300,10 @@ def test_build_record_schema_v3_field_set():
     container_exited phase with {peak_rss_bytes, peak_rss_mb,
     mem_limit_bytes, peak_cpu_pct, samples} from the per-build poll).
 
+    v5→v6 (transpose scheme): added `patch_bump_count` (P — our patch level
+    on the current upstream base) and `bn_bump_count` (our force-binNMU level),
+    the per-source sidecar counters the content-order version decision reads.
+
     `athena_build_version` is INFORMATIONAL provenance (which Athena-Build
     produced the record), NOT a functional schema field: no consumer gates on
     it and the migration ignores it, so it does NOT carry a schema bump — but it
@@ -29115,8 +29313,8 @@ def test_build_record_schema_v3_field_set():
         package='libwmf', intended_version='0.2.12-5.1',
         patch_set_hash='abc123', started='2026-06-02T14:00:00Z',
     )
-    assert _u.BUILD_RECORD_SCHEMA_VERSION == 5
-    assert _rec['schema_version'] == 5
+    assert _u.BUILD_RECORD_SCHEMA_VERSION == 6
+    assert _rec['schema_version'] == 6
     _required = {
         'schema_version', 'package', 'intended_version', 'built_version',
         'patch_set_hash', 'phase', 'status', 'started', 'finished',
@@ -29126,9 +29324,10 @@ def test_build_record_schema_v3_field_set():
         'lifecycle_v', 'history',   # LEDGER-01 v4 baseline
         'resources',                # OBS-03 v5
         'athena_build_version',     # toolchain provenance (informational)
+        'patch_bump_count', 'bn_bump_count',   # transpose-scheme v6 sidecar
     }
     assert set(_rec.keys()) == _required, (
-        f"v5 schema drift: {set(_rec.keys()) ^ _required}")
+        f"v6 schema drift: {set(_rec.keys()) ^ _required}")
     assert _rec['phase'] == 'entry'
     assert _rec['status'] is None
     assert _rec['republished_from'] == {}
@@ -29837,76 +30036,53 @@ def test_normalize_built_artifacts_returns_post_rename_paths():
             f"every returned file must hash non-empty: {_hashes!r}")
 
 
-def test_normalize_built_artifacts_uses_uniform_n_across_siblings():
-    """Regression: when a source's binaries have different per-file
-    ledger histories (kernel meta `linux-headers-amd64` has accumulated
-    many published versions while the ABI-pinned sibling
-    `linux-headers-6.1.0-49-amd64` is fresh because the ABI just
-    bumped), `_normalize_built_artifacts` must stamp every sibling at
-    the SAME N — the MAX of the per-file candidates.  Different N's
-    leave intra-source `Depends: <sibling> (= ver+asg<R>u<N>)` pins
-    unresolved on disk.
-    """
-    import sys
+def test_normalize_built_artifacts_uniform_p_across_siblings():
+    """TRANSPOSE: every binary of a source gets the SAME patch level P (uniform
+    P per source), and a same-source sibling `=` pin is restamped to the EXACT
+    final version — so the meta's `Depends: <abi-sibling> (= …)` stays resolved
+    on disk.  Here a PATCHED +deb kernel source (P=1): both binaries →
+    6.1.174-1+asg1u1+p1, and the meta's pin tracks it exactly."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import buildcontainer as _bc
-    import utils as _u
-    from unittest.mock import patch
-
-    # Simulate published history: meta has 4 prior asg versions, the
-    # ABI sibling is fresh.  Per-file N candidates: meta → 5, sibling → 1.
-    # Uniform N must be max(5, 1) = 5.
-    _ledger = {
-        'linux-headers-amd64': [
-            '6.1.174-1+asg1u1', '6.1.174-1+asg1u2',
-            '6.1.174-1+asg1u3', '6.1.174-1+asg1u4',
-        ],
-        'linux-headers-6.1.0-49-amd64': [],   # fresh ABI
-    }
-
+    from debian.debfile import DebFile
     with tempfile.TemporaryDirectory() as _tmp:
-        _meta = os.path.join(_tmp, 'linux-headers-amd64_6.1.174-1_amd64.deb')
+        _meta = os.path.join(
+            _tmp, 'linux-headers-amd64_6.1.174-1+deb12u1_amd64.deb')
         _abi = os.path.join(
-            _tmp, 'linux-headers-6.1.0-49-amd64_6.1.174-1_amd64.deb')
-        # Touch the files — restamp_asg_deb is patched so contents don't matter.
-        for _p in (_meta, _abi):
-            with open(_p, 'wb') as _fh:
-                _fh.write(b'!<arch>\n')
+            _tmp, 'linux-headers-6.1.0-49-amd64_6.1.174-1+deb12u1_amd64.deb')
+        _build_minimal_deb(_meta, 'linux-headers-amd64', '6.1.174-1+deb12u1',
+                           'amd64',
+                           depends='linux-headers-6.1.0-49-amd64 '
+                                   '(= 6.1.174-1+deb12u1)')
+        _build_minimal_deb(_abi, 'linux-headers-6.1.0-49-amd64',
+                           '6.1.174-1+deb12u1', 'amd64')
 
-        _calls: 'list[tuple[str, int]]' = []
-        def _fake_restamp(path, release, n):
-            _calls.append((os.path.basename(path), n))
-            _new_base = os.path.basename(path).replace(
-                '_6.1.174-1_', f'_6.1.174-1+asg{release}u{n}_')
-            _new_path = os.path.join(os.path.dirname(path), _new_base)
-            os.rename(path, _new_path)
-            return {'status': 'rewritten', 'new_path': _new_path,
-                    'strips_count': 1}
-
-        _bc_inst = _bc.BuildContainer.__new__(_bc.BuildContainer)
-        _bc_inst.asg_ledger = _ledger
+        _bc = _make_buildcontainer_stub(repo=_tmp)
 
         class _Cfg:
             build_version = '1'
-        _bc_inst.config = _Cfg()
+        _bc.config = _Cfg()
 
         class _SrcPkg:
             package = 'linux'
-            version = '6.1.174-1~deb12u1'  # delta — triggers stamp path
+            version = '6.1.174-1+deb12u1'
 
-        with patch.object(_u, 'restamp_asg_deb', side_effect=_fake_restamp):
-            _bc_inst._normalize_built_artifacts(
-                _SrcPkg(), [_meta, _abi], was_patched=False)
-
-    # Both siblings stamped at N=5 (the max).  Without the uniform-N
-    # fix, the ABI sibling would have stamped at N=1, leaving the
-    # meta's pin `(= 6.1.174-1+asg1u5)` unresolved against the
-    # binary at `6.1.174-1+asg1u1`.
-    assert len(_calls) == 2, _calls
-    _ns = {_n for _, _n in _calls}
-    assert _ns == {5}, (
-        f"expected all siblings stamped at uniform N=5, got Ns={_ns} "
-        f"(per-file N would have given {{1, 5}}); calls={_calls}")
+        _final = _bc._normalize_built_artifacts(
+            _SrcPkg(), [_meta, _abi], was_patched=True)
+        _names = sorted(os.path.basename(_f) for _f in _final)
+        # Uniform K (intrinsic u1) + uniform P (=1) across both siblings.
+        assert _names == [
+            'linux-headers-6.1.0-49-amd64_6.1.174-1+asg1u1+p1_amd64.deb',
+            'linux-headers-amd64_6.1.174-1+asg1u1+p1_amd64.deb',
+        ], _names
+        # The meta's sibling pin restamped to the EXACT final version.
+        _meta_final = [_f for _f in _final if 'linux-headers-amd64_' in _f][0]
+        with DebFile(_meta_final) as _deb:
+            _ctrl = _deb.control.get_content('control').decode()
+        assert ('linux-headers-6.1.0-49-amd64 (= 6.1.174-1+asg1u1+p1)'
+                in _ctrl), _ctrl
 
 
 def test_all_datetime_emission_is_utc():
@@ -30782,7 +30958,7 @@ def test_backfill_output_hashes_upgrades_v1_record():
         # Verify the upgraded record.
         _rec = _u.read_build_record(_log, 'libfoo')
         assert _rec is not None
-        assert _rec['schema_version'] == 5
+        assert _rec['schema_version'] == 6
         import hashlib as _hashlib
         _h1 = _hashlib.sha256(b'fake-deb-1').hexdigest()
         _h2 = _hashlib.sha256(b'fake-deb-2').hexdigest()
@@ -30828,7 +31004,7 @@ def test_backfill_output_hashes_reports_missing_files():
         assert _stats['upgraded'] == 1
         _rec = _u.read_build_record(_log, 'ghost')
         assert _rec is not None
-        assert _rec['schema_version'] == 5
+        assert _rec['schema_version'] == 6
         assert _rec['output_hashes'] == {}  # nothing on disk to hash
         assert _rec['republished_from'] == {}  # MIRROR-02 v3 default
         assert _rec['pulled_from'] is None    # MIRROR-02 v3 default
@@ -39961,7 +40137,7 @@ def main() -> int:
         test_cmd_auto_run_build_refuses_in_dist_mode,
         test_sta34_autorun_build_calls_source_build_bare_not_invalid_token,
         test_sta36_mirror_add_confirmation_declines_on_no,
-        test_sta35_standalone_tunnel_loads_published_ledger,
+        test_tunnel_transposes_and_needs_no_ledger,
         test_sta33_build_depends_serialises_apt_pkg_profile_global,
         test_parse_source_build_args_recognises_indl_subset,
         test_cmd_source_build_indl_subset_rejected_in_dist_mode,
@@ -40197,6 +40373,17 @@ def main() -> int:
         test_strip_build_version_leaves_embedded_binNMU_alone,
         test_strip_build_version_handles_udeb_extension,
         test_strip_build_version_no_change_when_no_binNMU,
+        test_transpose_trailing_plus_deb,
+        test_transpose_trailing_tilde_deb_keeps_sign,
+        test_transpose_embedded_deb_is_left_alone,
+        test_transpose_no_token_unchanged,
+        test_transpose_floor_tail_tilde_preserved,
+        test_strip_binNMU_splits_trailing_marker,
+        test_transposed_version_appends_p_and_b,
+        test_compute_transposed_versions_per_binary_base_uniform_p,
+        test_transpose_control_text_version_deps_and_provenance,
+        test_transpose_control_text_no_token_is_noop_no_provenance,
+        test_transpose_scheme_boundary_table_and_ordering,
         test_strip_build_version_rejects_malformed_filename,
         test_parse_deb_filename_splits_raw_components,
         test_parse_deb_filename_returns_none_on_mismatch,
@@ -40215,6 +40402,7 @@ def main() -> int:
         test_strip_nmu_pair_rewrite_scoped_to_depends_pre_depends,
         test_strip_nmu_from_deb_round_trip,
         test_strip_nmu_from_deb_idempotent,
+        test_transpose_deb_round_trip,
         test_audit_nmu_residue_skips_tunneled_sources,
         test_cmd_audit_nmu_residue_absorbed_into_cmd_audit,
         test_cmd_strip_repo_registered_in_repo_dispatcher,
@@ -40654,7 +40842,7 @@ def main() -> int:
         test_restamp_asg_deb_bumps_version_and_intra_source_deps,
         test_validate_canonical_attribution_tunnel_and_build_config,
         # SELECT-LOCK asg determinism (seeded reconstruction)
-        test_validate_asg_seeded_reconstruction_matches_after_publish_advance,
+        test_validate_transpose_prediction_matches_built_asg,
         test_reconstruct_historical_ledger_seeds_prior_generation_from_recorded_n,
         # SELECT-LOCK Chunk 1 — signed selection lockfile
         test_selection_lock_roundtrip_signs_and_verifies,
@@ -40841,8 +41029,8 @@ def main() -> int:
         test_virtual_build_sibling_pin_with_nmu_constraint_pristine_matches,
         test_virtual_build_synthesize_source_binaries_end_to_end,
         test_virtual_build_metapackage_uses_binary_upstream_version,
-        test_virtual_build_metapackage_stamps_when_lineage_present,
-        test_virtual_build_strips_nmu_from_inherited_depends_constraint,
+        test_virtual_build_metapackage_per_binary_transpose,
+        test_virtual_build_transposes_inherited_depends_constraint,
         test_virtual_build_skips_binaries_from_other_canonical_source,
         test_virtual_build_ambiguous_dedup_emits_warning_and_tracks_name,
         test_virtual_build_unambiguous_dedup_no_ambiguity_warning,
@@ -40877,8 +41065,8 @@ def main() -> int:
         test_virtual_build_build_profile_filter_skips_nodoc_when_active,
         test_virtual_build_build_profile_filter_positive_profile_required,
         test_virtual_build_delta_uses_source_version_not_per_binary,
-        test_virtual_build_override_source_version_uses_at_build_pristine,
-        test_virtual_build_synthesize_lineage_matches_epoch_stripped_ledger,
+        test_virtual_build_per_binary_version_is_intrinsic,
+        test_virtual_build_transpose_preserves_epoch,
         test_virtual_build_reconstruct_historical_ledger_pristine_build,
         test_virtual_build_reconstruct_historical_ledger_stamped_build,
         test_virtual_build_reconstruct_historical_ledger_epoch_aware,
@@ -40888,11 +41076,11 @@ def main() -> int:
         test_check_build_locates_non_main_component_deb,
         test_tunnel_filenames_for_source_uses_upstream_not_stripped,
         test_tunnel_filenames_falls_back_when_binary_not_in_cache,
-        test_normalize_built_artifacts_stamps_delta_when_ledger_present,
-        test_normalize_built_artifacts_stamps_lineage_continuation_when_ledger_has_prior_asg,
+        test_normalize_built_artifacts_transposes_deb_to_asg_no_ledger,
+        test_normalize_built_artifacts_transpose_has_no_lineage_trigger,
         test_normalize_built_artifacts_no_stamp_when_ledger_has_no_lineage,
-        test_normalize_built_artifacts_no_stamp_without_ledger,
-        test_normalize_built_artifacts_dep_only_strip_does_not_bump,
+        test_normalize_built_artifacts_patch_on_pristine_gets_p1_no_ledger,
+        test_normalize_built_artifacts_cross_source_dep_is_transposed,
         test_postbuild_convergence_hard_fails_when_check_build_still_false,
         # UPD-01 step 4: remote ledger + version-aware local cleanup
         test_parse_packages_to_ledger_multiversion_epoch_stripped,
@@ -40989,7 +41177,7 @@ def main() -> int:
         test_source_state_tunneled_record_with_missing_binaries_routes_to_stale_pass,
         test_source_state_tunneled_record_with_pristine_binary_returns_tunneled,
         test_normalize_built_artifacts_returns_post_rename_paths,
-        test_normalize_built_artifacts_uses_uniform_n_across_siblings,
+        test_normalize_built_artifacts_uniform_p_across_siblings,
         test_cmd_get_lists_every_gettable_param_when_called_bare,
         test_cmd_get_named_param_returns_current_value,
         test_cmd_set_mode_switches_value_and_warns_to_re_run_cache_parse,

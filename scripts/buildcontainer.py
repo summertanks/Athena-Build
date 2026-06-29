@@ -626,6 +626,14 @@ class BuildContainer:
                 if _prior and _prior.get('phase') in ('done', 'failed'):
                     utils.archive_build_record(self.buildlog_path, _prior)
                 initial = utils.preserve_lifecycle(_prior, initial)
+                # TRANSPOSE scheme: decide P (our patch level on this source
+                # version) against the prior record — reset on a version change,
+                # ++ when our patch_set changed, reuse otherwise.  bn_bump_count
+                # stays 0 on a normal build (the force-build path sets it).
+                initial['patch_bump_count'] = utils.decide_patch_bump_count(
+                    _prior, str(initial.get('intended_version', '')),
+                    str(initial.get('patch_set_hash', '')))
+                initial['bn_bump_count'] = 0
                 utils.write_build_record(self.buildlog_path, initial)
             else:
                 utils.update_build_record(self.buildlog_path, package, **fields)
@@ -1866,144 +1874,63 @@ class BuildContainer:
         """
         if not built_files:
             return []
-        # --- 1. strip NMU → pristine (post-strip paths) ---
-        # The strip ALWAYS runs and is load-bearing: a cross-source `>=`
-        # floor that dpkg-shlibdeps captured against the build container's
-        # security-suffixed lib (e.g. `perl (>= 5.36.0-7+deb12u3)`) must be
-        # peeled to its pristine base, else our `+asg`-stamped dep targets
-        # sort BELOW the `+deb` floor (`+asg` < `+deb` lexically) and the
-        # whole repo becomes uninstallable.  But a strip that ONLY rewrites a
-        # dependency constraint (filename unchanged) is NOT a delta of THIS
-        # package — its bytes are identical to pristine upstream.  Per
-        # Position-X (docs/bump-mechanics.md) we strip but do NOT bump on
-        # dep-constraint-only strips.  (Under self-hosting the build container
-        # carries our own pristine/+asg deps, so these strips become no-ops
-        # and the case vanishes entirely.)
-        _current_paths: 'list[str]' = []
-        for _path in built_files:
-            _f = os.path.basename(_path)
-            try:
-                _r = utils.strip_nmu_from_deb(_path)
-                if _r['status'] == 'rewritten' and _r['new_path'] != _path:
-                    logger.info(
-                        f"strip_nmu: {_f} → "
-                        f"{os.path.basename(_r['new_path'])}")
-                    if events is not None:
-                        events.append((
-                            'strip', _f,
-                            os.path.basename(_r['new_path'])))
-                _current_paths.append(_r.get('new_path', _path))
-            except Exception as e:
-                logger.warning(f"strip_nmu: {_f} failed: {e}")
-                _current_paths.append(_path)
-
-        # --- 2. decide delta; stamp +asg<R>u<N> if delta AND ledger present ---
-        # Delta triggers (Position-X): A=patched, B=source version carried a
-        # strippable Debian suffix, D=lineage (below).  A dep-constraint-only
-        # strip (the former "Case C") is deliberately NOT a trigger: it bumped
-        # the perl-XS / C-lib consumers of security-updated build-deps with no
-        # content change, churned on every snapshot advance, and self-hosting
-        # removes it regardless.  This now matches
-        # utils.compute_post_build_versions and
-        # virtual_build.synthesize_source_binaries (neither ever had Case C).
-        _ledger = getattr(self, 'asg_ledger', None)
-        _src_is_delta = (
-            utils.strip_nmu_suffix(str(src_pkg.version)) != str(src_pkg.version))
-        _was_delta = was_patched or _src_is_delta
-        # Lineage-continuation trigger: even when nothing in THIS build looks
-        # delta-shaped, if the manifest already has a `+asg<R>u<N>` entry for
-        # any output at the same pristine base, we MUST continue stamping —
-        # else a sibling-source's meta that previously captured `+asg<R>u<N>`
-        # would dangle against our newly-pristine sibling.  Caught 2026-06-05
-        # when a snapshot-advance rebuild of `linux` (no NMU, no patches
-        # applied) silently shipped pristine 6.1.174-1 while the
-        # linux-signed-amd64 metas still pinned `(= 6.1.174-1+asg1u1)`.
-        if not _was_delta and _ledger is not None:
-            for _path in _current_paths:
-                _df = utils.parse_deb_filename(os.path.basename(_path))
-                if _df is None:
-                    continue
-                _pkg, _ver, _arch, _ext = _df
-                _base = utils.pristine_base(_ver)
-                for _prev in _ledger.get(_pkg, []):
-                    if (utils.pristine_base(_prev) == _base
-                            and utils.parse_asg_suffix(_prev) is not None):
-                        _was_delta = True
-                        break
-                if _was_delta:
-                    break
-        if not (_was_delta and _ledger is not None):
-            return list(_current_paths)
-
+        # TRANSPOSE scheme (content-order).  Each binary's version is
+        # transposed in place — a TRAILING +debNuK token becomes +asg<R>uK
+        # (K intrinsic to the upstream version, so no ledger and no ship-order
+        # counter), then our patch level P (+pP) and any force-binNMU (+bN) are
+        # appended.  A faithful pristine rebuild has no trailing +deb, so
+        # transpose is a no-op and it stays pristine — no separate delta/lineage
+        # decision is needed (the old ship-order lineage-regression class can't
+        # arise because +deb→+asg is deterministic from the upstream version,
+        # not from ship history).  Dep constraints transpose the same way and
+        # same-source sibling pins are restamped to the exact final version, all
+        # inside transpose_deb.  See docs/bump-mechanics.md.
         try:
             _release = int(str(self.config.build_version).strip('"').strip("'"))
         except (TypeError, ValueError):
             logger.warning(
-                f"asg-stamp: [Build] VERSION is not an integer "
-                f"({self.config.build_version!r}) — skipping stamp for "
+                "transpose: [Build] VERSION is not an integer "
+                f"({self.config.build_version!r}) — shipping pristine for "
                 f"{src_pkg.package}")
-            return list(_current_paths)
+            return list(built_files)
 
-        # Uniform per-source N: take the MAX of every sibling binary's
-        # individual asg_next_n candidate, then stamp ALL binaries from
-        # this source at that single N.  Reason: a kernel meta-package
-        # (linux-headers-amd64) has a stable name across kernel ABIs
-        # and accumulates a long published history → asg_next_n
-        # returns a high N.  Its ABI-pinned sibling
-        # (linux-headers-6.1.0-49-amd64) is a fresh name when the ABI
-        # bumps → asg_next_n returns 1.  Different N's would leave the
-        # meta's sibling-pin `Depends: linux-headers-6.1.0-49-amd64
-        # (= 6.1.174-1+asg1u<HIGH>)` unresolved on disk against the
-        # binary at +asg1u1.  `restamp_asg_deb` only rewrites pins
-        # matching the BINARY'S OWN version, so the only way to keep
-        # intra-source pins resolvable is to land every sibling at
-        # the same N.  Tradeoff: a binary whose history is shorter
-        # than its siblings skips some N's — fine, N is monotonic and
-        # the audit cares about the pin chain, not the per-file
-        # history density.
-        _per_file_n: 'list[int]' = []
-        _stampable_idx: 'list[int]' = []   # indices into _current_paths
-        for _i, _path in enumerate(_current_paths):
-            _df = utils.parse_deb_filename(os.path.basename(_path))
-            if _df is None:
-                continue
-            _pkg, _ver, _arch, _ext = _df
-            _base = utils.pristine_base(_ver)
-            _per_file_n.append(utils.asg_next_n(
-                _ledger.get(_pkg, []), _base, _release))
-            _stampable_idx.append(_i)
-        if not _stampable_idx:
-            return list(_current_paths)
-        _n = max(_per_file_n)
-        _n_stamped = 0
-        for _i in _stampable_idx:
-            _path = _current_paths[_i]
-            _b = os.path.basename(_path)
+        # P (patch level) and force-binNMU level come from this source's build
+        # record (stamped by _record_phase via decide_patch_bump_count).
+        _buildlog = getattr(self, 'buildlog_path', None)
+        _record = (utils.read_build_record(_buildlog, src_pkg.package)
+                   if _buildlog else None)
+        try:
+            _patch_level = int((_record or {}).get('patch_bump_count', 0) or 0)
+        except (TypeError, ValueError):
+            _patch_level = 0
+        try:
+            _bn_count = int((_record or {}).get('bn_bump_count', 0) or 0)
+        except (TypeError, ValueError):
+            _bn_count = 0
+        _force_bn = _bn_count if _bn_count > 0 else None
+        # was_patched is the live signal; if the record's counter is missing but
+        # we DID patch, floor P at 1 so patched bytes never ship unmarked.
+        if was_patched and _patch_level == 0:
+            _patch_level = 1
+
+        _current_paths: 'list[str]' = []
+        for _path in built_files:
+            _f = os.path.basename(_path)
             try:
-                _r = utils.restamp_asg_deb(_path, _release, _n)
+                _r = utils.transpose_deb(
+                    _path, 'asg', _release,
+                    patch_level=_patch_level, force_bn=_force_bn)
                 _new = _r.get('new_path', _path)
-                if _r['status'] == 'rewritten':
-                    _n_stamped += 1
+                if _r['status'] == 'rewritten' and _new != _path:
                     logger.info(
-                        f"asg-stamp: {_b} → "
-                        f"{os.path.basename(_new)} (+asg{_release}u{_n})")
+                        f"transpose: {_f} → {os.path.basename(_new)}")
                     if events is not None:
-                        events.append((
-                            'stamp', _b, os.path.basename(_new),
-                            f"+asg{_release}u{_n}"))
-                # Update tracked path so the caller can find the
-                # actual on-disk file post-normalize (essential for
-                # output_hashes — get_sha256 on the stale pre-stamp
-                # path returns empty, leaving the build record's
-                # output_hashes dict empty and the publish layer with
-                # nothing to claim).
-                _current_paths[_i] = _new
+                        events.append(('stamp', _f, os.path.basename(_new),
+                                       str(_r.get('version', ''))))
+                _current_paths.append(_new)
             except Exception as e:
-                logger.warning(f"asg-stamp: {_b} failed: {e}")
-        if _n_stamped:
-            logger.info(
-                f"asg-stamp: marked {_n_stamped} artifact(s) from source "
-                f"{src_pkg.package} (+asg{_release}u{_n}, uniform N)")
+                logger.warning(f"transpose: {_f} failed: {e}")
+                _current_paths.append(_path)
         return list(_current_paths)
 
     def _segregate_built_artifacts(self, src_pkg,

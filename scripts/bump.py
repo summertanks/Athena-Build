@@ -1,36 +1,41 @@
 """Version-suffix logic — the single, manually-reviewable home for every
 rule that decides what version string an artifact carries.
 
-Two concerns live here, and nothing else should touch their internals:
+The scheme is CONTENT-ORDER: we rebuild from source and keep the upstream
+version almost unchanged, translating only a TRAILING stable-update marker
+(`+debNuK` / `~debNuK`) into our own (`+asg<R>uK` / `~asg<R>uK`).  The update
+number K is intrinsic to the upstream version, so a faithful rebuild needs no
+ledger and older content always sorts lower (true downgrades).
 
-  * **NMU strip** — remove Debian's build-environment suffixes
-    (`+bN` binNMU, `+debNuN`/`~debNuN` point-release, `~bpoN+N` backport,
-    `+rpiN`/`+rptN`) so every artifact lands on its pristine source
-    version.  `_NMU_SUFFIX_RE` is the one matcher; `strip_nmu_suffix`
-    (version string), `strip_nmu_from_control_text` (DEBIAN/control) and
-    `strip_nmu_from_deb` (a built .deb, in place) are the three apply
-    points.
+Key entry points:
 
-  * **+asg<R>u<N> stamp** — Athena's own update marker (the parallel to
-    Debian's `debNuN`), applied ONLY when a build is a genuine delta or
-    continues an existing asg lineage.  `compute_post_build_versions` is
-    the pure predictor that `BuildContainer._normalize_built_artifacts`
-    mirrors at build time; `asg_next_n` / `highest_asg_update` derive the
-    per-source uniform N from the published ledger; `restamp_asg_deb`
-    applies a chosen (R, N) to a built .deb.
+  * `transpose` — rewrite a trailing update marker in place (the core move).
+    `transpose_control_text` / `transpose_deb` apply it to a DEBIAN/control text
+    and to a built .deb (filename + control + dependency constraints + sibling
+    pins) in a single repack.
+  * `transposed_version` / `compute_transposed_versions` — the pure predictors
+    that mirror the build path without running it.
+  * `decide_patch_bump_count` — our patch level P on the current base.
+    `_append_patch_force` anchors `+pP` / `+bN` inside the update namespace so
+    they sort below the next upstream update.
 
-`utils` re-exports every public name here, so existing `utils.<name>`
-call sites keep working unchanged; new code may import from `bump`
-directly.  This module has NO dependency on `utils` (one-way:
-utils -> bump), which is what keeps the import graph acyclic.
+`utils` re-exports every public name here, so existing `utils.<name>` call
+sites keep working unchanged; new code may import from `bump` directly.  This
+module has NO dependency on `utils` (one-way: utils -> bump), which keeps the
+import graph acyclic.
 
-See docs/bump-mechanics.md for the bump-decision rationale and the
-four triggers (delta / lineage; dep-constraint-only strips do NOT bump).
+See docs/bump-mechanics.md for the full rationale and the exact rules.
 """
 
+import hashlib
 import os
 import re
 from typing import Dict, List, Optional
+
+# sha256 of the empty byte string — the patch_set_hash an UNPATCHED source
+# carries (utils.patch_set_hash([]) hashes "").  A record whose patch_set_hash
+# differs from this carries real Athena patches.
+EMPTY_PATCH_SET_HASH = hashlib.sha256(b'').hexdigest()
 
 
 def parse_deb_filename(filename: str) -> 'Optional[tuple]':
@@ -186,6 +191,36 @@ def strip_nmu_suffix(version: str) -> str:
     return _NMU_SUFFIX_RE.sub('', version)
 
 
+# Trailing binary-only rebuild marker: +bN (modern binNMU) or ~bpoN+M
+# (backport).  NARROWER than _NMU_SUFFIX_RE — it deliberately does NOT touch
+# +debNuN/~debNuN (redistribution ordinals, which the TRANSPOSE scheme rewrites
+# rather than strips) nor +nmuN / dotted Debian revisions / +really (real
+# source identity).  Used by the Pass-1 rebuild decision to compare a source
+# version independent of a buildd's binary-only rebuild.
+_BINNMU_SUFFIX_RE = re.compile(r'(?:\+b\d+|~bpo\d+\+\d+)$')
+
+
+def strip_binNMU(version: str) -> 'tuple[str, str]':
+    """Split a trailing binary-only rebuild marker off a version string.
+
+    Returns ``(base, marker)`` where *marker* is the trailing ``+bN`` /
+    ``~bpoN+M`` (``''`` when absent) and *base* is the version with that marker
+    removed.  Unlike :func:`strip_nmu_suffix` this does NOT touch
+    ``+debNuN``/``~debNuN`` (transposed, not stripped) nor ``+nmuN`` / a dotted
+    Debian revision / ``+really`` (real source identity — kept verbatim).
+
+        strip_binNMU('1.0-2+b1')          → ('1.0-2', '+b1')
+        strip_binNMU('1.0-2~bpo12+1')     → ('1.0-2', '~bpo12+1')
+        strip_binNMU('1.0-2+deb12u3+b1')  → ('1.0-2+deb12u3', '+b1')
+        strip_binNMU('1.0-2+deb12u3')     → ('1.0-2+deb12u3', '')
+        strip_binNMU('2.10.4+nmu1')       → ('2.10.4+nmu1', '')
+    """
+    _m = _BINNMU_SUFFIX_RE.search(version)
+    if not _m:
+        return version, ''
+    return version[:_m.start()], _m.group(0)
+
+
 # ---------------------------------------------------------------------------
 # Athena update-version suffix:  +asg<R>u<N>
 #
@@ -230,6 +265,44 @@ def apply_asg_suffix(base: str, release: int, n: int) -> str:
     """Stamp a pristine base version with our update marker → base+asg<R>u<N>.
     Epoch (if any) is preserved — the suffix only appends to the end."""
     return f'{base}+asg{release}u{n}'
+
+
+# ---------------------------------------------------------------------------
+# TRANSPOSE — the content-order scheme.  Rather than strip a +debNuN to
+# pristine and re-stamp a ship-order +asg<R>u<N>, we rewrite ONLY the TRAILING
+# redistribution token (+debNuK / ~debNuK) to our own +asg<R>uK / ~asg<R>uK,
+# in place.  K (the upstream point-release ordinal) is intrinsic — it rides in
+# the upstream version, so a faithful rebuild needs no ledger and older content
+# always sorts lower (true downgrades).  Everything before the trailing token —
+# epoch, an EMBEDDED +deb (shim's `1.44~1+deb12u1+15.8-1...`), +dfsg/+ds/+git,
+# a sourceful +nmuN, a dotted Debian revision — is preserved verbatim.  The
+# leading +/~ sign is kept (a ~deb stays ~asg, sorting BELOW pristine, by
+# design).  See docs/bump-mechanics.md.
+# ---------------------------------------------------------------------------
+# Trailing redistribution token.  `tail` captures an optional `~` that
+# constraint floors append after the ordinal (e.g. `>= 0.8.0-2+deb12u1~`); it
+# is carried through so a transposed floor keeps sorting the same way.
+_TRANSPOSE_RE = re.compile(r'(?P<sign>[+~])deb\d+u(?P<k>\d+)(?P<tail>~?)$')
+
+
+def transpose(version: str, prefix: str, release: int) -> str:
+    """Rewrite a TRAILING +debNuK / ~debNuK token to +<prefix><R>uK /
+    ~<prefix><R>uK, in place.  Returns *version* unchanged when it carries no
+    trailing redistribution token.
+
+        transpose('2.36-9+deb12u14', 'asg', 1)  → '2.36-9+asg1u14'
+        transpose('2.4.67-1~deb12u2', 'asg', 1) → '2.4.67-1~asg1u2'   (~ kept)
+        transpose('7:5.1.9-0+deb12u1', 'asg', 1)→ '7:5.1.9-0+asg1u1'  (epoch kept)
+        transpose('1.44~1+deb12u1+15.8-1~deb12u1', 'asg', 1)
+                                 → '1.44~1+deb12u1+15.8-1~asg1u1' (embedded kept)
+        transpose('2.10.4+nmu1', 'asg', 1)       → '2.10.4+nmu1'   (no trailing deb)
+        transpose('2.10.4+nmu1+b1', 'asg', 1)    → '2.10.4+nmu1+b1'(trailing +b1)
+        transpose('0.8.0-2+deb12u1~', 'asg', 1)  → '0.8.0-2+asg1u1~' (floor tail)
+    """
+    return _TRANSPOSE_RE.sub(
+        lambda m: f"{m.group('sign')}{prefix}{release}u{m.group('k')}{m.group('tail')}",
+        version,
+    )
 
 
 def asg_filename(filename: str, release: int, n: int) -> str:
@@ -845,3 +918,270 @@ def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
     _result.update({'status': 'rewritten', 'new_path': _new_path,
                     'version': _new_ctrl_ver})
     return _result
+
+
+# ===========================================================================
+# TRANSPOSE scheme — the content-order replacement for the strip→restamp
+# two-step above.  Instead of stripping a +debNuK to pristine and re-stamping a
+# ship-order +asg<R>u<N>, a built binary's version is TRANSPOSED in place
+# (trailing +debNuK → +asg<R>uK, K intrinsic), then our patch level P (+pP) and
+# any force-binNMU (+bN) are appended.  Dep constraints are transposed the same
+# way (so a cross-source floor stays satisfiable), and same-source sibling pins
+# are restamped to the exact final version (the algo appends +bN to siblings
+# but a patched source needs the exact +pP too — _restamp_control_text already
+# does the exact rewrite, which is the correct, complete form).
+# See docs/bump-mechanics.md.
+# ===========================================================================
+def transposed_version(upstream_version: str, prefix: str, release: int,
+                       patch_level: int = 0,
+                       force_bn: 'Optional[int]' = None) -> str:
+    """Pure predictor: the Version a binary at *upstream_version* carries under
+    the transpose scheme.  ``V = transpose(upstream) [+ +p<P>] [+ +b<bN>]``.
+
+        transposed_version('2.36-9+deb12u14', 'asg', 1)       → '2.36-9+asg1u14'
+        transposed_version('5.36.0-7+deb12u3', 'asg', 1, 1)   → '5.36.0-7+asg1u3+p1'
+        transposed_version('5.2.15-2', 'asg', 1, 1)           → '5.2.15-2+p1'
+        transposed_version('1.0-2', 'asg', 1, force_bn=1)     → '1.0-2+b1'
+    """
+    return _append_patch_force(
+        transpose(upstream_version, prefix, release),
+        patch_level, force_bn, prefix, release)
+
+
+def compute_transposed_versions(
+    binary_versions: 'Dict[str, str]', prefix: str, release: int,
+    patch_level: int = 0, force_bn: 'Optional[int]' = None,
+) -> 'Dict[str, str]':
+    """Pure version math mirroring the build path: transpose each binary's OWN
+    upstream version (so a binary whose base differs from its source — e2fsprogs
+    comerr-dev, lvm2 libdevmapper, samba ldb — is handled correctly), applying
+    the SAME per-source ``patch_level`` / ``force_bn`` to every binary (uniform
+    P/bN per source keeps sibling pins consistent).  Needs no ledger: K is
+    intrinsic to each upstream version.
+
+    `binary_versions` shape: ``{binary_name: upstream_version_str}``.
+    Returns ``{binary_name: predicted_version_str}``.
+    """
+    return {
+        _name: transposed_version(_up, prefix, release, patch_level, force_bn)
+        for _name, _up in binary_versions.items()
+    }
+
+
+def transpose_control_text(content: str, prefix: str,
+                           release: int) -> 'tuple[str, int]':
+    """Return (new_text, change_count) — TRANSPOSE the Version field and every
+    version constraint in dep-related fields of a DEBIAN/control text (trailing
+    +debNuK → +<prefix><R>uK only).  The Version's pre-transpose upstream value
+    is recorded in ``X-Athena-Upstream-Version`` (CVE-tracking provenance) when
+    it changed.  The same-upstream-sibling ``>>/<<`` idiom is collapsed to
+    ``(= <transposed Version>)``.
+
+    The +pP / +bN patch/force suffix is NOT applied here — that is the deb-level
+    step (:func:`transpose_deb`), which restamps the collapsed sibling pins to
+    the exact final version.  Idempotent on already-transposed text.
+    """
+    _total = 0
+    _content = content
+
+    _orig_match = re.search(r'^Version: (\S+)\s*$', _content, re.MULTILINE)
+    _orig_version = _orig_match.group(1) if _orig_match else ''
+    _transposed_version = (
+        transpose(_orig_version, prefix, release) if _orig_version else ''
+    )
+    _version_changed = (
+        bool(_transposed_version) and _transposed_version != _orig_version
+    )
+
+    def _sub_version(_m: 're.Match') -> str:
+        nonlocal _total
+        _old = _m.group(1)
+        _new = transpose(_old, prefix, release)
+        if _new != _old:
+            _total += 1
+        return f'Version: {_new}'
+
+    _content = re.sub(
+        r'^Version: (\S+)\s*$',
+        _sub_version, _content, count=1, flags=re.MULTILINE,
+    )
+
+    if _version_changed and 'X-Athena-Upstream-Version:' not in _content:
+        _content = re.sub(
+            r'^(Version: \S+)\s*$',
+            lambda _m: (
+                f'{_m.group(1)}\n'
+                f'X-Athena-Upstream-Version: {_orig_version}'
+            ),
+            _content, count=1, flags=re.MULTILINE,
+        )
+
+    _constraint_re = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
+
+    def _sub_constraint(_m: 're.Match') -> str:
+        nonlocal _total
+        _op, _ver = _m.group(1), _m.group(2)
+        _new_ver = transpose(_ver, prefix, release)
+        if _new_ver != _ver:
+            _total += 1
+        return f'({_op} {_new_ver})'
+
+    _new_lines: 'list[str]' = []
+    _in_target = False
+    for _line in _content.splitlines(keepends=True):
+        if _line and _line[0] not in (' ', '\t'):
+            _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
+            _in_target = _m is not None and _m.group(1) in _NMU_STRIP_FIELDS
+        if _in_target:
+            _new_lines.append(_constraint_re.sub(_sub_constraint, _line))
+        else:
+            _new_lines.append(_line)
+    _content = ''.join(_new_lines)
+
+    _our_version = _extract_version(_content)
+    if _our_version:
+        _content, _pairs = _rewrite_sibling_idiom_in_text(_content, _our_version)
+        _total += _pairs
+
+    return _content, _total
+
+
+def transpose_deb(deb_path: str, prefix: str, release: int,
+                  patch_level: int = 0,
+                  force_bn: 'Optional[int]' = None) -> dict:
+    """Transpose + stamp a built .deb/.udeb in place — the single-cycle
+    replacement for ``strip_nmu_from_deb`` + ``restamp_asg_deb`` on the build
+    and tunnel paths.  Updates filename, DEBIAN/control Version, dep
+    constraints, X-Athena-Upstream-Version, and same-source sibling pins.
+
+    Returns ``{'status': 'rewritten'|'unchanged'|'malformed'|'skipped',
+                'new_path': str, 'version': Optional[str]}``.
+
+    A binary whose only trailing token is a binNMU (a tunnelled ``X+deb…+b1``)
+    transposes to a no-op on the embedded +deb and KEEPS the +bN — by design
+    (its frozen sibling pins reference that +bN).  Idempotent.
+    """
+    import subprocess
+    import tempfile
+    from debian.debfile import DebFile
+
+    _result = {'status': 'unchanged', 'new_path': deb_path, 'version': None}
+    _base = os.path.basename(deb_path)
+    if not _base.endswith(('.deb', '.udeb')):
+        _result['status'] = 'skipped'
+        return _result
+    _r = parse_deb_filename(_base)
+    if _r is None:
+        _result['status'] = 'malformed'
+        return _result
+    _pkg, _old_file_ver, _arch, _ext = _r
+
+    try:
+        with DebFile(deb_path) as _deb:
+            _ctrl_bytes = _deb.control.get_content('control')
+    except Exception:
+        _result['status'] = 'malformed'
+        return _result
+    if _ctrl_bytes is None:
+        _result['status'] = 'malformed'
+        return _result
+    _ctrl_text = _ctrl_bytes.decode('utf-8', errors='replace')
+
+    # Step 1: transpose Version + constraints to the K-version (no P/bN yet).
+    _k_text, _changes = transpose_control_text(_ctrl_text, prefix, release)
+    _k_ver = _extract_version(_k_text)
+    if not _k_ver:
+        _result['status'] = 'malformed'
+        return _result
+    # Step 2: append +pP / +bN and restamp sibling pins to the exact final.
+    _final_ver = _append_patch_force(_k_ver, patch_level, force_bn,
+                                     prefix, release)
+    if _final_ver != _k_ver:
+        _new_text = _restamp_control_text(_k_text, _k_ver, _final_ver)
+    else:
+        _new_text = _k_text
+
+    _new_file_ver = _append_patch_force(
+        transpose(_old_file_ver, prefix, release), patch_level, force_bn,
+        prefix, release)
+    _filename_changed = _new_file_ver != _old_file_ver
+
+    if not _filename_changed and _changes == 0 and _final_ver == _k_ver:
+        return _result      # 'unchanged'
+
+    _new_base = (f'{_pkg}_{_new_file_ver}_{_arch}{_ext}'
+                 if _filename_changed else _base)
+    _new_path = os.path.join(os.path.dirname(deb_path), _new_base)
+
+    with tempfile.TemporaryDirectory(prefix='transpose-') as _work:
+        subprocess.run(['dpkg-deb', '-R', deb_path, _work],
+                       check=True, capture_output=True)
+        _sde = _content_date_epoch(_work)   # before the control rewrite
+        _ctrl_disk = os.path.join(_work, 'DEBIAN', 'control')
+        with open(_ctrl_disk, 'w') as _fh:
+            _fh.write(_new_text)
+        _repack_deb(_work, _new_path, _sde)
+
+    if _new_path != deb_path:
+        os.remove(deb_path)
+    _result.update({'status': 'rewritten', 'new_path': _new_path,
+                    'version': _final_ver})
+    return _result
+
+
+def decide_patch_bump_count(prior: 'Optional[dict]', intended_version: str,
+                            patch_set_hash: str) -> int:
+    """Compute P — our patch level on the current source version — per the
+    transpose Pass-1 rules, comparing this build against the prior build record.
+
+      * patched := patch_set_hash is non-empty real patches
+      * no prior, OR the source version changed → P = 1 if patched else 0
+        (a new base re-baselines; our patch on it is patch #1)
+      * same version, patch_set changed → P = prior.P + 1 if patched else 0
+        (we edited our patch; removing it entirely drops to 0 — faithful)
+      * same version, same patch → P = prior.P  (idempotent rebuild reuses)
+
+    Mirrors the version-decision rules in docs/bump-mechanics.md; computed at build time where the
+    prior record is still on hand, so no separate cache-parse pass is needed.
+    """
+    _patched = bool(patch_set_hash) and patch_set_hash != EMPTY_PATCH_SET_HASH
+    if not prior:
+        return 1 if _patched else 0
+    _prev_ver = prior.get('intended_version')
+    _prev_hash = prior.get('patch_set_hash')
+    try:
+        _prev_p = int(prior.get('patch_bump_count', 0) or 0)
+    except (TypeError, ValueError):
+        _prev_p = 0
+    if _prev_ver != intended_version:
+        return 1 if _patched else 0
+    if _prev_hash != patch_set_hash:
+        return (_prev_p + 1) if _patched else 0
+    return _prev_p
+
+
+def _append_patch_force(version: str, patch_level: int,
+                        force_bn: 'Optional[int]',
+                        prefix: str, release: int) -> str:
+    """Append our patch (+pP) and/or force-binNMU (+bN) suffix to an
+    already-transposed version.  Order: +p then +b.
+
+    Both `p` and `b` sort ABOVE `<prefix>` (`a`...) in Debian version ordering,
+    so a +pP / +bN attached DIRECTLY to a pristine base would outrank every
+    upstream-update marker (+<prefix><R>uK) and never be superseded.  To keep
+    our changes sorting BELOW the next upstream update, anchor them inside the
+    update namespace: when the version has no trailing +<prefix><R>uK marker
+    (the base is pristine, no upstream update), synthesize ``u0`` first.
+
+        1.2.3-4            +p1  → 1.2.3-4+asg1u0+p1   (< 1.2.3-4+asg1u1)
+        1.2.3-4+asg1u3     +p1  → 1.2.3-4+asg1u3+p1   (anchor already present)
+        2.4.67-1~asg1u2    +p1  → 2.4.67-1~asg1u2+p1  (~ form counts as anchor)
+    """
+    if patch_level > 0 or force_bn is not None:
+        if not re.search(rf'[+~]{re.escape(prefix)}{release}u\d+$', version):
+            version = f'{version}+{prefix}{release}u0'
+    if patch_level > 0:
+        version = f'{version}+p{patch_level}'
+    if force_bn is not None:
+        version = f'{version}+b{force_bn}'
+    return version

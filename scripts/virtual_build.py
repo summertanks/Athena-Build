@@ -44,18 +44,17 @@ logger = logging.getLogger('athena')
 # ─────────────────────────── Synthesizer primitives ──────────────────
 
 
-def _strip_nmu_from_relation(raw: str) -> str:
-    """Strip NMU layers from EVERY constraint version in a Depends-like
-    relation string.  Mirrors what real-build's
-    :func:`utils.strip_nmu_from_control_text` does post-build to the
-    binary's on-disk control file.  Without this, virtual build's
-    inherited-from-upstream Depends still pin to upstream NMU
-    versions (``grub-common (>= 2.06-13+deb12u2)``) while our own
-    synthesized binaries strip+stamp to ``2.06-13+asg1uN`` —
-    apt's version_compare sees the asg-stamped version as LOWER
-    than ``+deb12u2`` (ASCII ``a`` < ``d``) and the closure breaks.
+def _transpose_relation(raw: str, release: int) -> str:
+    """TRANSPOSE every constraint version in a Depends-like relation string
+    (trailing +debNuK → +asg<R>uK).  Mirrors what real-build's
+    :func:`utils.transpose_control_text` does to the binary's on-disk control:
+    an inherited-from-upstream floor (``perl (>= 5.36.0-7+deb12u3)``) becomes
+    ``perl (>= 5.36.0-7+asg1u3)`` — which our rebuilt ``perl`` (5.36.0-7+asg1u3)
+    satisfies (the strip-to-pristine that the ship-order scheme used discarded
+    the ordinal).
 
-    Run BEFORE sibling-pin rewriting so the latter sees pristine bases.
+    Run BEFORE sibling-pin rewriting; the latter matches on ``pristine_base``,
+    which is unaffected by the transpose.
     """
     if not raw:
         return raw
@@ -74,9 +73,9 @@ def _strip_nmu_from_relation(raw: str) -> str:
             if not _vc:
                 continue
             _op, _cur = _vc
-            _stripped = utils.strip_nmu_suffix(_cur)
-            if _stripped != _cur:
-                _rel['version'] = (_op, _stripped)
+            _new = utils.transpose(_cur, 'asg', release)
+            if _new != _cur:
+                _rel['version'] = (_op, _new)
                 _changed = True
     if not _changed:
         return raw
@@ -195,6 +194,7 @@ def synthesize_binary_record(
     sibling_ver_map: Dict[str, str],
     sibling_pristine_map: Dict[str, str],
     is_udeb: bool = False,
+    release: int = 1,
 ) -> Dict[str, str]:
     """Build one RepoState.packages-style record for a single virtual
     binary.
@@ -262,9 +262,9 @@ def synthesize_binary_record(
         # version), THEN sibling pin rewriting (per-target).  Same
         # order as real-build: strip_nmu_from_control_text runs
         # before any sibling-pin restamping.
-        _stripped = _strip_nmu_from_relation(_raw)
+        _transposed = _transpose_relation(_raw, release)
         _rewritten = _rewrite_sibling_pins(
-            _stripped, sibling_ver_map, sibling_pristine_map)
+            _transposed, sibling_ver_map, sibling_pristine_map)
         _rec[_field] = _rewritten
     for _field in ('Priority', 'Section', 'Essential',
                    'Multi-Arch', 'Homepage'):
@@ -485,6 +485,7 @@ def synthesize_source_binaries(
     active_profiles: 'frozenset[str]' = frozenset(),
     override_source_version: 'Optional[str]' = None,
     fork_dsc_dir: 'Optional[str]' = None,
+    override_patch_level: 'Optional[int]' = None,
 ) -> List[Dict[str, str]]:
     """End-to-end: take one Source and return one synthesized RepoState
     record per binary it would emit.
@@ -519,7 +520,9 @@ def synthesize_source_binaries(
     _binaries: List[str] = list(getattr(source, 'binary', []) or [])
     if not _binaries:
         return []
-    _ledger = asg_ledger or {}
+    # `asg_ledger` is retained in the signature for call-site compatibility but
+    # is no longer consulted for the version decision — K is intrinsic to each
+    # binary's own upstream version under the transpose scheme.
 
     # Step 1 — per-binary upstream resolution.  Real dpkg-buildpackage
     # writes each binary's filename with its OWN Version from
@@ -598,71 +601,29 @@ def synthesize_source_binaries(
     if not _binaries:
         return []
 
-    # Step 2 — pristine base per binary (strip NMU residue).  asg-stamp
-    # math + intra-source pin rewriting both work on the pristine.
+    # Step 2 — pristine base per binary (FULL strip: no +deb, no +asg).  Used
+    # only as the match key for sibling-pin rewriting (_rewrite_sibling_pins
+    # compares pristine_base(constraint) against this).
     _pristine_per_binary: Dict[str, str] = {
         _b: utils.strip_nmu_suffix(_v)
         for _b, _v in _base_ver_per_binary.items()
     }
 
-    # Step 3 — delta + lineage decision, uniform N across siblings.
-    # Mirrors BuildContainer._normalize_built_artifacts exactly: any
-    # binary triggers delta → all stamp; ledger entry at any sibling's
-    # pristine → lineage trigger; N = max(per-binary asg_next_n).
-    #
-    # `parse_packages_to_ledger` epoch-strips its entries (matches
-    # real-build's filename-based comparison: filenames omit epoch,
-    # ledger does too).  So lineage scan + asg_next_n MUST compare
-    # against the epoch-stripped form of `_pristine_per_binary`,
-    # otherwise epoched sources (bind9 1:9.18.49-1, libcurl, openssl,
-    # perl, …) never match the ledger and lineage never triggers.
-    # The stored `_pristine_per_binary` keeps epoch so downstream
-    # consumers (sibling-pin rewriting, internal Version field)
-    # still get the epoched form they need.
-    def _no_epoch(_v: str) -> str:
-        return _v.split(':', 1)[-1] if ':' in _v else _v
-
-    _pristine_no_epoch_per_binary: Dict[str, str] = {
-        _b: _no_epoch(_pristine_per_binary[_b])
+    # Step 3 — TRANSPOSE per binary.  Mirrors
+    # BuildContainer._normalize_built_artifacts: strip a buildd binNMU (our
+    # rebuild from source won't carry it; the SOURCE drives the build, so a
+    # binary's published +bN is irrelevant), then transpose the trailing
+    # +debNuK to +asg<R>uK and append our patch level P.  K is intrinsic to
+    # each binary's own upstream version — no ledger, no ship-order counter,
+    # no lineage trigger.  P is uniform across the source's binaries.
+    _patch_level = (override_patch_level if override_patch_level is not None
+                    else (1 if was_patched else 0))
+    _virtual_ver_per_binary: Dict[str, str] = {
+        _b: utils.transposed_version(
+            utils.strip_binNMU(_base_ver_per_binary[_b])[0],
+            'asg', release, _patch_level)
         for _b in _binaries
     }
-    # Delta detection mirrors real-build's `_normalize_built_artifacts`:
-    # uses the SOURCE's version, NOT the binary's upstream version.
-    # The two can differ — Debian binNMU (+bN) rebuilds bump the
-    # binary's Version while leaving source.version pristine
-    # (e.g. bash source 5.2.15-2 + binary 5.2.15-2+b13).  Real build
-    # takes the source, applies our patches, and dpkg-buildpackage
-    # emits at source.version — no +bN, no delta from this.  Synth
-    # walking per-binary versions would (incorrectly) trigger delta
-    # on every +bN binary and stamp pristine builds.
-    _src_pristine = utils.strip_nmu_suffix(_src_ver)
-    _any_delta = was_patched or (_src_pristine != _src_ver)
-    _has_lineage = False
-    for _b in _binaries:
-        for _prev in _ledger.get(_b, []):
-            if (utils.pristine_base(_prev)
-                    == _pristine_no_epoch_per_binary[_b]
-                    and utils.parse_asg_suffix(_prev) is not None):
-                _has_lineage = True
-                break
-        if _has_lineage:
-            break
-
-    _virtual_ver_per_binary: Dict[str, str] = {}
-    if _any_delta or _has_lineage:
-        _candidates = [
-            utils.asg_next_n(
-                _ledger.get(_b, []),
-                _pristine_no_epoch_per_binary[_b], release)
-            for _b in _binaries
-        ]
-        _n = max(_candidates) if _candidates else 1
-        for _b in _binaries:
-            _virtual_ver_per_binary[_b] = utils.apply_asg_suffix(
-                _pristine_per_binary[_b], release, _n)
-    else:
-        for _b in _binaries:
-            _virtual_ver_per_binary[_b] = _pristine_per_binary[_b]
 
     # Step 4 — synthesize records from upstream cache (pre-build,
     # data-driven).  Virtual build is a sanity check that runs
@@ -688,6 +649,7 @@ def synthesize_source_binaries(
             sibling_ver_map=_virtual_ver_per_binary,
             sibling_pristine_map=_pristine_per_binary,
             is_udeb=_is_udeb,
+            release=release,
         )
         # Track whether this binary has an upstream-canonical Source
         # signal (used by synthesize_repo_state to detect ambiguous
@@ -1018,6 +980,13 @@ def validate_against_build_records(
                 _src_pristine_at_build = utils.pristine_base(_pr[1])
             if utils.parse_asg_suffix(_pr[1]) is not None:
                 _at_build_delta = True
+        # Predict at the EXACT patch level the build recorded (P), so the
+        # transpose prediction matches the built version rather than guessing
+        # from was_patched.  Falls back to 0 for pre-v6 records.
+        try:
+            _rec_patch_level = int(_rec.get('patch_bump_count', 0) or 0)
+        except (TypeError, ValueError):
+            _rec_patch_level = 0
         _virt = synthesize_source_binaries(
             source=_src, package_universe=package_universe,
             asg_ledger=_historical_ledger, release=release,
@@ -1027,6 +996,7 @@ def validate_against_build_records(
             active_profiles=active_profiles,
             override_source_version=_src_pristine_at_build or None,
             fork_dsc_dir=fork_dsc_dir,
+            override_patch_level=_rec_patch_level,
         )
         _pred_files: 'List[str]' = [
             os.path.basename(_r.get('Filename', '') or '')

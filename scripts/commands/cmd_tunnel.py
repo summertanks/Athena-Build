@@ -198,7 +198,6 @@ class TunnelCommandsMixin(SessionState):
         # observability accumulators (tunnel path) — best-effort,
         # consumed by the verbose .buildlog written at the terminal.
         _purged_stale: 'list[str]' = []
-        _strip_events: 'list[tuple[str, str]]' = []
         _stamp_events: 'list[tuple[str, str, str]]' = []
         try:
             # the tunnel entry record RECREATES the file —
@@ -284,120 +283,48 @@ class TunnelCommandsMixin(SessionState):
             if _h:
                 _upstream_sha256s[_filename] = _h
 
-        # Normalisation phase: strip NMU + asg-stamp, mirroring
-        # BuildContainer._normalize_built_artifacts on the tunnel path.
+        # Normalisation phase: TRANSPOSE each tunnelled .deb in place, mirroring
+        # BuildContainer._normalize_built_artifacts on the tunnel path.  A
+        # trailing +debNuK on the control Version + deps becomes +asg<R>uK; any
+        # trailing +bN is KEPT (tunnelled binaries aren't rebuilt, so their
+        # frozen inter-binary `=` pins reference that +bN), and the signed
+        # data.tar is never touched (control-only repack).  Tunnelled packages
+        # are never patched or force-built, so P=0 / force_bn=None — no ledger.
         # final_paths is keyed by the FINAL on-disk filename; final_to_upstream
         # remembers which upstream filename each post-normalize file came
         # from so we can attach `republished_from` provenance.
         _final_paths: 'dict[str, str]' = {}
         _final_to_upstream: 'dict[str, str]' = {}
-        _strips_count = 0
         _stamps_count = 0
         if _success and _upstream_paths:
-            _post_strip: 'list[tuple[str, str]]' = []   # (path, upstream_fn)
-            _any_stripped = False
+            try:
+                _release: 'Optional[int]' = int(
+                    str(self.config.build_version).strip('"').strip("'"))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "tunnel transpose: [Build] VERSION not an integer "
+                    f"({self.config.build_version!r}) — shipping upstream "
+                    f"version for {src_pkg.package}")
+                _release = None
             for _ups_fn, _ups_path in _upstream_paths.items():
-                try:
-                    _r = utils.strip_nmu_from_deb(_ups_path)
-                except Exception as _e:
-                    logger.warning(
-                        f"tunnel strip_nmu: {os.path.basename(_ups_path)} "
-                        f"failed: {_e}")
-                    _post_strip.append((_ups_path, _ups_fn))
-                    continue
-                _new_path = _r.get('new_path', _ups_path)
-                if _r.get('status') == 'rewritten':
-                    _any_stripped = True
-                    _strips_count += 1
-                    if _new_path != _ups_path:
-                        logger.info(
-                            f"tunnel strip_nmu: {os.path.basename(_ups_path)}"
-                            f" → {os.path.basename(_new_path)}")
-                        _strip_events.append((
-                            os.path.basename(_ups_path),
-                            os.path.basename(_new_path)))
-                _post_strip.append((_new_path, _ups_fn))
-
-            _ledger = (getattr(self.container, 'asg_ledger', None)
-                       if self.container is not None else None)
-            if _ledger is None:
-                # standalone `source tunnel` runs container-less, so
-                # the asg ledger that `cmd_source_build` loads onto the
-                # container (`asg_ledger = published_ledger(config)`) is
-                # absent — without it a delta source tunnels with strip-only
-                # normalisation and NO +asg<R>u<N> stamp, regressing a
-                # published +asgRuN binary to its pristine name.  Load it
-                # directly (memoised on the session — published_ledger reads
-                # the signed manifest, so do it once per command).
-                if getattr(self, '_standalone_tunnel_ledger', None) is None:
-                    import repo_audit as _repo_audit
-                    self._standalone_tunnel_ledger = (
-                        _repo_audit.published_ledger(self.config))
-                _ledger = self._standalone_tunnel_ledger
-            _src_is_delta = (
-                utils.strip_nmu_suffix(str(src_pkg.version))
-                != str(src_pkg.version))
-            _was_delta = _any_stripped or _src_is_delta
-            _current = _post_strip
-            if _was_delta and _ledger is not None:
-                try:
-                    _release = int(
-                        str(self.config.build_version).strip('"').strip("'"))
-                except (TypeError, ValueError):
-                    logger.warning(
-                        f"tunnel asg-stamp: [Build] VERSION not an integer "
-                        f"({self.config.build_version!r}) — skipping stamp "
-                        f"for {src_pkg.package}")
-                    _release = None
+                _final_path = _ups_path
                 if _release is not None:
-                    # Uniform per-source N: mirrors the rationale in
-                    # BuildContainer._normalize_built_artifacts.  Take the
-                    # MAX of every sibling binary's individual asg_next_n
-                    # candidate so intra-source sibling pins (`Depends: X
-                    # (= ver+asg<R>u<N>)`) all resolve.
-                    _per_file_n: 'list[int]' = []
-                    _stampable: 'list[tuple[str, str, str]]' = []
-                    for _path, _ups_fn in _post_strip:
-                        _b = os.path.basename(_path)
-                        _name, _ext = os.path.splitext(_b)
-                        _parts = _name.split('_')
-                        if len(_parts) != 3:
-                            continue
-                        _pkg_n, _ver, _arch = _parts
-                        _base_ver = utils.pristine_base(_ver)
-                        _per_file_n.append(utils.asg_next_n(
-                            _ledger.get(_pkg_n, []), _base_ver, _release))
-                        _stampable.append((_path, _ups_fn, _b))
-                    _stampable_paths = {_p for _p, _, _ in _stampable}
-                    _stamped: 'list[tuple[str, str]]' = []
-                    _n_uniform = max(_per_file_n) if _per_file_n else 1
-                    for _path, _ups_fn in _post_strip:
-                        if _path not in _stampable_paths:
-                            _stamped.append((_path, _ups_fn))
-                            continue
-                        _b = os.path.basename(_path)
-                        try:
-                            _r = utils.restamp_asg_deb(
-                                _path, _release, _n_uniform)
-                        except Exception as _e:
-                            logger.warning(
-                                f"tunnel asg-stamp: {_b} failed: {_e}")
-                            _stamped.append((_path, _ups_fn))
-                            continue
-                        _new_path = _r.get('new_path', _path)
-                        if _r.get('status') == 'rewritten':
+                    _b = os.path.basename(_ups_path)
+                    try:
+                        _r = utils.transpose_deb(_ups_path, 'asg', _release)
+                        _new_path = _r.get('new_path', _ups_path)
+                        if (_r.get('status') == 'rewritten'
+                                and _new_path != _ups_path):
                             _stamps_count += 1
                             logger.info(
-                                f"tunnel asg-stamp: {_b} → "
-                                f"{os.path.basename(_new_path)} "
-                                f"(+asg{_release}u{_n_uniform})")
+                                f"tunnel transpose: {_b} → "
+                                f"{os.path.basename(_new_path)}")
                             _stamp_events.append((
                                 _b, os.path.basename(_new_path),
-                                f"+asg{_release}u{_n_uniform}"))
-                        _stamped.append((_new_path, _ups_fn))
-                    _current = _stamped
-
-            for _final_path, _ups_fn in _current:
+                                str(_r.get('version', ''))))
+                        _final_path = _new_path
+                    except Exception as _e:
+                        logger.warning(f"tunnel transpose: {_b} failed: {_e}")
                 _final_fn = os.path.basename(_final_path)
                 _final_paths[_final_fn] = _final_path
                 _final_to_upstream[_final_fn] = _ups_fn
@@ -483,14 +410,7 @@ class TunnelCommandsMixin(SessionState):
             else:
                 _tblog.empty()
 
-            _tblog.section(f"NMU STRIP ({len(_strip_events)})")
-            if _strip_events:
-                for _old, _new in sorted(_strip_events):
-                    _tblog.bullet(f"{_old}  →  {_new}")
-            else:
-                _tblog.empty()
-
-            _tblog.section(f"ASG STAMP ({len(_stamp_events)})")
+            _tblog.section(f"TRANSPOSE ({len(_stamp_events)})")
             if _stamp_events:
                 for _old, _new, _tag in sorted(_stamp_events):
                     _tblog.bullet(f"{_old}  →  {_new}  ({_tag})")
@@ -535,8 +455,7 @@ class TunnelCommandsMixin(SessionState):
             console.print(
                 f"    files     {len(_outputs_sorted)}  "
                 f"({human_size(_total_bytes)}, "
-                f"{_strips_count} stripped, "
-                f"{_stamps_count} asg-stamped)")
+                f"{_stamps_count} transposed)")
             _pool_dir: 'Optional[str]' = None
             for _fn in _outputs_sorted:
                 _dst = _final_paths.get(_fn, '')

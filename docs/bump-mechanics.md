@@ -1,134 +1,361 @@
-# Version numbering — what gets bumped, and when
+# Version numbering
 
-Every package needs a version string, and that string decides two things: whether `apt` sees a package as newer than what's installed, and which of two packages "wins" when both exist. This doc states the **basic rules** Athena follows. The fiddly edge cases live in linked deep-dives at the end; start here.
+Every package we ship carries a version string, and that string quietly does
+two important jobs. It tells the package manager whether one build is newer
+than another (so upgrades flow in the right direction), and it decides which of
+two packages with the same name wins when both are available. Get it wrong and
+upgrades stall, security fixes don't land, or the wrong build installs.
 
-The guiding idea is simple: **Athena rebuilds from source, so it ships the *pristine* upstream version wherever it can, and adds a small, predictable suffix only when the package is genuinely different from upstream.**
+Getting it *stable* matters even more than getting it right once. The moment a
+version is published to real machines, the rules that produced it are frozen:
+changing them later would re-order releases that already shipped. So this
+document is written to be exact.
 
-## A 60-second Debian-version primer
+It comes in three parts. The first explains the idea and the reasoning behind
+it. The second is the precise reference — what version each kind of package
+gets, and every edge case that the rules have to handle. The third is a short
+set of recipes for the situations that come up in practice.
 
-A Debian version has up to three parts — `[epoch:]upstream-version-revision`, for example `2:1.2.3-4`:
+The whole scheme rests on one sentence:
 
-- the **upstream version** (`1.2.3`) — the software's own version;
-- the **Debian revision** (`-4`) — how many times Debian has re-packaged that same upstream version;
-- an optional **epoch** (`2:`) — a rarely-used override that forces ordering. It exists for when a version scheme changes in a way that would otherwise sort *backwards* (e.g. upstream switches from a date like `20240101` to `1.0`, which compares as *older*). Bumping the epoch says "trust me, this is newer." Epoch defaults to `0`, is compared before everything else, and once added never goes away.
+> We rebuild every package from its original source, so we keep the original
+> version almost unchanged — we only rename the one marker that means
+> "this is a post-release update", swapping the upstream project's marker for
+> our own.
 
-On top of that, Debian appends build-time suffixes you don't control:
+---
 
-- `+deb12u1` — a security / point-release update for Debian 12.
-- `+b1` — a "binNMU": a rebuild with no source change.
-- `~bpo12+1` — a backport.
+## Part 1 — Understanding the scheme
 
-Ubuntu adds its own (`...ubuntu1`); other derivatives add theirs. These suffixes exist because each distro is *re-distributing Debian's binaries* and has to mark its changes. Athena is different: it **rebuilds the source itself**, so it strips those build-time suffixes back to the pristine version and, if needed, adds *one* suffix of its own. Throughout, Athena leaves the **epoch** and the **upstream version** untouched — it only ever strips or adds the *trailing suffix*. (Epoch is preserved verbatim through every strip and stamp; `2:1.2.3-4+b1` becomes `2:1.2.3-4`, never `1.2.3-4`.)
+### How a version string is built
 
-## Why Debian adds these suffixes — and what each means for us
+A typical version looks like `2:1.2.3-4`. It has up to three pieces:
 
-Each suffix encodes *why* Debian re-issued the package. Athena doesn't read changelogs or judge "is this security" — it simply recognises these suffixes by their **shape in the version string**, and that shape is what decides whether its rebuild counts as "changed":
+- the **upstream version** (`1.2.3`) — the software's own version, chosen by
+  the people who wrote it;
+- the **revision** (`-4`) — how many times the package was re-packaged around
+  that same upstream version, without the upstream code changing;
+- an optional **epoch** (`2:`) — a rarely-used override that forces ordering.
+  It exists for when a version scheme changes in a way that would otherwise
+  sort *backwards* (for example, software that moves from a date like
+  `20240101` to a tidy `1.0`, which compares as *older*). An epoch says "trust
+  me, this is newer." Once added it can never be removed, so it is a last
+  resort.
 
-- **`+deb12u1` — a stable update (a security fix or point-release bug-fix).** Debian re-issued the *source* after release, and `+debNuN` is its standard tag for "an update to the original" (`deb12` = Debian 12 / bookworm, `u1` = update 1). Athena knows nothing about *why* — it just sees the `+debNuN` tag on the source version, which by Debian's convention means the source changed after release. So its rebuild genuinely differs from the original `1.2.3-4`, and it gets marked.
-- **`+b1` — a binary-only rebuild ("binNMU").** **No source change at all** — Debian just rebuilt the package against an updated library elsewhere in the archive. Athena already rebuilds everything from source against its *own* libraries, so this reason simply doesn't apply to us — strip it, ship pristine.
-- **`~bpo12+1` — a backport.** The same package rebuilt for a *different* (older) release. Not relevant to the release you're targeting — strip it.
-- **A new revision (`-4` → `-5`) — the maintainer changed the packaging.** This is part of the upstream version itself, not a strippable suffix; Athena builds it and ships it as the version it is.
+On top of that, the upstream packaging adds build-time markers that the
+original maintainers control and we do not:
 
-> **"Same upstream version — so why rebuild at all?"** Because `+debNuN` is a new Debian *source* upload: the upstream tarball (`1.2.3`) is unchanged, but Debian added patches to the packaging, so the source *package* (`1.2.3-4+deb12u1`) genuinely differs from `1.2.3-4`. Athena resolves to that updated source and builds it — that's how the fix gets in — then normalises only the version *label* back to `1.2.3-4`, marking it `+asg` to record that the build carries post-release changes. The one case where the source really is identical is `+bN` (a binNMU — a binary-only rebuild against some other changed library); that is exactly why those ship pristine and unmarked.
+- `+debNuM` — a **stable update**: a security fix or bug-fix re-issued after
+  the release shipped. `N` is the release number it targets and `M` counts the
+  updates, so `+deb12u3` is "the third update for release 12".
+- `+bN` — a **binary rebuild**: the package was rebuilt with *no source change
+  at all*, usually because a library it links against changed elsewhere.
+- `~bpoN+M` — a **backport**: the same source recompiled for an *older*
+  release.
 
-The pattern to hold onto: **a suffix that reflects a real change to the source → Athena's rebuild is also a real change, so it's marked; a suffix that's only a re-distribution artifact → stripped, and the rebuild ships pristine.** The next sections turn that single idea into concrete rules.
+Each of these markers exists because the original distribution is
+*re-distributing its own binaries* and has to record what it changed and why.
 
-## The four cases
+### Why we change the version at all
 
-Every package Athena ships falls into one of four cases. This is the whole model:
+We are not re-distributing someone else's binaries — we **rebuild every
+package from source**. That changes what the markers mean for us:
 
-| The package is… | Version it ships at | Example |
+- A **stable update** (`+debNuM`) reflects a real change to the source: the
+  maintainers added patches after release. When we rebuild that source we are
+  genuinely shipping those changes, so we keep a marker of our own.
+- A **binary rebuild** (`+bN`) reflects *no* source change. We already rebuild
+  everything against our own libraries, so it simply doesn't apply to us — we
+  drop it and ship the plain version.
+- A **backport** (`~bpoN+M`) targets a different release than the one we build,
+  so it's not relevant either — we drop it.
+- A **new revision** (`-4` becoming `-5`) is part of the version itself, not a
+  strippable marker; we build it and ship it as the version it is.
+
+So the only marker that needs translating is the stable-update one. Everything
+else is either part of the real version (keep it) or a re-distribution artifact
+that doesn't apply to us (drop it).
+
+### The core move: rename the update marker in place
+
+When a package carries a trailing stable-update marker, we rewrite *only that
+marker* into our own equivalent and leave the rest of the version exactly as it
+was. Our marker is `+<tag><release>u<K>`:
+
+- **tag** — a short label derived from the distribution's name (Asgard gives
+  `asg`). Rename the distribution and this label changes with it.
+- **release** — the distribution's major release number (`1`).
+- **K** — the update number, taken *unchanged* from the upstream marker.
+
+So a faithful rebuild of `1.2.3-4+deb12u3` ships as `1.2.3-4+asg1u3`. The base
+version, the revision, and the update number `3` all survive untouched; only
+`+deb12u` became `+asg1u`.
+
+A package with no stable-update marker is already pristine, and a faithful
+rebuild of it ships exactly as it is — `1.2.3-4` stays `1.2.3-4`, with no marker
+added at all.
+
+### Why keep the update number instead of counting our own
+
+The update number is the heart of the scheme, and keeping it from upstream
+(rather than counting "our Nth build") buys two things.
+
+**Order follows content.** Because `+asg1u2` is built from update 2 and
+`+asg1u3` from update 3, the version order matches the *content* order. Update
+2 always sorts below update 3, no matter which we built first. That is what
+makes a genuine downgrade expressible: shipping the older content produces a
+lower version, so the package manager can see it as a real, lower target — not
+just a different opaque string.
+
+**No bookkeeping.** The version of a faithful rebuild can be worked out from
+the upstream version alone. Nothing has to remember "how many times have we
+shipped this" — there is no counter to keep in sync, and a fresh machine
+computes the same answer as an old one. The only thing we *do* have to remember
+is whether we added changes of our own, which the next section covers.
+
+---
+
+## Part 2 — Reference: the exact rules
+
+### The four kinds of package
+
+Every package falls into one of four kinds, and each gets its version a
+slightly different way.
+
+| Kind | What it is | Version it ships at | Example |
+|---|---|---|---|
+| **Rebuilt, faithful** | rebuilt from upstream, unchanged by us | upstream version with the update marker translated (or pristine) | `1.2.3-4+deb12u3` → `1.2.3-4+asg1u3` |
+| **Rebuilt, patched** | rebuilt from upstream with our own source changes | as above, plus our patch level | `1.2.3-4+deb12u3` → `1.2.3-4+asg1u3+p1` |
+| **Fork** | a package we have taken ownership of | hand-set in the package's own changelog, ending in `+athenaN` | `12.4+athena2` |
+| **Tunnelled** | shipped as upstream's own signed binary, not rebuilt | upstream version with the update marker translated; the binary itself untouched | `3.x~deb12u1` → `3.x~asg1u1` |
+
+The rest of this part is the detail behind those rows.
+
+### Translating the update marker (the precise rule)
+
+The translation applies to **one** marker only: a stable-update marker at the
+very **end** of the version. It keeps the marker's leading sign and its update
+number, and changes only the distribution label:
+
+- `+debNuK` at the end → `+<tag><release>uK`
+- `~debNuK` at the end → `~<tag><release>uK`
+
+Everything before that trailing marker is left exactly as it is. In particular:
+
+- **An epoch is always preserved.** `7:5.1.9-0+deb12u1` becomes
+  `7:5.1.9-0+asg1u1`.
+- **An *embedded* update marker is not touched.** Some packages carry a stable
+  marker in the *middle* of their version, as part of the upstream identity
+  rather than as a trailing update. For example a signed boot component whose
+  upstream version is `1.44~1+deb12u1+15.8-1~deb12u1` has a `+deb12u1` buried in
+  the middle and a `~deb12u1` at the end. Only the trailing one is an update
+  marker, so only it is translated: the result is
+  `1.44~1+deb12u1+15.8-1~asg1u1`. The embedded `+deb12u1` stays, because it is
+  part of what the package actually is.
+- **Real version detail is kept verbatim.** Markers that look similar but
+  describe genuine source identity — a non-maintainer source change, a dotted
+  revision like `-3.3`, an upstream-supplied `+really…`, a `+dfsg` repackaging
+  tag — are all part of the version and are never stripped or translated.
+
+### The two sign forms: above and below pristine
+
+The leading sign of the marker is meaningful, and it is preserved on purpose.
+
+- A `+deb` update sorts **above** the plain version, so its translation
+  `+asg…` also sorts above the plain version. `1.2.3-4 < 1.2.3-4+asg1u3`.
+- A `~deb` update is the upstream project's way of sorting a build **below**
+  the plain version (the `~` sign sorts before everything). Its translation
+  `~asg…` keeps that: `2.4.67-1~asg1u2 < 2.4.67-1`. This is faithful to what
+  upstream intended, and successive updates still order correctly among
+  themselves (`~asg1u2 < ~asg1u3`).
+
+### Our own changes: the patch level
+
+When we apply our own source changes on top of upstream — a real edit to the
+code, not just a re-packaging — the result is genuinely different from
+upstream, so it earns a patch level: `+pP`, where `P` counts our patch
+revisions.
+
+The patch level always sits **inside** the update marker, so that it sorts
+above the un-patched build but **below the next upstream update**:
+
+| Situation | Version |
+|---|---|
+| faithful update | `1.2.3-4+asg1u3` |
+| our patch on that update | `1.2.3-4+asg1u3+p1` |
+| our second patch revision on it | `1.2.3-4+asg1u3+p2` |
+| **our patch on a *pristine* base** | `1.2.3-4+asg1u0+p1` |
+
+That last row is the case to watch. When upstream has *no* update marker, there
+is nothing to anchor the patch to, so an update marker with update number `0`
+is synthesized first — `u0` simply means "no upstream update, our change number
+1". This is not cosmetic: without the anchor, the patch suffix would sort
+*above* every real update (a quirk of how the marker letters compare), and the
+patched build would never be superseded by a later upstream fix or by a rebase
+of our own patch. With the `u0` anchor it sorts exactly where it should:
+
+```
+1.2.3-4  <  1.2.3-4+asg1u0+p1  <  1.2.3-4+asg1u1  <  1.2.3-4+asg1u1+p1
+```
+
+The patch level is the same for every binary produced from one source, so the
+cross-references between those binaries stay consistent.
+
+How the patch level advances over time:
+
+- the first patch on a given base is `+p1`;
+- editing the patch while still on the same base advances it (`+p2`, `+p3`, …);
+- removing our patch entirely drops back to a faithful build (no `+p`);
+- moving to a *new* base — a new upstream version — resets the count, because
+  the patch is being re-applied onto fresh ground.
+
+### Binary rebuilds, and forcing one ourselves
+
+A binary rebuild marker (`+bN`) never appears on something we build from
+source: we always compile from the source, and the source version doesn't carry
+it. So our rebuilt packages never carry `+bN` of upstream's.
+
+Occasionally we need to *deliberately* re-issue a package with no source change
+— for instance to rebuild it against a changed library — and mark that as a
+distinct build. That is a forced rebuild, and it adds **our own** `+bN`. Like
+the patch level, it is anchored inside the update marker so it sorts below the
+next upstream update (a forced rebuild of a pristine base is
+`1.2.3-4+asg1u0+b1`).
+
+### Dependencies
+
+A version is only half the story; the version *constraints* a package places on
+its dependencies have to stay consistent with it.
+
+Every version constraint is translated the **same way** the package versions
+are. If a package depends on `library (>= 1.2.3-4+deb12u3)`, that becomes
+`library (>= 1.2.3-4+asg1u3)` — which our rebuilt `library` at
+`1.2.3-4+asg1u3` satisfies exactly. Translating both sides identically is what
+keeps the dependency graph resolvable; it also preserves the *intent* of the
+constraint (it still asks for "at least update 3"), which simply dropping the
+marker would have thrown away.
+
+Where one binary pins an *exact* version of a sibling built from the same
+source, that pin is updated to the sibling's exact final version — patch level
+and all — so the two always match on disk.
+
+### Putting it together
+
+For a rebuilt or tunnelled package, the version is built up in this order:
+
+1. start from the upstream version;
+2. translate a trailing update marker (`+debNuK` → `+asg<release>uK`), or leave
+   the version pristine if there is none;
+3. if we patched it, anchor and append the patch level (`+p<P>`, with a
+   synthesized `u0` when the base is pristine);
+4. if it is a forced rebuild, anchor and append `+b<N>`.
+
+Worked examples:
+
+| Upstream version | Did we patch? | Ships as |
 |---|---|---|
-| **Rebuilt from upstream, unchanged** | the **pristine** upstream version (Debian's build suffixes stripped) | `1.2.3-4+deb12u2` → **`1.2.3-4`** |
-| **Rebuilt from upstream, *changed*** | pristine version **+ `+asg<R>u<N>`** | `1.2.3-4` → **`1.2.3-4+asg1u1`** |
-| **An Athena fork** (you took the package over) | upstream version **+ `+athenaN`**, set by hand | **`12.4+deb12u14+athena1`** |
-| **Tunnelled** (shipped as-is from Debian, not rebuilt) | Debian's exact version, **untouched** | `3.20250311.1+deb12u1` (kept) |
+| `0.7.4-20` | no | `0.7.4-20` |
+| `1.2.3-4+deb12u3` | no | `1.2.3-4+asg1u3` |
+| `1.2.3-4+deb12u4` | no | `1.2.3-4+asg1u4` |
+| `1.2.3-4+deb12u2` | no | `1.2.3-4+asg1u2` (a real, lower downgrade target) |
+| `2.4.67-1~deb12u2` | no | `2.4.67-1~asg1u2` (below pristine) |
+| `7:5.1.9-0+deb12u1` | no | `7:5.1.9-0+asg1u1` (epoch kept) |
+| `1.2.3-4` | yes | `1.2.3-4+asg1u0+p1` |
+| `1.2.3-4+deb12u3` | yes | `1.2.3-4+asg1u3+p1` |
 
-The rest of this doc just explains those four rows.
-
-## Rule 1 — rebuilt packages start pristine
-
-When Athena rebuilds an upstream package, it first **strips Debian's build-time suffixes** (`+bN`, `+debNuN`, `~bpoN+N`, …) to recover the plain upstream version. A package that we rebuilt but did **not** change ships at exactly that pristine version — no Athena marking at all.
-
-Why: a pristine version is honest (it says "this is upstream 1.2.3-4, rebuilt"), and it keeps security tooling working — vulnerability scanners match the real upstream version. (The original upstream string is preserved in an `X-Athena-Upstream-Version` field inside the package for provenance.)
-
-## Rule 2 — a real change earns an `+asg<R>u<N>` suffix
-
-If a rebuilt package is genuinely **different** from pristine upstream, Athena stamps it with **`+asg<R>u<N>`**:
-
-- **`asg`** — a short tag derived from your **distribution name** (Asgard → `asg`); it marks the build's origin. Rename your distro and this tag changes with it — a distro called *Valhalla* would stamp `+val…`. This doc assumes Asgard, so you'll see `asg` throughout.
-- **`R`** — your **release number** (`VERSION` in `distro.conf`; `1` for thor 1).
-- **`N`** — an **update counter** for that package, starting at 1 and going up each time you ship a new version of it within release `R`.
-
-So `1.2.3-4+asg1u2` reads as "Athena's 2nd update of this package, in release 1, built from upstream 1.2.3-4." It sorts *above* pristine `1.2.3-4` (so it's seen as newer) and *below* Debian's own `+deb…` (so a later real Debian security update still wins).
-
-> Why `+asg<R>u<N>` and not `+thor<N>`? Because codenames don't sort — `loki1` would compare *less than* `thor1` and break update ordering across releases. A plain release **number** always orders correctly.
-
-**A package counts as "changed" when:**
-
-1. **you patched it** (your source changes — clearly different bytes), or
-2. **upstream's version carried a build suffix** (e.g. it was a `+deb12u3` security build — stripping it could collide with the original, so we mark ours), or
-3. **it's the next in an existing update line** (you've already shipped `+asg1u1` for it, so the rebuild continues as `+asg1u2`).
-
-If none of those hold — a plain rebuild with no real difference — it ships **pristine** (Rule 1). Notably, *only* rewriting an internal dependency version does **not** count as a change.
-
-All binaries produced from one source get the **same `N`**, so their cross-references stay consistent.
-
-## Rule 3 — forks are versioned by hand as `+athenaN`
-
-When you take over a package to change it permanently (usually for branding) it becomes a **fork** under `fork/source/<pkg>/`. You set its version yourself in its `debian/changelog`, as the upstream version **+ `+athenaN`** — bumping `N` each time you change the fork:
+And the resulting order, smallest to largest:
 
 ```
-base-files (12.4+deb12u14+athena1) thor; urgency=low
-base-files (12.4+deb12u14+athena2) thor; urgency=low   ← next fork revision
+1.2.3-4
+1.2.3-4+asg1u0+p1
+1.2.3-4+asg1u2
+1.2.3-4+asg1u3
+1.2.3-4+asg1u3+p1
+1.2.3-4+asg1u4
 ```
 
-Forks do **not** get the automatic `+asg…` stamp — their version is whatever the changelog says. The build's **collision gate** checks that your fork's version outranks the upstream package it replaces, so your version always wins; if upstream ever overtakes it, the build fails loudly rather than silently shipping upstream's.
+---
 
-## Rule 4 — tunnelled packages are left exactly as Debian shipped them
+## Part 3 — How to handle the cases that come up
 
-A few packages are deliberately **not** rebuilt — CPU microcode and cryptographically-signed boot components — because Debian's official signed binary is the thing you want. These are "tunnelled": copied straight into your repo with **Debian's exact version untouched**, so the file still matches its signature.
+### Maintain a fork
 
-## The bump decision in detail
+A fork is a package we have taken ownership of and will keep changing — usually
+for branding, or because we ship a permanently different version of it. Its
+changes live in its own source tree rather than as patches on top of upstream.
 
-Rule 2 said *when* a rebuild is marked; here is the exact decision the build makes. Four things could trigger an `+asg` stamp — three do, and one deliberately does **not**:
-
-| Case | Trigger | Real change to the package's own bytes? | Stamped `+asg`? |
-|---|---|:--:|:--:|
-| **A** | You patched the source | Yes — your changes | **Yes** |
-| **B** | The source version carried a Debian suffix (`+debNuN`, …) | Yes — a post-release source | **Yes** |
-| **C** | The build only rewrote a **dependency version** (see below) | **No** — bytes identical to upstream | **No** |
-| **D** | This package already has an `+asg` version published (an update line) | Yes — keep ordering and pins consistent | **Yes** |
-
-**Why Case C is not a stamp.** When Athena builds on a Debian base, the build tools record each dependency's *floor* against whatever is installed in the build container — which carries Debian's security suffixes. Stripping those back to pristine is mandatory: a leftover floor like `perl (>= 5.36.0-7+deb12u3)` cannot be satisfied by our own `+asg` packages (which sort *below* `+deb`), and the whole repo would be uninstallable. But that strip only moved a dependency *floor* — the package's own bytes are identical to pristine upstream, so it is **not** a real change and earns no stamp:
+A fork's version is **set by hand in its own changelog**, ending in a fork
+marker `+athenaN`, with `N` bumped each time the fork changes:
 
 ```
-build container's perl:    5.36.0-7+deb12u3
-generated dependency:      perl (>= 5.36.0-7+deb12u3)
-after the mandatory strip: perl (>= 5.36.0-7)      ← floor normalised; our bytes unchanged → no +asg
+base-files (12.4+athena1) ...
+base-files (12.4+athena2)   ← next fork revision
 ```
 
-(This case exists only because Athena currently builds *on* Debian. Once Athena builds on Athena, there are no Debian suffixes left to strip from a generated dependency, and Case C disappears on its own.)
+The fork marker sorts above the rebuilt-from-upstream marker, which is what
+makes the fork win when both could exist. A fork is also the *only* provider of
+its name — we never ship a rebuilt upstream version of it alongside — so at
+install time the package manager only ever sees the fork.
 
-## A caveat — cross-package `=` pins
+There is one rule the build enforces: the fork's version must out-rank the
+upstream version it replaces. If upstream issues a new release that would
+out-rank the fork, the build stops and asks you to rebase the fork onto that
+new upstream and re-cut its version. This is deliberate: it stops a fork from
+silently drifting behind an upstream security release. When that happens, pull
+the new upstream source, re-apply the fork's changes on top, and bump the fork
+marker.
 
-Stripping a dependency back to pristine is safe for an "*at least* version X" floor (`>=`): our `X+asg1u3` still satisfies `>= X`. It can break only for an **exact** pin (`=`) that points *across* packages:
+### Ship a signed binary unchanged (tunnelling)
 
-```
-package A depends:  B (= X+deb12u7)   → strip →   B (= X)
-our repo has B at:  X+asg1u3           →   X ≠ X+asg1u3   → A can't find a matching B
-```
+A few packages must ship as the upstream project's *own* signed binary —
+processor microcode and the cryptographically-signed boot components — because
+the signed file itself is the thing we want, byte for byte. These are
+"tunnelled": copied in rather than rebuilt.
 
-Floors (`>=`) are safe, and same-source sibling pins are safe (they are rewritten to the stamped version automatically). Only a cross-package exact pin, stripped to bare pristine against an `+asg`-stamped target, can dangle — and `repo audit` flags exactly this, with the fix (relax it to `>=`, or pin the `+asg` version). Like Case C, it vanishes under self-hosting.
+A tunnelled package still gets its version marker translated (so it sits in our
+namespace like everything else), but only its metadata is rewritten — the signed
+payload is never touched, so the signature stays valid. Two consequences follow
+from the fact that we did not rebuild it:
 
-## Known rough edge — the fork-version scheme (CONF-14)
+- A binary rebuild marker (`+bN`) on a tunnelled package is **kept**. Because we
+  didn't recompile it, the exact version pins between its sibling binaries are
+  frozen as upstream wrote them, and those pins reference the `+bN`. Keeping it
+  is what keeps them resolvable.
+- Its dependency constraints are translated just like any other package's, so
+  it slots into the dependency graph normally.
 
-Today's fork versions (Rule 3) bake the upstream security suffix into the fork version: `12.4+deb12u14+athena1`. That works, but it means **every upstream security release forces a fork rebase** — when upstream moves to `+deb12u15`, the fork must be re-cut as `12.4+deb12u15+athena1` to stay ahead.
+### Ship an older version (a downgrade)
 
-The cleaner target is `12.4+athena1` (pristine upstream + our suffix only, the way Devuan and Mint do it). The catch: `+athena1` sorts *below* `+deb12u15` (`a` < `d`), so the collision gate would reject it. Resolving this (tracked as **CONF-14**) means teaching the version-strip logic to treat `+athenaN` as a strippable layer — so a fork and its upstream compare as *equal* at the pristine base, and the fork is simply the record we keep. (A blunter alternative, used by some distros, is to bump the **epoch** — `1:12.4+athena1` outranks any non-epoch upstream version unconditionally — but an epoch can never be removed, so it's a last resort.) Until then, forks keep the upstream suffix.
+Because version order follows content order, expressing a downgrade is easy:
+build the older content and it naturally produces a lower version
+(`+asg1u2` sits below `+asg1u3`). The package manager can then see it as a
+genuine, lower target.
 
-## Going deeper
+*Applying* a downgrade on already-installed machines is a deliberate operation,
+not something that happens automatically. The newer build, being a higher
+version, remains the default the package manager would pick, so a one-off
+downgrade is held in place either by pinning that package to the older version
+or by withdrawing the newer build. Building the older content also means
+sourcing it from the point in time it came from. None of this is automatic on
+purpose — a silent in-place downgrade could ripple through everything that
+depends on the package.
 
-- [glossary.md](glossary.md) — definitions of *package*, *fork*, *tunnelled*, etc.
-- [strip-nmu-sibling-constraint-idiom.md](strip-nmu-sibling-constraint-idiom.md) — how internal dependency version constraints are rewritten when a version changes.
-- [cve-tracking.md](cve-tracking.md) — why pristine versions matter for security scanning.
+### Force a rebuild with no source change
+
+When you need to re-issue a package against a changed dependency without any
+source change of its own, force a rebuild. It ships at the same base version
+with our own `+bN` appended (anchored inside the update marker), so it sorts
+above the previous build and below the next upstream update.
+
+---
+
+## A note on terms
+
+- **pristine** — the plain upstream version with every re-distribution marker
+  removed; the version a faithful, unchanged rebuild ships at.
+- **update marker** — the trailing `+debNuK` / `~debNuK` that upstream uses for
+  a post-release stable update, and which we translate to `+asg…` / `~asg…`.
+- **patch level** (`+pP`) — a count of our own source changes on a given base.
+- **fork** — a package we own and version by hand, ending in `+athenaN`.
+- **tunnelled** — shipped as upstream's own signed binary, with only its
+  metadata re-versioned.
