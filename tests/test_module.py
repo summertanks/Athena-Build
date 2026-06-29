@@ -9320,9 +9320,11 @@ def test_transposed_version_appends_p_and_b():
     from utils import transposed_version
     assert transposed_version('2.36-9+deb12u14', 'asg', 1) == '2.36-9+asg1u14'
     assert transposed_version('5.36.0-7+deb12u3', 'asg', 1, 1) == '5.36.0-7+asg1u3+p1'
-    assert transposed_version('5.2.15-2', 'asg', 1, 1) == '5.2.15-2+p1'   # patch on pristine
-    assert transposed_version('1.0-2', 'asg', 1, force_bn=1) == '1.0-2+b1'
-    # patch + force together: transpose → +p → +b
+    # patch / force on a pristine base anchor to u0 so they sort BELOW the
+    # first upstream update (+p / +b would otherwise outrank the +asg namespace).
+    assert transposed_version('5.2.15-2', 'asg', 1, 1) == '5.2.15-2+asg1u0+p1'
+    assert transposed_version('1.0-2', 'asg', 1, force_bn=1) == '1.0-2+asg1u0+b1'
+    # patch + force on an updated base: anchor already present (u3).
     assert transposed_version('1.0-2+deb12u3', 'asg', 1, 2, 1) == '1.0-2+asg1u3+p2+b1'
 
 
@@ -27110,13 +27112,15 @@ def test_normalize_built_artifacts_patch_on_pristine_gets_p1_no_ledger():
         _bc.config = _FakeConfig()
         _bc._normalize_built_artifacts(_Src(), [_p], was_patched=True)
         assert not os.path.exists(_p), "patched build should be stamped + renamed"
-        _stamped = os.path.join(_tmp, 'openssl_3.0.15-1+p1_amd64.deb')
+        # Anchored to u0 so it sorts below a future upstream update (+asg1u1).
+        _stamped = os.path.join(_tmp, 'openssl_3.0.15-1+asg1u0+p1_amd64.deb')
         assert os.path.exists(_stamped), (
-            f"patch-on-pristine should ship +p1; got {sorted(os.listdir(_tmp))}")
+            f"patch-on-pristine should ship +asg1u0+p1; "
+            f"got {sorted(os.listdir(_tmp))}")
         import subprocess
         _ver = subprocess.run(['dpkg-deb', '-f', _stamped, 'Version'],
                               check=True, capture_output=True, text=True).stdout.strip()
-        assert _ver == '3.0.15-1+p1', _ver
+        assert _ver == '3.0.15-1+asg1u0+p1', _ver
 
 
 def test_normalize_built_artifacts_cross_source_dep_is_transposed():

@@ -945,7 +945,8 @@ def transposed_version(upstream_version: str, prefix: str, release: int,
         transposed_version('1.0-2', 'asg', 1, force_bn=1)     → '1.0-2+b1'
     """
     return _append_patch_force(
-        transpose(upstream_version, prefix, release), patch_level, force_bn)
+        transpose(upstream_version, prefix, release),
+        patch_level, force_bn, prefix, release)
 
 
 def compute_transposed_versions(
@@ -1094,14 +1095,16 @@ def transpose_deb(deb_path: str, prefix: str, release: int,
         _result['status'] = 'malformed'
         return _result
     # Step 2: append +pP / +bN and restamp sibling pins to the exact final.
-    _final_ver = _append_patch_force(_k_ver, patch_level, force_bn)
+    _final_ver = _append_patch_force(_k_ver, patch_level, force_bn,
+                                     prefix, release)
     if _final_ver != _k_ver:
         _new_text = _restamp_control_text(_k_text, _k_ver, _final_ver)
     else:
         _new_text = _k_text
 
     _new_file_ver = _append_patch_force(
-        transpose(_old_file_ver, prefix, release), patch_level, force_bn)
+        transpose(_old_file_ver, prefix, release), patch_level, force_bn,
+        prefix, release)
     _filename_changed = _new_file_ver != _old_file_ver
 
     if not _filename_changed and _changes == 0 and _final_ver == _k_ver:
@@ -1159,10 +1162,25 @@ def decide_patch_bump_count(prior: 'Optional[dict]', intended_version: str,
 
 
 def _append_patch_force(version: str, patch_level: int,
-                        force_bn: 'Optional[int]') -> str:
+                        force_bn: 'Optional[int]',
+                        prefix: str, release: int) -> str:
     """Append our patch (+pP) and/or force-binNMU (+bN) suffix to an
-    already-transposed version.  Order: +p then +b (matches the algo's
-    transpose → +pP → +bN sequence)."""
+    already-transposed version.  Order: +p then +b.
+
+    Both `p` and `b` sort ABOVE `<prefix>` (`a`...) in Debian version ordering,
+    so a +pP / +bN attached DIRECTLY to a pristine base would outrank every
+    upstream-update marker (+<prefix><R>uK) and never be superseded.  To keep
+    our changes sorting BELOW the next upstream update, anchor them inside the
+    update namespace: when the version has no trailing +<prefix><R>uK marker
+    (the base is pristine, no upstream update), synthesize ``u0`` first.
+
+        1.2.3-4            +p1  → 1.2.3-4+asg1u0+p1   (< 1.2.3-4+asg1u1)
+        1.2.3-4+asg1u3     +p1  → 1.2.3-4+asg1u3+p1   (anchor already present)
+        2.4.67-1~asg1u2    +p1  → 2.4.67-1~asg1u2+p1  (~ form counts as anchor)
+    """
+    if patch_level > 0 or force_bn is not None:
+        if not re.search(rf'[+~]{re.escape(prefix)}{release}u\d+$', version):
+            version = f'{version}+{prefix}{release}u0'
     if patch_level > 0:
         version = f'{version}+p{patch_level}'
     if force_bn is not None:
