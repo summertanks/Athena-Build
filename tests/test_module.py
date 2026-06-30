@@ -16711,6 +16711,22 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_selection_lock_classify_returns_independent_empty_sets():
+    """Regression (audit #180): classify's empty added/removed results must be
+    independent dicts with independent sets — dict(_empty) shallow-copied and
+    SHARED the inner set() objects across every return, so a caller mutating
+    one result corrupted later ones."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    _, _add1, _rem1 = _sl.classify(_sl.STATUS_MISSING, {}, {})
+    assert _add1['bins'] is not _rem1['bins'], "added/removed share a set"
+    _add1['bins'].add('poison')
+    _, _add2, _rem2 = _sl.classify(_sl.STATUS_MISSING, {}, {})
+    assert _add2['bins'] == set(), "shared mutable set leaked across calls"
+    assert _rem2['srcs'] == set()
+
+
 def test_remote_localmirror_cum_total_guards_null_total_size():
     """Regression (audit #165): the cumulative total must coerce a JSON-null
     total_size like line 187 — int(None) raises."""
@@ -42152,6 +42168,7 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_selection_lock_classify_returns_independent_empty_sets,
         test_remote_localmirror_cum_total_guards_null_total_size,
         test_fork_mirror_release_architectures_uses_build_arch,
         test_remote_orchestrate_open_tunnel_sets_strict_host_key_checking,

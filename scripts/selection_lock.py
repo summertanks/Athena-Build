@@ -349,11 +349,15 @@ def classify(
     ``{'bins': set, 'srcs': set}``.  Asymmetric: ANY removal ⇒ BLOCK
     (deprecation candidates); additions alone ⇒ REFRESH (low-impact).
     """
-    _empty: 'Dict[str, set]' = {'bins': set(), 'srcs': set()}
+    def _fresh() -> 'Dict[str, set]':
+        # A NEW dict with NEW sets each call — dict(_empty) was a shallow copy
+        # that shared the inner set() objects across every return, so a caller
+        # mutating an 'added'/'removed' set would corrupt later results.
+        return {'bins': set(), 'srcs': set()}
     if read_status == STATUS_MISSING:
-        return ACTION_BOOTSTRAP, dict(_empty), dict(_empty)
+        return ACTION_BOOTSTRAP, _fresh(), _fresh()
     if read_status in (STATUS_BADSIG, STATUS_MALFORMED):
-        return ACTION_HARDSTOP, dict(_empty), dict(_empty)
+        return ACTION_HARDSTOP, _fresh(), _fresh()
     _added, _removed = diff_closure((lock or {}).get('closure', {}), fresh_closure)
     if _removed['bins'] or _removed['srcs']:
         return ACTION_BLOCK, _added, _removed
