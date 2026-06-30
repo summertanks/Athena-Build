@@ -9755,7 +9755,7 @@ def test_bump_is_canonical_home_for_version_logic():
     import bump
     import utils
     for _name in ('strip_nmu_suffix', 'strip_nmu_from_deb', 'transpose',
-                  'transposed_version', 'transpose_deb', 'asg_next_n',
+                  'transposed_version', 'transpose_deb', 'pristine_base',
                   'decide_patch_bump_count', 'normalize_repo_filename',
                   'find_matching_artifact', 'parse_asg_suffix'):
         assert getattr(utils, _name) is getattr(bump, _name), (
@@ -10149,6 +10149,134 @@ def test_transpose_deb_round_trip():
             ['dpkg-deb', '-f', _r['new_path'], 'X-Athena-Upstream-Version'],
             check=True, capture_output=True, text=True).stdout.strip()
         assert _xup == '1:2.39.5-0+deb12u3', _xup
+
+
+def _build_test_deb(_tmp, pkg, version, fname):
+    """Build a minimal .deb with the given Package/Version under _tmp; return
+    its path.  Shared by the transpose coverage tests."""
+    import subprocess
+    _work = os.path.join(_tmp, 'src_' + fname)
+    os.makedirs(os.path.join(_work, 'DEBIAN'))
+    os.makedirs(os.path.join(_work, 'usr', 'lib'))
+    with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as _fh:
+        _fh.write(f'Package: {pkg}\nVersion: {version}\n'
+                  'Architecture: amd64\nMaintainer: T <t@l>\n'
+                  'Description: transpose coverage\n')
+    with open(os.path.join(_work, 'usr', 'lib', 'p'), 'w') as _fh:
+        _fh.write('x\n')
+    _p = os.path.join(_tmp, fname)
+    subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _p],
+                   check=True, capture_output=True)
+    return _p
+
+
+def _have_dpkg_deb():
+    import subprocess
+    try:
+        subprocess.run(['dpkg-deb', '--version'], check=True,
+                       capture_output=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def test_transpose_deb_tunnel_keeps_binnmu_and_rewrites_trailing_deb():
+    """Coverage gap (audit #15): the TUNNEL call shape of transpose_deb (no
+    patch_level / force_bn / sibling_names — the firmware/microcode path).
+      (a) a tunnelled binNMU `X+debNuK+bN`: the trailing token is a binNMU, so
+          the transpose is a NO-OP on the EMBEDDED +deb and the frozen +bN
+          inter-binary pin is KEPT (status 'unchanged').
+      (b) a tunnel whose trailing token IS a `+debNuK` rewrites to `+asg<R>uK`.
+    A trailing-token-regex regression would silently corrupt a frozen +bN pin
+    on a real production path; this is the highest-value of the three gaps."""
+    import subprocess
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import transpose_deb
+    if not _have_dpkg_deb():
+        print("SKIP test_transpose_deb_tunnel_keeps_binnmu (no dpkg-deb)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        # (a) tunnelled binNMU — unchanged, +b1 AND embedded +deb12u3 retained.
+        _a = _build_test_deb(_tmp, 'shim-signed', '1.0-2+deb12u3+b1',
+                             'shim-signed_1.0-2+deb12u3+b1_amd64.deb')
+        _ra = transpose_deb(_a, 'asg', 1)               # tunnel shape
+        assert _ra['status'] == 'unchanged', _ra
+        _va = subprocess.run(['dpkg-deb', '-f', _ra['new_path'], 'Version'],
+                             check=True, capture_output=True,
+                             text=True).stdout.strip()
+        assert _va == '1.0-2+deb12u3+b1', _va
+        assert (os.path.basename(_ra['new_path'])
+                == 'shim-signed_1.0-2+deb12u3+b1_amd64.deb'), _ra['new_path']
+        # (b) trailing +debNuK rewrites to +asg<R>uK.
+        _b = _build_test_deb(_tmp, 'shim-signed', '1.0-2+deb12u3',
+                             'shim-signed_1.0-2+deb12u3_amd64.deb')
+        _rb = transpose_deb(_b, 'asg', 1)
+        assert _rb['status'] == 'rewritten', _rb
+        assert _rb['version'] == '1.0-2+asg1u3', _rb
+        assert (os.path.basename(_rb['new_path'])
+                == 'shim-signed_1.0-2+asg1u3_amd64.deb'), _rb['new_path']
+
+
+def test_transpose_fork_athena_version_is_noop():
+    """Coverage gap (audit #16): a fork version (Model A — changelog-verbatim,
+    ending +athenaN with an EMBEDDED +deb before it) must pass through transpose
+    unchanged: no trailing +debNuK, so no rewrite, and a faithful (was_patched=
+    False) build adds no +asg / +asg1u0+p1.  Pinned at the pure-transpose level
+    AND end-to-end through transpose_deb (the per-binary transform
+    _normalize_built_artifacts runs)."""
+    import subprocess
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    # (a) pure transpose: the embedded +deb followed by +athenaN is left alone.
+    assert utils.transpose('12.4+deb12u14+athena1', 'asg', 1) == \
+        '12.4+deb12u14+athena1'
+    assert utils.transpose('12.4+athena2', 'asg', 1) == '12.4+athena2'
+    # (b) end-to-end on a fork .deb (faithful build): filename + control Version
+    # stay +athena1 — no +asg, no +asg1u0+p1.
+    if not _have_dpkg_deb():
+        print("SKIP test_transpose_fork_athena_version_is_noop (no dpkg-deb)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _f = _build_test_deb(
+            _tmp, 'athena-base-files', '12.4+deb12u14+athena1',
+            'athena-base-files_12.4+deb12u14+athena1_amd64.deb')
+        _r = utils.transpose_deb(_f, 'asg', 1)          # patch_level=0 (faithful)
+        assert _r['status'] == 'unchanged', _r
+        _v = subprocess.run(['dpkg-deb', '-f', _r['new_path'], 'Version'],
+                            check=True, capture_output=True,
+                            text=True).stdout.strip()
+        assert _v == '12.4+deb12u14+athena1', _v
+        assert (os.path.basename(_r['new_path'])
+                == 'athena-base-files_12.4+deb12u14+athena1_amd64.deb'), \
+            _r['new_path']
+
+
+def test_restamp_sibling_pins_force_bn_branch():
+    """Coverage gap (audit #17): the force-binNMU branch of _restamp_sibling_pins
+    (only the +p1 patch tail was covered).  A force build (force_bn set) restamps
+    every same-source sibling `=` pin (already transposed) with the +bN tail —
+    anchored to +asg<R>u0 on a pristine base — while a non-sibling pin is left
+    untouched.  Note: bn_bump_count is only ever 0 at runtime today, so the
+    force path is shipped-but-inert; this pins the wiring."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump
+    _content = ('Depends: libX (= 1.0-2+asg1u3), libY (= 1.0-2), '
+                'other (= 1.0-2+asg1u3)\n')
+    # force_bn=1, patch_level=0
+    _out = bump._restamp_sibling_pins(
+        _content, {'libX', 'libY'}, 0, 1, 'asg', 1)
+    assert 'libX (= 1.0-2+asg1u3+b1)' in _out, _out     # asg marker → +b1
+    assert 'libY (= 1.0-2+asg1u0+b1)' in _out, _out     # pristine → u0 anchor
+    assert 'other (= 1.0-2+asg1u3)' in _out, _out       # non-sibling untouched
+    # combined patch + force: +pP then +bN, in that order.
+    _out2 = bump._restamp_sibling_pins(
+        'Depends: libX (= 1.0-2+asg1u3)\n', {'libX'}, 2, 1, 'asg', 1)
+    assert 'libX (= 1.0-2+asg1u3+p2+b1)' in _out2, _out2
+    # no patch + no force = no-op (returns content unchanged).
+    assert bump._restamp_sibling_pins(
+        _content, {'libX'}, 0, None, 'asg', 1) == _content
 
 
 def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
@@ -26404,31 +26532,6 @@ def test_comp03_buildcontainer_init_sweeps_build_stage_survivors():
 # UPD-01 step 3 — build-side stamping + check_build matching + Guard B
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_highest_asg_update_reads_remote_ledger():
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import highest_asg_update
-    pub = ['3.0.15-1', '3.0.15-1+asg1u1', '3.0.15-1+asg1u2',
-           '3.0.16-1+asg1u1', '3.0.15-1+asg2u1']
-    assert highest_asg_update(pub, '3.0.15-1', 1) == 2   # u1,u2 at R=1
-    assert highest_asg_update(pub, '3.0.15-1', 2) == 1   # only asg2u1 at R=2
-    assert highest_asg_update(pub, '3.0.16-1', 1) == 1
-    assert highest_asg_update([], '3.0.15-1', 1) == 0
-    assert highest_asg_update(['3.0.15-1'], '3.0.15-1', 1) == 0   # pristine only
-
-
-def test_asg_next_n_is_per_file_and_cumulative():
-    """asg_next_n = highest published +1, derived PER FILE (per the binary's
-    own ledger entry) so a file updated more often carries a higher N; resets
-    per release R."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import asg_next_n
-    assert asg_next_n([], '3.0.15-1', 1) == 1                       # first → u1
-    assert asg_next_n(['3.0.15-1+asg1u1'], '3.0.15-1', 1) == 2      # u1 → u2
-    assert asg_next_n(['3.0.15-1+asg1u1', '3.0.15-1+asg1u2'],
-                      '3.0.15-1', 1) == 3                           # cumulative
-    assert asg_next_n(['3.0.15-1+asg1u1'], '3.0.15-1', 2) == 1      # R differs
-
-
 def test_virtual_arch_gate_dpkg_table_semantics():
     """virtual_build._binary_active_for_arch delegates to dpkg's
     DpkgArchTable.matches_architecture — pins the two delta families the
@@ -28456,19 +28559,26 @@ def test_generate_top_release_avoids_self_reference_via_tempfile():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_needs_bump_build_per_file_exact_un():
-    """_needs_bump_build: a same-base re-spin (source version strips smaller)
-    is a bump-target only while its EXACT current-generation +asg<R>u<N> file
-    is absent — per file, and not satisfied by a stale older +asg.  A clean
-    new-base source is never a target."""
+def test_needs_bump_build_predicts_transpose_filename():
+    """_needs_bump_build under the content-order scheme: the expected filename
+    is INTRINSIC — the binary's pristine base + the source's transposed update
+    marker (uniform K across the source) + our patch level — exactly what the
+    stamper writes.  The published ledger is NOT consulted; a stale older +asg
+    on disk does not satisfy the current generation; a clean new base is never
+    a target."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build  # noqa: F401
     from build import BuildSession
+    import utils as _u
     with tempfile.TemporaryDirectory() as _tmp:
+        _log = os.path.join(_tmp, 'log')
+        _bl = os.path.join(_log, 'build')
+        os.makedirs(_bl)
         _sess = BuildSession.__new__(BuildSession)
 
         class _Cfg:
             build_version = '1'
+            dir_log = _log
             def deb_dest_for_filename(self, f, component='main'):
                 return _tmp
         _sess.config = _Cfg()
@@ -28482,31 +28592,95 @@ def test_needs_bump_build_per_file_exact_un():
 
         # (1) clean new base (strip is a no-op) → never a bump-target
         _sess._predicted_files_for_source = lambda n: ['foo_1.3-1_amd64.deb']
-        assert _sess._needs_bump_build('foo', _Src('1.3-1'), {}, 1) is False
+        assert _sess._needs_bump_build('foo', _Src('1.3-1'), 1) is False
 
-        # (2) security re-spin, expected u1 absent → target
+        # (2) security re-spin +deb1u1 → expected intrinsic +asg1u1; absent → target
         _sess._predicted_files_for_source = lambda n: ['foo_1.2-3_amd64.deb']
-        _delta = _Src('1.2-3+deb1u1')        # strips to 1.2-3 (same base)
-        assert _sess._needs_bump_build('foo', _delta, {}, 1) is True
-        # plant the EXACT u1 → no longer a target (idempotent)
-        _plant('foo_1.2-3+asg1u1_amd64.deb')
-        assert _sess._needs_bump_build('foo', _delta, {}, 1) is False
+        _delta = _Src('1.2-3+deb1u1')        # strips to 1.2-3, K=1
+        assert _sess._needs_bump_build('foo', _delta, 1) is True
+        _plant('foo_1.2-3+asg1u1_amd64.deb')                 # plant the exact gen
+        assert _sess._needs_bump_build('foo', _delta, 1) is False
 
-        # (3) cumulative + exact-uN: ledger already at u1 → need u2; the
-        # on-disk u1 must NOT satisfy the u2 check (exact os.path.isfile, not
-        # find_matching_artifact).
-        _ledger = {'foo': ['1.2-3+asg1u1']}
-        assert _sess._needs_bump_build('foo', _delta, _ledger, 1) is True
+        # (3) a NEWER upstream re-spin +deb1u2 (K=2) expects +asg1u2; the stale
+        # on-disk u1 must NOT satisfy it (exact check, ledger-independent).
+        _delta2 = _Src('1.2-3+deb1u2')
+        assert _sess._needs_bump_build('foo', _delta2, 1) is True
         _plant('foo_1.2-3+asg1u2_amd64.deb')
-        assert _sess._needs_bump_build('foo', _delta, _ledger, 1) is False
+        assert _sess._needs_bump_build('foo', _delta2, 1) is False
 
-        # (4) per-file divergence: foo→u2 present, foo-data→u5 missing → target
+        # (4) uniform K across a source's binaries: both expect +asg1u1 (same
+        # source suffix); one present, one missing → still a target.
         _sess._predicted_files_for_source = lambda n: [
             'foo_1.2-3_amd64.deb', 'foo-data_1.2-3_amd64.deb']
-        _led2 = {'foo': ['1.2-3+asg1u1'], 'foo-data': ['1.2-3+asg1u4']}
-        assert _sess._needs_bump_build('foo', _delta, _led2, 1) is True
-        _plant('foo-data_1.2-3+asg1u5_amd64.deb')   # each at its OWN next N
-        assert _sess._needs_bump_build('foo', _delta, _led2, 1) is False
+        assert _sess._needs_bump_build('foo', _delta, 1) is True
+        _plant('foo-data_1.2-3+asg1u1_amd64.deb')
+        assert _sess._needs_bump_build('foo', _delta, 1) is False
+
+        # (5) a PATCHED re-spin: the build record's patch level makes the
+        # expected filename +asg1u1+p1 — read from the prior record, not minted.
+        _sess._predicted_files_for_source = lambda n: ['bar_1.2-3_amd64.deb']
+        _rec = _u.new_build_record(package='bar',
+                                   intended_version='1.2-3+deb1u1',
+                                   patch_set_hash='deadbeef',
+                                   started='2026-06-29T00:00:00Z')
+        _rec['patch_bump_count'] = 1
+        _rec.update({'phase': 'done', 'status': 'PASS'})
+        _u.write_build_record(_bl, _rec)
+        assert _sess._needs_bump_build('bar', _delta, 1) is True
+        _plant('bar_1.2-3+asg1u1+p1_amd64.deb')
+        assert _sess._needs_bump_build('bar', _delta, 1) is False
+
+
+def test_needs_bump_build_shim_signed_uses_binary_own_version():
+    """Regression (audit #6): _needs_bump_build must predict each binary's
+    filename from the binary's OWN upstream version (like the normalizer and
+    virtual_build), NOT source.pristine + the SOURCE's suffix.  For shim-signed
+    the binary's trailing marker (~deb12u1, after the embedded +15.8-1) differs
+    from the source suffix (+deb12u1), so the source-suffix reconstruction
+    predicts +asg (wrong SIGN) and never matches the ~asg file the build
+    actually writes — an infinite-rebuild risk.  With the binary's own version
+    the predicted file is the ~asg one the normalizer produces, so a present
+    file means no rebuild."""
+    import sys
+    import types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        _log = os.path.join(_tmp, 'log')
+        os.makedirs(os.path.join(_log, 'build'))
+        _sess = BuildSession.__new__(BuildSession)
+
+        class _Cfg:
+            build_version = '1'
+            dir_log = _log
+
+            def deb_dest_for_filename(self, f, component='main'):
+                return _tmp
+        _sess.config = _Cfg()
+
+        class _BinPkg:
+            def __init__(self, v):
+                self.version = v
+        # The binary's OWN upstream version carries a TRAILING ~deb12u1 (after
+        # the embedded +15.8-1); the source's is a trailing +deb12u1.
+        _sess.dep_tree = types.SimpleNamespace(selected_pkgs={
+            'shim-signed': _BinPkg('1.44~1+deb12u1+15.8-1~deb12u1')})
+        _sess.udeb_dep_tree = None
+        # The predicted filename carries the binary's PRISTINE base.
+        _sess._predicted_files_for_source = lambda n: [
+            'shim-signed_1.44~1+deb12u1+15.8-1_amd64.deb']
+
+        class _Src:
+            version = '1.44~1+deb12u1'         # source's own (trailing +deb12u1)
+
+        assert _sess._needs_bump_build('shim-signed', _Src(), 1) is True
+        # Plant the ~asg file the normalizer actually writes (NOT +asg).
+        open(os.path.join(
+            _tmp, 'shim-signed_1.44~1+deb12u1+15.8-1~asg1u1_amd64.deb'),
+            'w').close()
+        # Present → no rebuild.  The buggy +asg predictor would look for the
+        # wrong-signed name and still report True here.
+        assert _sess._needs_bump_build('shim-signed', _Src(), 1) is False
 
 
 def test_audit_state_reclassifies_security_respin_as_needs_bump():
@@ -28525,26 +28699,26 @@ def test_audit_state_reclassifies_security_respin_as_needs_bump():
 
     # 'ok' + bump due + IN workload → 'needs_bump'
     _sess._source_state = lambda p, s: 'ok'
-    _sess._needs_bump_build = lambda p, s, lg, rl: True
-    assert _sess._audit_state('apache2', _src, {}, 1, _wl) == 'needs_bump'
+    _sess._needs_bump_build = lambda p, s, rl: True
+    assert _sess._audit_state('apache2', _src, 1, _wl) == 'needs_bump'
 
     # bump due but NOT in workload (adopted ~debNuN that didn't change) →
     # stays 'ok' — the 178-false-flag regression guard
-    assert _sess._audit_state('glibc', _src, {}, 1, _wl) == 'ok'
+    assert _sess._audit_state('glibc', _src, 1, _wl) == 'ok'
 
     # 'ok' but NO bump due → stays 'ok'
-    _sess._needs_bump_build = lambda p, s, lg, rl: False
-    assert _sess._audit_state('apache2', _src, {}, 1, _wl) == 'ok'
+    _sess._needs_bump_build = lambda p, s, rl: False
+    assert _sess._audit_state('apache2', _src, 1, _wl) == 'ok'
 
     # a hard state is NEVER reclassified, even if a bump would be due
     _sess._source_state = lambda p, s: 'needs_build'
-    _sess._needs_bump_build = lambda p, s, lg, rl: True
-    assert _sess._audit_state('apache2', _src, {}, 1, _wl) == 'needs_build'
+    _sess._needs_bump_build = lambda p, s, rl: True
+    assert _sess._audit_state('apache2', _src, 1, _wl) == 'needs_build'
 
     # release=None (non-integer VERSION) → bump check skipped, returns 'ok'
     _sess._source_state = lambda p, s: 'ok'
-    _sess._needs_bump_build = lambda p, s, lg, rl: True
-    assert _sess._audit_state('apache2', _src, {}, None, _wl) == 'ok'
+    _sess._needs_bump_build = lambda p, s, rl: True
+    assert _sess._audit_state('apache2', _src, None, _wl) == 'ok'
 
 
 def test_preflight_stamp_invariant_roundtrips_and_flags_bad_version():
@@ -29176,10 +29350,11 @@ def test_cache_build_gates_on_snapshot_pins():
 def test_source_build_autodetects_update_mode():
     """source build self-detects update mode (gotcha G): a subset/bare call
     routes to _do_update_build when a delta is pending; _do_update_build uses
-    the published→current diff + the manifest ledger, and rebuilds WITHOUT
-    blanket force — the loaded ledger makes the per-source build path bump-
-    aware (already-built skipped; same-base re-spins rebuilt as bump-targets).
-    COMP-03 Phase 4 extracted the per-source unit into _build_one_source."""
+    the published→current diff, and rebuilds WITHOUT blanket force — the
+    per-source build path is bump-aware (already-built skipped; same-base
+    re-spins rebuilt as bump-targets, their expected filename derived intrinsically
+    by transpose).  COMP-03 Phase 4 extracted the per-source unit into
+    _build_one_source."""
     import re
     _body = _session_source()
     # Update-mode DETECTION moved into the shared _resolve_build_workload helper
@@ -29210,8 +29385,6 @@ def test_source_build_autodetects_update_mode():
     _u = re.search(r'def _do_update_build\(self.*?(?=\n    def )', _body, re.DOTALL)
     _ub = _u.group(0)
     assert '_workload_since_snapshot(' in _ub, "update build diffs published→current"
-    assert 'published_ledger(' in _ub and 'asg_ledger' in _ub, (
-        "update build loads the manifest ledger for +asg stamping")
     assert "cmd_source_build('force'" not in _ub, (
         "update build must NOT blanket-force — it relies on bump-aware skipping")
     assert '_source_state(' in _ub and 'needs_build' in _ub, (
@@ -41517,6 +41690,9 @@ def main() -> int:
         test_strip_nmu_from_deb_round_trip,
         test_strip_nmu_from_deb_idempotent,
         test_transpose_deb_round_trip,
+        test_transpose_deb_tunnel_keeps_binnmu_and_rewrites_trailing_deb,
+        test_transpose_fork_athena_version_is_noop,
+        test_restamp_sibling_pins_force_bn_branch,
         test_audit_nmu_residue_skips_tunneled_sources,
         test_cmd_audit_nmu_residue_absorbed_into_cmd_audit,
         test_cmd_strip_repo_registered_in_repo_dispatcher,
@@ -42131,8 +42307,6 @@ def main() -> int:
         test_comp03_phase6_uses_cf_wait_first_completed_for_drain,
         test_comp03_phase6_empty_heavy_set_does_not_change_serial_for_heavy,
         # UPD-01 step 3: build-side stamping + check_build matching + Guard B
-        test_highest_asg_update_reads_remote_ledger,
-        test_asg_next_n_is_per_file_and_cumulative,
         # virtual-build chunk 1 — compute_post_build_versions pure helper
         # virtual-build chunk 2 — binary record synthesizer
         test_virtual_arch_gate_dpkg_table_semantics,
@@ -42205,7 +42379,8 @@ def main() -> int:
         test_generate_top_release_subprocess_text_mode_consistency,
         test_generate_top_release_avoids_self_reference_via_tempfile,
         # UPD-01 step 6: workload + Guard A preflight
-        test_needs_bump_build_per_file_exact_un,
+        test_needs_bump_build_predicts_transpose_filename,
+        test_needs_bump_build_shim_signed_uses_binary_own_version,
         test_audit_state_reclassifies_security_respin_as_needs_bump,
         test_preflight_stamp_invariant_roundtrips_and_flags_bad_version,
         # UPD-01 steps 7-8: snapshot commands + repo refresh orchestrator

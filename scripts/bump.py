@@ -30,7 +30,7 @@ See docs/bump-mechanics.md for the full rationale and the exact rules.
 import hashlib
 import os
 import re
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 # sha256 of the empty byte string — the patch_set_hash an UNPATCHED source
 # carries (utils.patch_set_hash([]) hashes "").  A record whose patch_set_hash
@@ -376,38 +376,6 @@ def find_matching_artifact(dst_dir: str,
     except OSError:
         pass
     return None
-
-
-def highest_asg_update(published_versions: 'List[str]',
-                       base: str, release: int) -> int:
-    """Highest N among already-published versions of the form
-    `base+asg<release>u<N>`.  `published_versions` is an iterable of version
-    strings published for THIS package (from the remote ledger).  Returns 0
-    when none match — so the next update is N+1 (first → +asg<release>u1).
-
-    Keyed on the pristine base + release: a different base, or a different
-    release R, does not count (R dominates ordering, so N resets per release).
-    """
-    _hi = 0
-    for _v in published_versions:
-        if pristine_base(_v) != base:
-            continue
-        _parsed = parse_asg_suffix(_v)
-        if _parsed is None:
-            continue
-        _r, _n = _parsed
-        if _r == release and _n > _hi:
-            _hi = _n
-    return _hi
-
-
-def asg_next_n(published_versions: 'List[str]',
-               base: str, release: int) -> int:
-    """The next +asg<release>u<N> number for a binary at pristine `base` —
-    one past the highest already published for THAT file (PER-FILE, from the
-    ledger), so a binary updated more often than its siblings carries a higher
-    N.  First update for a base/release → 1."""
-    return highest_asg_update(published_versions, base, release) + 1
 
 
 def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
