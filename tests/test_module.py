@@ -24311,6 +24311,50 @@ def test_api01_readers_index_get_and_tamper():
         assert readers.valid_package_name('libzstd')
 
 
+def test_webapi_mirror_state_reads_signed_mirror_conf_not_legacy():
+    """Regression (audit #13): webapi mirror_state reads the authoritative
+    HMAC-signed mirror.conf (via mirror.load_mirror_conf) — a mirror
+    registered ONLY in mirror.conf is visible, a leftover stale legacy
+    mirror.<name>.state is ignored, and the verify status is surfaced.  And
+    the read is side-effect-free: querying a box with no mirror.conf must NOT
+    create one (migrate=False)."""
+    import sys
+    import types
+    import json as _json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror
+    from webapi import readers
+    with tempfile.TemporaryDirectory() as _td:
+        _cfgdir = os.path.join(_td, 'config')
+        os.makedirs(_cfgdir)
+        _coord = os.path.join(_td, 'coord')
+        os.makedirs(_coord)
+        # shim with only dir_config — mirror derives the HMAC key dir from its
+        # parent, exactly as the webapi reader's shim does, so save+read agree.
+        _cfg = types.SimpleNamespace(dir_config=_cfgdir)
+        _doc = mirror._empty_mirror_doc()
+        _doc['mirrors']['peerX'] = {'role': 'peer', 'url': 'http://x.test'}
+        assert mirror.save_mirror_conf(_cfg, _doc)
+        # stale legacy state file that must be IGNORED post-migration
+        with open(os.path.join(_cfgdir, 'mirror.staleY.state'), 'w') as _fh:
+            _json.dump({'role': 'stale'}, _fh)
+
+        _out = readers.mirror_state(_cfgdir, _coord)
+        assert _out['mirror_conf_status'] == 'ok', _out
+        assert 'peerX' in _out['mirrors'], "mirror.conf-only entry invisible"
+        assert 'staleY' not in _out['mirrors'], "stale legacy .state leaked"
+
+    # No mirror.conf at all -> status 'missing', and the read must not write.
+    with tempfile.TemporaryDirectory() as _td2:
+        _cfgdir2 = os.path.join(_td2, 'config')
+        os.makedirs(_cfgdir2)
+        _out2 = readers.mirror_state(_cfgdir2, _td2)
+        assert _out2['mirror_conf_status'] == 'missing', _out2
+        assert _out2['mirrors'] == {}
+        assert not os.path.exists(os.path.join(_cfgdir2, 'mirror.conf')), (
+            "read-only mirror_state must not create mirror.conf (migrate=False)")
+
+
 def test_api01_http_endpoints_auth_and_payloads():
     """API-01 endpoints via TestClient: 401 without/with-wrong key, 200
     payloads for state/builds/build, 404 absent, 400 invalid name.
@@ -41022,6 +41066,7 @@ def main() -> int:
         # API-01: HTTP API (chunk 1 — auth + read endpoints)
         test_api01_key_lifecycle,
         test_api01_readers_index_get_and_tamper,
+        test_webapi_mirror_state_reads_signed_mirror_conf_not_legacy,
         test_api01_http_endpoints_auth_and_payloads,
         test_api01_artifact_tail_windowing_and_guards,
         test_api01_progress_aggregate,
