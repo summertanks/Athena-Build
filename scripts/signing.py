@@ -333,16 +333,23 @@ def verify_key(config) -> Tuple[bool, str]:
     issues, key with passphrase (which would prompt and fail in batch
     mode).  Doesn't catch: key compromised externally, key trusted by
     nobody — those need out-of-band evidence.
-    """
-    if get_key_info(config) is None:
-        return False, ("no signing key for "
-                       f"'{config.signing_key_uid}' — run "
-                       "generate_signing_key first")
-    if shutil.which('gpg') is None:
-        return False, "gpg not on PATH"
 
+    Resolves the UID of the key ACTUALLY on disk (actual_signing_uid,
+    which lists without a UID filter) rather than filtering by
+    ``config.signing_key_uid``.  A federation peer imports the origin's
+    tier-1 key, whose UID is the origin's and need not match this box's
+    (machine-local, often default) ``config.signing_key_uid`` — filtering
+    by the configured UID falsely reported the freshly-imported key as
+    unusable and aborted onboarding.
+    """
     home = signing_home(config)
-    uid = config.signing_key_uid
+    # actual_signing_uid returns None when there is no key, no homedir, or
+    # no gpg — all of which mean "not usable", reported as before.
+    uid = actual_signing_uid(config)
+    if uid is None:
+        return False, ("no signing key in "
+                       f"{home} — run generate_signing_key first")
+
     test_data = b'athena signing-key roundtrip test'
 
     # Two named tempfiles in the same dir; auto-cleaned on exit.

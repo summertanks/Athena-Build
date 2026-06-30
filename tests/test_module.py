@@ -15217,6 +15217,35 @@ def test_signing_generate_and_verify_roundtrip_real_gpg():
         assert ok, msg
 
 
+def test_signing_verify_key_uses_on_disk_uid_not_config_peer_onboarding():
+    """INTEGRATION regression (audit #8, signing.py:327-345): verify_key must
+    resolve the UID of the key ACTUALLY on disk (actual_signing_uid), not
+    config.signing_key_uid.  A federation peer imports the origin's tier-1 key
+    whose UID differs from the peer's machine-local default; the old code
+    filtered get_key_info + --local-user by the configured UID, so the
+    freshly-imported key was falsely reported unusable and onboarding aborted.
+    Generate a key under one UID, point config at a DIFFERENT UID, assert
+    verify_key still succeeds.  Skipped silently if gpg is absent."""
+    import shutil
+    import tempfile
+    if shutil.which('gpg') is None:
+        return
+    from signing import generate_key, verify_key
+    with tempfile.TemporaryDirectory() as tmp:
+        _home = os.path.join(tmp, 'gnupg')
+
+        class _GenCfg:                       # the origin: generates the key
+            dir_gnupg = _home
+            signing_key_uid = 'Origin Federation <origin@example.org>'
+        assert generate_key(_GenCfg(), _key_length=2048) is True
+
+        class _PeerCfg:                      # the peer: same homedir (imported
+            dir_gnupg = _home                # key), but a stale/default UID it
+            signing_key_uid = 'Athena Build <athena@local>'   # never updated
+        ok, msg = verify_key(_PeerCfg())
+        assert ok, msg                       # must NOT fail on UID mismatch
+
+
 # ─── CONF-02 phase 3: signing key gate at top of build_chroot ─────────────
 
 def _stub_session_for_signing_gate():
@@ -40477,6 +40506,7 @@ def main() -> int:
         test_format_gpg_time_empty_returns_default,
         test_format_gpg_time_garbage_returns_raw,
         test_signing_generate_and_verify_roundtrip_real_gpg,
+        test_signing_verify_key_uses_on_disk_uid_not_config_peer_onboarding,
         # CONF-02 phase 3: signing key gate at top of build_chroot
         test_signing_key_verified_flag_default_false,
         test_ensure_signing_key_verified_true_when_key_exists,
