@@ -24192,6 +24192,34 @@ def test_buildlog_writes_header_sections_and_files():
         assert 'END libzstd' in _txt
 
 
+def test_install_expand_or_group_resolution_is_deterministic():
+    """Regression (audit #27): _install_expand must resolve OR-groups
+    deterministically.  The frontier was seeded from a set, whose iteration
+    order over str keys is PYTHONHASHSEED-randomized; the OR-group
+    satisfied-check short-circuits on whatever is already in the closure, so an
+    unsorted frontier resolves a genuine OR-group (here P:`A|B`, Q:`B|A`) to a
+    different provider run-to-run — drifting the closure (and the mirror
+    download manifest).  Run the same closure under several PYTHONHASHSEED
+    values in fresh interpreters; the result must be identical."""
+    import sys
+    import subprocess
+    _script = (
+        'import sys; sys.path.insert(0, %r)\n'
+        'import build_closure as bc\n'
+        'bi = {"P": {"Depends": "A | B"}, "Q": {"Depends": "B | A"},'
+        ' "A": {}, "B": {}}\n'
+        'print(",".join(sorted(bc._install_expand(["P", "Q"], bi, {}))))\n'
+    ) % os.path.join(_ROOT, 'scripts')
+    _results = set()
+    for _seed in ('0', '1', '2', '3', '4', '5', '6', '7'):
+        _env = dict(os.environ, PYTHONHASHSEED=_seed)
+        _out = subprocess.run([sys.executable, '-c', _script], env=_env,
+                              capture_output=True, text=True, check=True)
+        _results.add(_out.stdout.strip())
+    assert _results == {'B,P,Q'}, (
+        f"non-deterministic OR-group closure across hash seeds: {_results}")
+
+
 def test_buildlog_write_never_raises_on_unwritable_dir():
     """OBS-04 load-bearing safety invariant: a logging IO failure MUST
     NOT propagate.  The 24-36h repo rebuild cannot be lost to a log write
@@ -41175,6 +41203,7 @@ def main() -> int:
         test_segregate_never_deletes_existing_published_deb,
         # OBS-04: exhaustive per-package build/tunnel log
         test_buildlog_writes_header_sections_and_files,
+        test_install_expand_or_group_resolution_is_deterministic,
         test_buildlog_write_never_raises_on_unwritable_dir,
         test_buildlog_write_encodes_utf8_under_ascii_locale,
         test_readfile_decodes_utf8_under_ascii_locale,

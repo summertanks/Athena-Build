@@ -91,7 +91,14 @@ def _install_expand(seeds: 'Iterable[str]', bin_index: dict,
     resolved within ``bin_index``.  Unknown seeds and unsatisfiable groups are
     silently skipped — this is a closure, not a validator."""
     _inset: 'Set[str]' = {s for s in seeds if s in bin_index}
-    _frontier: 'List[str]' = list(_inset)
+    # sorted(), not list(): set iteration order over str keys is
+    # PYTHONHASHSEED-randomized, and the OR-group satisfied-check below
+    # short-circuits on whatever is already in _inset — so an unsorted frontier
+    # makes a genuine OR-group (e.g. default-mta|mail-transport-agent) resolve
+    # to a different provider run-to-run, drifting the closure (and the mirror
+    # download manifest it feeds).  _pick is already deterministic
+    # (sorted(_providers)[0]); seeding sorted makes the whole traversal so.
+    _frontier: 'List[str]' = sorted(_inset)
     while _frontier:
         _n = _frontier.pop()
         _entry = bin_index.get(_n)
