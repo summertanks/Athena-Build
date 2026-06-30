@@ -3358,13 +3358,13 @@ def test_ux05b_atena_sudo_password_env_var_picked_up():
         _src = fh.read()
     # The constructor and for_iso factory both must read+pop the env var
     # before reaching for Prompt(PROMPT_PASSWORD, ...).
-    assert "_os.environ.pop('ATHENA_SUDO_PASSWORD'" in _src, (
+    assert "os.environ.pop('ATHENA_SUDO_PASSWORD'" in _src, (
         "UX-05b: ATHENA_SUDO_PASSWORD must be pop'd from os.environ "
         "(read + remove in one step so the env var doesn't leak to "
         "child subprocesses)")
     # Pop must happen TWICE (once per code path: __init__ + for_iso)
     assert _src.count(
-        "_os.environ.pop('ATHENA_SUDO_PASSWORD'") == 2, (
+        "os.environ.pop('ATHENA_SUDO_PASSWORD'") == 2, (
         "UX-05b: env-var pickup must be in BOTH BuildSystem.__init__ "
         "and BuildSystem.for_iso (the iso-only factory)")
 
