@@ -5972,6 +5972,7 @@ def _make_pool_dep_tree_stub():
             self.pre_depends = []
             self.recommends = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.breaks = breaks or []
             self.constraints_satisfied = True
         def __getitem__(self, k): return self._fields[k]
@@ -6066,6 +6067,7 @@ def test_validate_selection_skips_break_when_pool_extra():
             self.pre_depends = []
             self.recommends = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.breaks = breaks or []
             self.constraints_satisfied = True
         def __getitem__(self, k): return self._fields[k]
@@ -11632,6 +11634,7 @@ class _FakePkg:
         self.depends = [(d, '', '') for d in (depends or [])]
         self.pre_depends = []
         self.alt_depends = []
+        self.alt_pre_depends = []
         self.depends_on = []
         self.depended_by = []
 
@@ -11966,6 +11969,7 @@ def test_validate_selection_unversioned_provides_no_spurious_break():
             self.breaks = [[(n, v, op)] for n, v, op in breaks]
             self.conflicts = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.recommends = []
             # _provides: list of (name, version_str_or_None).  None
             # means "unversioned Provides" — explicit_provides_version
@@ -12018,6 +12022,7 @@ def test_validate_selection_versioned_provides_still_flagged():
             self.breaks = [[(n, v, op)] for n, v, op in breaks]
             self.conflicts = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.recommends = []
             self._provides = list(provides)  # [(name, version_str_or_None)]
             self.constraints_satisfied = True
@@ -12081,6 +12086,7 @@ def _sta18_make_dt():
             self.breaks = []
             self.conflicts = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.recommends = []
             self.constraints_satisfied = True
         def __getitem__(self, k): return self._fields[k]
@@ -13824,6 +13830,7 @@ def test_parse_dependency_reuses_lookahead_for_multi_version_same_name():
             self.pre_depends = []
             self.recommends = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.breaks = []
             self.constraints_satisfied = True
         def __getitem__(self, k): return self._fields[k]
@@ -21706,7 +21713,8 @@ class _ParseDepPkg:
     pull_recommends / installer_chroot tests) — different shape, kept
     separate to avoid namespace collisions on shared keyword args."""
     def __init__(self, name, ver='1.0', *, depends=None, pre_depends=None,
-                 recommends=None, alt_depends=None, provides=None):
+                 recommends=None, alt_depends=None, alt_pre_depends=None,
+                 provides=None):
         self._fields = {'Package': name, 'Version': ver}
         self.package = name
         self.version = ver
@@ -21714,6 +21722,7 @@ class _ParseDepPkg:
         self.pre_depends  = list(pre_depends  or [])
         self.recommends   = list(recommends   or [])
         self.alt_depends  = list(alt_depends  or [])
+        self.alt_pre_depends = list(alt_pre_depends or [])
         self.conflicts    = []
         self.breaks       = []
         self.replaces     = []
@@ -21858,6 +21867,26 @@ def test_parse_dependency_alt_deps_default_to_first_alternative():
     dt = _make_parse_dep_tree({'foo': [foo], 'a': [a], 'b': [b]})
     dt.parse_dependency('foo')
     # First alt picked.
+    assert 'a' in foo.depends_on
+    assert 'b' not in foo.depends_on
+
+
+def test_parse_dependency_resolves_or_grouped_pre_depends():
+    """Regression (audit #10): an OR-grouped Pre-Depends (`Pre-Depends: a | b`,
+    carried as alt_pre_depends) must be resolved through the SAME alternative-
+    selection loop as alt_depends — defaulting to the first alternative when
+    none is pre-selected — so its provider enters the closure.  Before the fix
+    parse_dependency never read alt_pre_depends, so an OR pre-dep whose
+    providers aren't otherwise pulled was silently dropped (and
+    validate_selection never flagged it either)."""
+    a = _ParseDepPkg('a', '1.0')
+    b = _ParseDepPkg('b', '1.0')
+    foo = _ParseDepPkg('foo', '1.0', alt_pre_depends=[
+        [('a', '', ''), ('b', '', '')]
+    ])
+    dt = _make_parse_dep_tree({'foo': [foo], 'a': [a], 'b': [b]})
+    dt.parse_dependency('foo')
+    # First alternative of the OR pre-dep is pulled (Debian convention).
     assert 'a' in foo.depends_on
     assert 'b' not in foo.depends_on
 
@@ -40834,6 +40863,7 @@ def main() -> int:
         test_parse_dependency_recommends_pulled_when_flag_on,
         test_parse_dependency_alt_deps_first_already_selected_wins,
         test_parse_dependency_alt_deps_default_to_first_alternative,
+        test_parse_dependency_resolves_or_grouped_pre_depends,
         # TEST-08: Mirror.with_snapshot properties
         test_mirror_with_snapshot_none_returns_self,
         test_mirror_with_snapshot_is_idempotent,
