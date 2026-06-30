@@ -861,11 +861,10 @@ class Cache:
                 # record landed.  Skip.
                 continue
             _fork_ver = max((_s.version for _s in _fork_sources), key=Version)
-            for _mirror_id, _up_ver in _entries:
-                if Version(_up_ver) >= Version(_fork_ver):
-                    _findings.append(
-                        (_name, str(_fork_ver), _mirror_id, _up_ver)
-                    )
+            for _mirror_id, _up_ver in self._dropped_entries_at_or_above_fork(
+                    _entries, _fork_ver):
+                _findings.append(
+                    (_name, str(_fork_ver), _mirror_id, _up_ver))
         if not _findings:
             return
         _msg_lines = [
@@ -880,6 +879,19 @@ class Cache:
         )
         logger.warning(_msg)
         tui.console.print(_msg)
+
+    @staticmethod
+    def _dropped_entries_at_or_above_fork(
+        entries: 'List[Tuple[str, str]]', fork_ver: object,
+    ) -> 'List[Tuple[str, str]]':
+        """The (mirror_id, upstream_ver) drops whose upstream version is >= the
+        fork's version — the offending entries for BOTH the advisory
+        _audit_fork_source_drift and the fatal _verify_no_fork_collisions gate,
+        so the at-or-above comparison lives in one place.  fork_ver may be a
+        version str (source audit) or a Version (collision gate)."""
+        _fork = Version(str(fork_ver))
+        return [(_mirror_id, _up_ver) for _mirror_id, _up_ver in entries
+                if Version(_up_ver) >= _fork]
 
     def _verify_no_fork_collisions(self) -> bool:
         """End-of-build gate: for every upstream record dropped by the
@@ -926,11 +938,10 @@ class Cache:
                     # — no fork record means no comparison possible.
                     continue
                 _fork_ver = max(_fork_versions, key=Version)
-                for _mirror_id, _up_ver in _entries:
-                    if Version(_up_ver) >= Version(_fork_ver):
-                        collisions.append(
-                            (kind, _name, str(_fork_ver), _mirror_id, _up_ver)
-                        )
+                for _mirror_id, _up_ver in self._dropped_entries_at_or_above_fork(
+                        _entries, _fork_ver):
+                    collisions.append(
+                        (kind, _name, str(_fork_ver), _mirror_id, _up_ver))
 
         _check('deb',  self._upstream_collisions,      self.package_hashtable)
         _check('udeb', self._upstream_udeb_collisions, self.udeb_hashtable)

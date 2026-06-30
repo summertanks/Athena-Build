@@ -110,27 +110,47 @@ def resolve_closure(
     _closure: Set[str] = set()
     _pending: Set[str] = {_pull_name(_s) for _s in seeds}
 
+    # Cache each package's parsed OR groups (the parse is pure) and accumulate
+    # the distinct groups of packages as they enter the closure, so Pass B
+    # re-checks the accumulated group set rather than re-scanning + re-parsing
+    # the whole closure every outer iteration.  Adding packages only ever
+    # SATISFIES groups, never unsatisfies, so the accumulated-set result is
+    # identical to the original full rescan.
+    _groups_cache: 'Dict[str, Tuple[Tuple[str, ...], ...]]' = {}
+
+    def _groups_for(_pkg: str) -> 'Tuple[Tuple[str, ...], ...]':
+        _cached = _groups_cache.get(_pkg)
+        if _cached is None:
+            _cached = tuple(_or_groups(deps.get(_pkg, [])))
+            _groups_cache[_pkg] = _cached
+        return _cached
+
+    _all_groups: 'Set[Tuple[str, ...]]' = set()
+
     while True:
         # ── Pass A: hard-dependency fixpoint (OR groups deferred) ──────────
         _frontier = set(_pending)
         _pending = set()
+        _newly_added: Set[str] = set()
         while _frontier:
             _pkg = _frontier.pop()
             if _pkg in _closure:
                 continue
             _closure.add(_pkg)
+            _newly_added.add(_pkg)
             for _d in deps.get(_pkg, []):
                 if isinstance(_d, str):
                     _r = _pull_name(_d)
                     if _r not in _closure:
                         _frontier.add(_r)
+        for _pkg in _newly_added:
+            _all_groups.update(_groups_for(_pkg))
 
-        # ── Pass B: resolve OR groups against the SETTLED closure ──────────
-        _unsat: Set[Tuple[str, ...]] = set()
-        for _pkg in _closure:
-            for _group in _or_groups(deps.get(_pkg, [])):
-                if not any(_satisfied(_a, _closure) for _a in _group):
-                    _unsat.add(_group)
+        # ── Pass B: which accumulated OR groups are still unsatisfied? ─────
+        _unsat: Set[Tuple[str, ...]] = {
+            _group for _group in _all_groups
+            if not any(_satisfied(_a, _closure) for _a in _group)
+        }
         if not _unsat:
             return _closure
 
