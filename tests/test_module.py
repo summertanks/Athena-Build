@@ -16714,6 +16714,76 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_resolve_closure_accepts_generator_seeds():
+    """Regression (audit #148): resolve_closure consumes `seeds` twice
+    (_infer_real + the _pending comprehension), so a one-shot generator was
+    exhausted by the first pass and yielded an empty closure on the default
+    (real_pkgs=None) path. Materialize seeds once."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import or_resolve
+    _out = or_resolve.resolve_closure((_s for _s in ['a']), {'a': []})
+    assert _out == {'a'}, _out
+
+
+def test_build_patch_list_sorts_by_full_filename():
+    """Regression (audit #23): build.py's patch_list must sort by the full
+    filename (like buildcontainer), not x[:5] — a 5-char-prefix tie feeds an
+    order-sensitive hash and flaps it, forcing needless rebuilds."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    assert 'key=lambda x: x[:5]' not in inspect.getsource(build), (
+        "patch_list must sort by full filename, not a 5-char prefix")
+
+
+def test_format_gpg_time_survives_overflow_epoch():
+    """Regression (audit #181): a huge epoch (int out of time_t range) raises
+    OverflowError, not ValueError/OSError — format_gpg_time must degrade to the
+    raw string, not propagate."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from signing import format_gpg_time
+    _big = '9' * 30
+    assert format_gpg_time(_big) == _big          # must not raise
+
+
+def test_tasksel_sanitize_drops_control_chars():
+    """Regression (audit #184): _sanitize must banish non-printable ASCII
+    (tab/newline/NUL/control, ord < 32), not just ord > 126, before cdebconf
+    renders it."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tasksel_desc
+    _out = tasksel_desc._sanitize('a\tb\x07c\nd')
+    assert '\t' not in _out and '\x07' not in _out and '\n' not in _out, _out
+    assert _out == 'a b c d', _out
+
+
+def test_diag_installer_status_reads_latin1():
+    """Regression (audit #114): the status file must be read latin-1 (1:1
+    byte->codepoint) so the non-ASCII scan reports the true byte value, not
+    U+FFFD from a utf-8/errors='replace' read."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import diag_installer_status
+    assert "encoding='latin-1'" in inspect.getsource(diag_installer_status), (
+        "status file read must decode latin-1 for true byte values")
+
+
+def test_onboarding_jobs_warns_on_clamp():
+    """Regression (audit #144): the onboarding jobs prompt must surface a clamp
+    / non-int like `set jobs`, not silently adjust."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    assert 'jobs clamped to' in inspect.getsource(onboarding), (
+        "out-of-range jobs must be surfaced, not silently clamped")
+
+
 def test_publish_obsolescence_view_includes_deprecations():
     """Regression (audit #96): step 6c's supersession-obsolescence view must
     include the 6b deprecation claims, so a file just deprecated (ownership
@@ -42339,6 +42409,12 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_resolve_closure_accepts_generator_seeds,
+        test_build_patch_list_sorts_by_full_filename,
+        test_format_gpg_time_survives_overflow_epoch,
+        test_tasksel_sanitize_drops_control_chars,
+        test_diag_installer_status_reads_latin1,
+        test_onboarding_jobs_warns_on_clamp,
         test_publish_obsolescence_view_includes_deprecations,
         test_read_selection_state_distinguishes_transient_io_error,
         test_cli_quit_detection_keys_on_first_token,

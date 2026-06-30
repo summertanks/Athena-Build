@@ -710,7 +710,13 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             try:
                 if os.path.exists(_patch_path):
                     _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
-                    _src.patch_list = sorted(_patch_files, key=lambda x: x[:5])
+                    # Sort by the FULL filename (not x[:5]) so this matches
+                    # buildcontainer's _live_patch_list sort exactly — the
+                    # order feeds an order-sensitive patch_set_hash, so a [:5]
+                    # tie between two patches sharing a 5-char prefix (a normal
+                    # numbered-series pattern) would flap the hash run-to-run
+                    # and force needless rebuilds.
+                    _src.patch_list = sorted(_patch_files)
                     logger.info(f"[patch] {_pkg} {_ver}: {_patch_files}")
 
                     # soft DEP-3 header check on each discovered patch. Missing fields → log-tab warning only;
