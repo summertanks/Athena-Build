@@ -123,8 +123,21 @@ class CohortResolverMixin(SessionState):
         _cache = getattr(self, 'cache', None)
         _src = None
         if _cache is not None:
-            _cands = _cache.source_hashtable.get(src_name, [])
-            _src = _cands[0] if _cands else None
+            # Prefer the resolved source (the highest-version pick the closure
+            # actually selected), mirroring cmd_source/cmd_virtual; fall back
+            # to the highest-version cache candidate.  NEVER source_hashtable[0]
+            # — that is arbitrary cache-parse order and can be a non-selected
+            # version when a source coexists across snapshots (main + security
+            # + updates), drifting the enumerated binary set away from the one
+            # virtual_build predicts.
+            if self.dep_tree is not None:
+                _src = self.dep_tree.selected_srcs.get(src_name)
+            if _src is None and self.udeb_dep_tree is not None:
+                _src = self.udeb_dep_tree.selected_srcs.get(src_name)
+            if _src is None:
+                _cands = _cache.source_hashtable.get(src_name, [])
+                _src = (max(_cands, key=lambda s: s.version)
+                        if _cands else None)
         if _src is None:
             return self._tunnel_filenames_subset(src_name)
         _pl_idx = _vb._package_list_index(

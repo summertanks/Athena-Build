@@ -1136,6 +1136,53 @@ def test_tunnel_transposes_and_needs_no_ledger():
         "tunnel no longer needs the ledger (K is intrinsic)")
 
 
+def test_tunnel_filenames_prefers_resolved_source_not_parse_order():
+    """Regression (audit #14): _tunnel_filenames_for_source must enumerate the
+    RESOLVED source's binary set — dep_tree.selected_srcs first, else the
+    HIGHEST-version cache candidate — not source_hashtable[0] (arbitrary
+    cache-parse order).  When a source coexists across snapshots with a
+    differing binary set, _cands[0] could enumerate the wrong (non-selected)
+    set, drifting the tunnel set away from virtual_build's prediction."""
+    import sys
+    import types
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts', 'commands'))
+    import cohorts
+    import virtual_build
+    from debian.debian_support import Version
+
+    class _Src:
+        def __init__(self, ver, binaries):
+            self.version = Version(ver)
+            self.binary = binaries
+
+    _low = _Src('1.0', ['oldbin'])
+    _high = _Src('2.0', ['newbin'])
+
+    obj = cohorts.CohortResolverMixin.__new__(cohorts.CohortResolverMixin)
+    obj.dep_tree = types.SimpleNamespace(selected_srcs={}, selected_pkgs={})
+    obj.udeb_dep_tree = None
+    # source_hashtable in cache-PARSE order: low version first (the trap).
+    obj.cache = types.SimpleNamespace(source_hashtable={'foo': [_low, _high]})
+    obj.config = types.SimpleNamespace(
+        arch='amd64', build_profiles=frozenset(), dir_fork_source_repo=None)
+    obj._resolve_tunnel_filename = lambda b, e: f"{b}.deb"
+
+    with mock.patch.object(virtual_build, '_package_list_index',
+                           return_value={}), \
+         mock.patch.object(virtual_build, '_binary_active_for_arch',
+                           return_value=True), \
+         mock.patch.object(virtual_build, '_binary_active_under_profiles',
+                           return_value=True):
+        # (a) not in selected_srcs -> highest-version cache candidate wins,
+        #     NOT _cands[0] (the low version).
+        assert obj._tunnel_filenames_for_source('foo') == ['newbin.deb']
+        # (b) selected_srcs wins outright.
+        obj.dep_tree.selected_srcs = {'foo': _high}
+        assert obj._tunnel_filenames_for_source('foo') == ['newbin.deb']
+
+
 def test_sta33_build_depends_serialises_apt_pkg_profile_global():
     """STA-33: the apt_pkg Build-Profiles global set + every parse that
     reads it must run under a module lock so concurrent build workers
@@ -25646,6 +25693,7 @@ def test_tunnel_filenames_full_set_arch_profile_filtered():
 
     class _Src:
         package = 'fw'
+        version = '1'                     # real Source always carries .version
         binary = ['fw-common', 'fw-amd64-only', 'fw-arm-only',
                   'fw-doc', 'fw-udeb']
         package_list = [
@@ -40242,6 +40290,7 @@ def main() -> int:
         test_sta34_autorun_build_calls_source_build_bare_not_invalid_token,
         test_sta36_mirror_add_confirmation_declines_on_no,
         test_tunnel_transposes_and_needs_no_ledger,
+        test_tunnel_filenames_prefers_resolved_source_not_parse_order,
         test_sta33_build_depends_serialises_apt_pkg_profile_global,
         test_parse_source_build_args_recognises_indl_subset,
         test_cmd_source_build_indl_subset_rejected_in_dist_mode,
