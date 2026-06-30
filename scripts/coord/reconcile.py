@@ -546,5 +546,12 @@ def publish_halt_reason(coord_dir: str) -> Optional[str]:
     except FileNotFoundError:
         return None
     except OSError as _e:
+        # Fail CLOSED: the sentinel is present (some other OSError —
+        # permission, I/O error, it's a directory) but unreadable.  Returning
+        # None would mean "no halt → publish allowed", silently publishing
+        # past an active HALT.  Return a non-None reason so every caller
+        # (each refuses on any non-None) refuses; only a genuine absence
+        # (FileNotFoundError above) maps to None.
         logger.warning(f"publish_halt_reason: {_path}: {_e}")
-        return None
+        return (f"PUBLISH_HALT present but unreadable ({_e}) — "
+                "refusing to publish")

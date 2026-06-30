@@ -33775,6 +33775,26 @@ def test_coord_reconcile_publish_halt_round_trip():
         assert _back == 'test conflict: alpha vs beta'
 
 
+def test_publish_halt_reason_fails_closed_on_unreadable_sentinel():
+    """Regression (audit #99, reconcile.py:542-550): an unreadable PUBLISH_HALT
+    sentinel (present but open() raises a non-FileNotFoundError OSError) must
+    fail CLOSED — return a non-None reason so the publish caller refuses — not
+    return None ('no halt → publish allowed') and silently publish past an
+    active halt.  Only a genuine absence (FileNotFoundError) maps to None."""
+    _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        assert _r.publish_halt_reason(_td) is None            # absent → allowed
+        # Make the sentinel NAME a directory so open() raises IsADirectoryError
+        # — an OSError that is NOT FileNotFoundError.
+        os.makedirs(os.path.join(_td, _p.PUBLISH_HALT_FILENAME))
+        _reason = _r.publish_halt_reason(_td)
+        assert _reason is not None, (
+            "unreadable PUBLISH_HALT must fail closed (non-None) so callers "
+            "refuse — got None, which would allow publishing past an active "
+            "halt")
+        assert 'unreadable' in _reason.lower()
+
+
 def test_coord_reconcile_audit_local_orphan_detection():
     """A claim for a file absent from the pool surfaces as a WARN
     orphan finding."""
@@ -41197,6 +41217,7 @@ def main() -> int:
         test_coord_reconcile_detect_hash_conflicts_multi_binary_same_source_no_false_positive,
         test_coord_reconcile_detect_hash_conflicts_same_filename_diff_sha_is_critical,
         test_coord_reconcile_publish_halt_round_trip,
+        test_publish_halt_reason_fails_closed_on_unreadable_sentinel,
         test_coord_reconcile_audit_local_orphan_detection,
         test_coord_reconcile_audit_local_hash_mismatch_critical,
         test_coord_publish_retract_and_re_audit_collapses,
