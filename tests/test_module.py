@@ -16714,6 +16714,44 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_progress_rate_counts_only_completed_records():
+    """Regression (audit #213): the throughput rate window must count only
+    COMPLETED records — in-flight / failed mtimes inflated
+    completed_in_window and rate_per_hour."""
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    from webapi import readers
+    with tempfile.TemporaryDirectory() as _tmp:
+        for _pkg, _ph in (('a', 'done'), ('b', 'entry')):   # entry=in-flight
+            utils.write_build_record(_tmp, utils.new_build_record(
+                package=_pkg, intended_version='1', patch_set_hash=''))
+            utils.update_build_record(_tmp, _pkg, phase=_ph)
+        _doc = readers.progress(_tmp, window_s=3600)
+        assert _doc['completed_in_window'] == 1, _doc       # only 'a' (done)
+
+
+def test_tier3_coord_webapi_source_pins():
+    """Pins for Tier-3 fixes #72/#88/#205 where the behavioural path (a TUI
+    handler / gpg sign / an SSE generator) is disproportionate to drive."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.head as _h
+    import webapi as _w
+    from build import BuildSession
+    # #88: stage to temp + atomic replace (prior manifest survives a failure)
+    _hsrc = inspect.getsource(_h)
+    assert ('os.replace(_path_tmp, _path)'.replace('os.', '_os.') in _hsrc
+            and '_path_tmp' in _hsrc), '#88'
+    # #205: a final drain inside the terminal block before the end event
+    assert inspect.getsource(_w).count('while _sent < len(_out):') >= 2, '#205'
+    # #72: the force snapshot-select path also reconciles the build.conf pin
+    assert 'reconcile_snapshot_pin' in inspect.getsource(
+        BuildSession._snapshot_select_force), '#72'
+
+
 def test_local_mirror_release_arch_derived_from_debs():
     """Regression (audit #139): the local mirror Release Architectures line must
     reflect the .debs actually present (a non-amd64 host), not a hardcoded
@@ -25266,7 +25304,10 @@ def test_api01_progress_aggregate():
         assert _doc['records'] == 3 and _doc['remaining'] == 7
         assert _doc['phases'] == {'done': 1, 'failed': 1, 'entry': 1}
         assert _doc['failed'] == ['fail1']
-        assert _doc['rate_per_hour'] == 3.0          # 3 records in 1h window
+        # audit #213: rate counts only COMPLETED records (success), not the
+        # failed or in-flight ones — only done1 here.
+        assert _doc['completed_in_window'] == 1
+        assert _doc['rate_per_hour'] == 1.0
         assert _doc['eta_hours'] is not None
         assert _doc['in_flight'][0]['package'] == 'fly1'
         assert _doc['in_flight'][0]['log_bytes'] == len('building...\n')
@@ -28938,12 +28979,17 @@ def test_snapshot_select_force_accepts_backtrack():
             def get_response(self):
                 return next(_answers)
         _sp, _sc = cmd_snapshot.Prompt, build.console.print
+        _orig_recon = utils.reconcile_snapshot_pin
         cmd_snapshot.Prompt = _FakePrompt
         build.console.print = lambda *a, **k: None
+        # audit #72: the force path now mirrors the build.conf pin; the minimal
+        # _Cfg here doesn't carry that state, so stub the reconcile.
+        utils.reconcile_snapshot_pin = lambda cfg: None
         try:
             _sess.cmd_snapshot('select', 'force')
         finally:
             cmd_snapshot.Prompt, build.console.print = _sp, _sc
+            utils.reconcile_snapshot_pin = _orig_recon
         _st = utils.read_snapshot_state(_sess.config)
         assert _st['current'] == '20260514T083402Z', _st
         _h = utils.read_snapshot_history(_sess.config)
@@ -42544,6 +42590,8 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_progress_rate_counts_only_completed_records,
+        test_tier3_coord_webapi_source_pins,
         test_local_mirror_release_arch_derived_from_debs,
         test_tier3_cleanup_source_pins,
         test_progress_bar_set_max_clamps_to_current_value,

@@ -311,9 +311,17 @@ def progress(buildlog_dir: str, total: int = 0,
         try:
             with open(_path) as _fh:
                 _ph = json.load(_fh).get('phase', 'unknown')
-            _times.append(os.path.getmtime(_path))
         except (OSError, ValueError):
             _ph = 'unreadable'
+        # Only COMPLETED records contribute to the throughput rate window —
+        # in-flight / failed / unreadable record mtimes would otherwise inflate
+        # 'completed_in_window' and 'rate_per_hour'.
+        if (_ph not in _INFLIGHT_PHASES
+                and _ph not in ('failed', 'unreadable', 'unknown')):
+            try:
+                _times.append(os.path.getmtime(_path))
+            except OSError:
+                pass
         _phases[_ph] = _phases.get(_ph, 0) + 1
         if _ph == 'failed':
             _failed.append(_pkg)
