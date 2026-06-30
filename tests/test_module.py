@@ -15736,6 +15736,26 @@ def test_live_chroot_sources_list_is_self_contained():
     )
 
 
+def test_generate_system_configs_machine_id_stays_empty_for_first_boot():
+    """Regression (audit #48): /etc/machine-id must ship EMPTY so each clone
+    generates a unique id on first boot.  generate_system_configs must write it
+    empty AND must NOT pass --setup-machine-id to systemd-firstboot, which would
+    commit a concrete random id that disk_image.py rsyncs (-aHAX) verbatim into
+    every image — so all clones would share one machine-id (DHCP collisions,
+    journal/systemd identity bleed)."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import chroot
+    _src = inspect.getsource(chroot._ChrootMixin.generate_system_configs)
+    assert "_write_chroot_file('/etc/machine-id', '')" in _src, (
+        "machine-id must be written empty for first-boot generation")
+    # Match the quoted argv literal, not a prose mention in a comment.
+    assert "'--setup-machine-id'" not in _src, (
+        "systemd-firstboot must NOT pass --setup-machine-id — it overrides the "
+        "empty /etc/machine-id with a fixed id shared across every clone")
+
+
 # ─── UX-05 Path B: headless CLI backend (scripts/cli.py) ────────────────────
 
 def _fresh_cli():
@@ -40875,6 +40895,7 @@ def main() -> int:
         test_write_athena_apt_sources_accepts_file_scheme,
         test_write_athena_apt_sources_noop_when_no_mirrors_and_no_url,
         test_live_chroot_sources_list_is_self_contained,
+        test_generate_system_configs_machine_id_stays_empty_for_first_boot,
         # UX-05 Path B: headless CLI backend
         test_cli_print_writes_to_stdout,
         test_cli_severity_methods_write_to_stderr_with_tags,
