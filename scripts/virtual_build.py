@@ -914,23 +914,16 @@ def validate_against_build_records(
         def _binary_name(_fn: str) -> str:
             return _fn.split('_', 1)[0] if '_' in _fn else _fn
 
-        def _strip_asg(_v: str) -> str:
-            """Drop a trailing +asgRuN so the comparison ignores
-            asg-stamp lineage state (which evolves over time and is
-            an orthogonal layer to the synthesizer's name + base
-            prediction)."""
-            return utils.ASG_SUFFIX_RE.sub('', _v)
-
         def _filename_signature(_fn: str) -> 'Tuple[str, str, str]':
-            """(binary_name, asg-stripped pristine version, arch)
-            for cross-checking.  Eliminates asg-suffix from comparison
-            while keeping arch + pristine base — those ARE
-            synthesizer-controlled and any mismatch IS a real bug."""
+            """(binary_name, pristine version, arch) for cross-checking.
+            pristine_base already removes the +asg<R>u<N> lineage layer (and
+            every other redistribution marker), keeping arch + pristine base —
+            those ARE synthesizer-controlled and any mismatch IS a real bug."""
             _pr = utils.parse_deb_filename(_fn)
             if _pr is None:
                 return (_fn, '', '')
             _name, _ver, _arch, _ext = _pr
-            return (_name, _strip_asg(utils.pristine_base(_ver)), _arch)
+            return (_name, utils.pristine_base(_ver), _arch)
 
         _real_names: 'set[str]' = {_binary_name(_f) for _f in _real_files}
         _pred_names: 'set[str]' = {_binary_name(_f) for _f in _pred_files}

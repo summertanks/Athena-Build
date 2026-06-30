@@ -10,8 +10,8 @@ Mixin: `_DepDriftMixin` adds two methods to `BuildSystem`:
     raises if anything is unresolved or version-mismatched in
     selected_pkgs.
 
-Both methods access `self._dependencytree`, `self._dir_repo`, and
-`self.strip_build_version` — provided by `BuildSystem`.
+Both methods access `self._dependencytree`, `self._dir_repo_main`, and
+`self.normalize_repo_filename` — provided by `BuildSystem`.
 """
 
 import logging
@@ -70,10 +70,7 @@ class _DepDriftMixin:
     # that mixes this in).  Type-only stubs for mypy; no runtime
     # assignment here.
     _dependencytree: 'dependencytree.DependencyTree'
-    _dir_repo: str
     _dir_repo_main: str
-    _config: 'utils.BuildConfig'
-    strip_build_version: Callable[[str], str]
     normalize_repo_filename: Callable[[str], str]
 
     def _check_dep_drift(self):
