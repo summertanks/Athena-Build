@@ -16714,6 +16714,34 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_progress_bar_set_max_clamps_to_current_value():
+    """Regression (audit #196): set_max must not drop _max below the current
+    progress (_value) — that would make `filled` exceed the bar width and
+    overflow the render."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.widgets import ProgressBar
+    _pb = ProgressBar('test', maxvalue=100)
+    _pb._value = 80
+    _pb.set_max(10)                  # below current progress
+    assert _pb._max >= 80, _pb._max
+
+
+def test_tier3_tui_auth_source_pins():
+    """Pins for Tier-3 fixes #194 (SystemExit code) and #207 (auth retry poll)
+    where the behavioural path (the dispatch loop / a write race) is
+    disproportionate to exercise directly."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui.tui as _t
+    from webapi import auth as _a
+    # #194: a non-int, non-None exit code maps to 1 (failure), not 0.
+    assert '0 if _code is None else 1' in inspect.getsource(_t), '#194'
+    # #207: bounded retry poll for the winner's key, not a single re-read.
+    assert 'for _ in range(50)' in inspect.getsource(_a), '#207'
+
+
 def test_diag_audit_stanza_empty_value_only_required_fields():
     """Regression (audit #116): EMPTY-VALUE must flag only fields that REQUIRE a
     value (Package/Version/Description), not every empty field — an optional
@@ -42480,6 +42508,8 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_progress_bar_set_max_clamps_to_current_value,
+        test_tier3_tui_auth_source_pins,
         test_diag_audit_stanza_empty_value_only_required_fields,
         test_tier3_doc_source_pins,
         test_tier3_misc_source_pins,
