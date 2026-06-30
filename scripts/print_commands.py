@@ -682,6 +682,24 @@ def _iter_build_records(session) -> 'list[dict]':
     return _records
 
 
+def _build_time_rows(session) -> 'list[tuple[float, str, str, str]]':
+    """Normalized (elapsed_seconds, package, status, built_version) rows from
+    the verified build records — the single read+coercion path shared by
+    `print build-times` and the `print summary` build-times section (audit
+    #156).  elapsed is coerced to a non-negative float (0.0 when absent or
+    malformed)."""
+    _rows: 'list[tuple[float, str, str, str]]' = []
+    for _r in _iter_build_records(session):
+        _elapsed = _r.get('elapsed_seconds')
+        if not isinstance(_elapsed, (int, float)) or _elapsed < 0:
+            _elapsed = 0.0
+        _pkg = str(_r.get('package') or '?')
+        _status = str(_r.get('status') or _r.get('phase') or '?')
+        _built = str(_r.get('built_version') or _r.get('intended_version') or '')
+        _rows.append((float(_elapsed), _pkg, _status, _built))
+    return _rows
+
+
 def _print_build_times(session, *_extras) -> None:
     """All sources sorted by wall-clock elapsed. Reads the
     build records — covers built (phase=done) and failed (phase=failed)
@@ -692,24 +710,14 @@ def _print_build_times(session, *_extras) -> None:
     rebuild time: changing the snapshot rebuilds every source with
     approximately the same per-source cost ± kernel/glibc variation.
     """
-    _records = _iter_build_records(session)
-    if not _records:
+    _rows = _build_time_rows(session)
+    if not _rows:
         tui.console.print(
             "No build records found "
             "(run `source build` to populate log/build/)"
         )
         return
-    _rows: 'list[tuple[float, str, str, str]]' = []
-    _total = 0.0
-    for _r in _records:
-        _elapsed = _r.get('elapsed_seconds')
-        if not isinstance(_elapsed, (int, float)) or _elapsed < 0:
-            _elapsed = 0.0
-        _pkg = str(_r.get('package') or '?')
-        _status = str(_r.get('status') or _r.get('phase') or '?')
-        _built = str(_r.get('built_version') or _r.get('intended_version') or '')
-        _rows.append((float(_elapsed), _pkg, _status, _built))
-        _total += float(_elapsed)
+    _total = sum(_e for _e, _, _, _ in _rows)
     _rows.sort(reverse=True)
     tui.console.print(
         f"Build times ({len(_rows)} record(s), "
@@ -726,15 +734,8 @@ def _summary_build_times_section(session) -> None:
     """Slowest-N + aggregate wall time, slotted into `print summary`.
     No-op when no records exist (don't clutter the summary on fresh
     repos)."""
-    _records = _iter_build_records(session)
-    if not _records:
-        return
     _timed = sorted(
-        (
-            (float(_r.get('elapsed_seconds') or 0.0), str(_r.get('package') or '?'))
-            for _r in _records
-            if isinstance(_r.get('elapsed_seconds'), (int, float))
-        ),
+        ((_e, _p) for _e, _p, _, _ in _build_time_rows(session)),
         reverse=True,
     )
     if not _timed:

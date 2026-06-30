@@ -945,11 +945,20 @@ class SourceCommandsMixin(SessionState):
         # _update_build_pending() so a non-UPDATE-mode audit skips the
         # floor-Sources fetch entirely.  A fetch failure degrades to "no
         # bump targets" (under-report) — never the 178-false-flag over-report.
+        # Compute the UPDATE-mode pending flag + mirror floor + snapshot-delta
+        # workload ONCE here; _print_next_run_build_queue reuses them rather
+        # than recomputing all three (audit #77).
+        _update_pending = self._update_build_pending()
+        _floor: 'str | None' = None
+        _workload: 'list | None' = None
+        _workload_err: 'str | None' = None
+        if _update_pending:
+            _floor = self._mirror_floor()
+            _workload, _workload_err = self._workload_since_snapshot(_floor)
         _workload_set: 'set[str]' = set()
-        if _bump_release is not None and self._update_build_pending():
-            _wl, _wl_err = self._workload_since_snapshot(self._mirror_floor())
-            if _wl_err is None and _wl is not None:
-                _workload_set = set(_wl)
+        if (_bump_release is not None and _workload_err is None
+                and _workload is not None):
+            _workload_set = set(_workload)
 
         # Merge deb + udeb dep trees.  Source objects shared via
         # source_hashtable, so the dict-update naturally dedupes.
@@ -1166,7 +1175,9 @@ class SourceCommandsMixin(SessionState):
         # reported here matches what `source build all` actually runs.
         if self.container is not None:
             self._print_next_run_build_queue(
-                _srcs, _rebuild_candidates, _verbose)
+                _srcs, _rebuild_candidates, _verbose,
+                _update_pending, _floor, _workload, _workload_err,
+                _bump_release)
 
         # Obsolete patch detection.  patch/source/<pkg>/<ver>/ holds version-
         # pinned patches; when the cached source version moves past <ver>
@@ -1177,13 +1188,18 @@ class SourceCommandsMixin(SessionState):
 
     def _print_next_run_build_queue(
         self, _srcs: dict, _rebuild_candidates: 'list[str]', _verbose: bool,
+        _update_pending: bool, _floor: 'str | None',
+        _workload: 'list | None', _workload_err: 'str | None',
+        _release: 'int | None',
     ) -> None:
-        """Compute the rebuild list the next `source build all` will run
-        and print it.  Mirrors `_do_update_build`'s decision logic so the
-        count here matches the actual build."""
+        """Print the rebuild list the next `source build all` will run.
+        Mirrors `_do_update_build`'s decision logic so the count here matches
+        the actual build.  The pending flag, mirror floor, snapshot-delta
+        workload and release are computed once by the caller and passed in
+        (audit #77) rather than recomputed here."""
         console.print("")
         console.print("Next-run build (`source build all`):")
-        if not self._update_build_pending():
+        if not _update_pending:
             console.print(
                 "  Mode: NORMAL (no snapshot delta pending)",
                 tui.COLOR_INFO)
@@ -1191,23 +1207,16 @@ class SourceCommandsMixin(SessionState):
                 f"  {len(_rebuild_candidates):5d}  total to (re)build "
                 f"(matches `Rebuild queue by subset` above)")
             return
-        _floor = self._mirror_floor()
         _current = self._snapshot_current()
         console.print(
             f"  Mode: UPDATE — mirror floor {_floor or '(none)'} → "
             f"current {_current}",
             tui.COLOR_INFO)
-        _workload, _err = self._workload_since_snapshot(_floor)
-        if _err:
+        if _workload_err:
             console.print(
-                f"  WARN: cannot compute snapshot delta — {_err}",
+                f"  WARN: cannot compute snapshot delta — {_workload_err}",
                 tui.COLOR_WARNING)
             return
-        try:
-            _release = int(
-                str(self.config.build_version).strip('"').strip("'"))
-        except (TypeError, ValueError):
-            _release = None
         _wset = set(_workload or [])
         _delta_to_build: 'list[str]' = []
         _bump_targets: 'list[str]' = []

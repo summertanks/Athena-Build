@@ -483,6 +483,47 @@ class _ChrootMixin:
              os.path.lexists(os.path.join(_chroot, 'usr/bin/sh')))
         )
 
+    def _dpkg_configure_argv(self, named: 'Optional[list]' = None,
+                             force_deps: bool = False) -> 'list':
+        """Build the `dpkg --configure` argv — chroot mode, or the chrootless
+        fallback before /usr/bin/dpkg + sh exist in the chroot.  `named=None`
+        → blanket `--configure -a`; a name list → `--configure <names>`.
+        `force_deps` adds --force-depends.  Shared by _configure_chroot and
+        _configure_packages (flag order is immaterial to dpkg)."""
+        _chroot = self._dir_chroot
+        if self._chroot_dpkg_available():
+            # env runs on the HOST so we don't need /usr/bin/env in the chroot.
+            _argv = shlex.split(
+                'sudo -S env DEBIAN_FRONTEND=noninteractive '
+                'DEBCONF_NONINTERACTIVE_SEEN=true '
+                f'chroot {_chroot} dpkg')
+        else:
+            _argv = shlex.split(
+                'sudo -S env DEBIAN_FRONTEND=noninteractive '
+                'DEBCONF_NONINTERACTIVE_SEEN=true '
+                f'dpkg --root={_chroot} --instdir={_chroot} '
+                f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless')
+        _argv += ['--force-confdef', '--force-confnew']
+        if force_deps:
+            _argv.append('--force-depends')
+        _argv.append('--configure')
+        if named is None:
+            _argv.append('-a')
+        else:
+            _argv += list(named)
+        return _argv
+
+    @staticmethod
+    def _parse_setting_up(stdout: str) -> set:
+        """Package names from dpkg's `Setting up X (version)` lines (arch
+        suffix stripped) — the successfully-configured set."""
+        _out: set = set()
+        for _line in stdout.splitlines():
+            _m = re.match(r'^Setting up (\S+?)(?::\S+)? \(', _line)
+            if _m:
+                _out.add(_m.group(1))
+        return _out
+
     def _configure_chroot(self) -> set:
         """Run `dpkg --configure -a` and return the set of successfully configured package names.
 
@@ -511,28 +552,12 @@ class _ChrootMixin:
         Failed packages are NOT in the returned set.
         """
         logger.info("configure_chroot: final dpkg --configure -a (surfaces errors)")
-        _chroot = self._dir_chroot
         _dpkg_in_chroot = self._chroot_dpkg_available()
 
-        if _dpkg_in_chroot:
-            # env runs on the host so we don't need /usr/bin/env inside the
-            # chroot.  Snapshot pinning + the dep-drift verifier (run before
-            # this method) ensure unresolved deps are caught upstream, so we
-            # surface dpkg's real error rather than masking it with --force-depends.
-            _cmd = shlex.split(
-                f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
-                f'chroot {_chroot} '
-                f'dpkg --configure -a --force-confdef --force-confnew'
-            )
-        else:
-            # Chrootless fallback before /usr/bin/dpkg + sh exist in the chroot.
-            _cmd = shlex.split(
-                f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
-                f'dpkg --root={_chroot} --instdir={_chroot} '
-                f'--admindir={_chroot}/var/lib/dpkg '
-                f'--force-script-chrootless --force-confdef --force-confnew '
-                f'--configure -a'
-            )
+        # Snapshot pinning + the dep-drift verifier (run before this method)
+        # ensure unresolved deps are caught upstream, so we surface dpkg's real
+        # error rather than masking it with --force-depends (no force_deps here).
+        _cmd = self._dpkg_configure_argv()
 
         _proc = subprocess.run(_cmd, input=self._password + '\n',
                                capture_output=True, text=True, env=self._chroot_env)
@@ -563,12 +588,7 @@ class _ChrootMixin:
                 f'{len(_failed)} failed — see log for details'
             )
 
-        _configured: set = set()
-        for _line in _proc.stdout.splitlines():
-            _m = re.match(r'^Setting up (\S+?)(?::\S+)? \(', _line)
-            if _m:
-                _configured.add(_m.group(1))
-        return _configured
+        return self._parse_setting_up(_proc.stdout)
 
     def _ensure_initramfs(self):
         """Generate initramfs for any kernel that is missing one.
@@ -924,24 +944,7 @@ class _ChrootMixin:
         if not pkg_list:
             return set()
 
-        _chroot = self._dir_chroot
-        _dpkg_in_chroot = self._chroot_dpkg_available()
-        _force = '--force-depends ' if force_deps else ''
-
-        if _dpkg_in_chroot:
-            _cmd = shlex.split(
-                f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
-                f'chroot {_chroot} '
-                f'dpkg --configure --force-confdef --force-confnew {_force}'
-            ) + pkg_list
-        else:
-            _cmd = shlex.split(
-                f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
-                f'dpkg --root={_chroot} --instdir={_chroot} '
-                f'--admindir={_chroot}/var/lib/dpkg '
-                f'--force-script-chrootless --force-confdef --force-confnew {_force}'
-                f'--configure'
-            ) + pkg_list
+        _cmd = self._dpkg_configure_argv(named=pkg_list, force_deps=force_deps)
 
         logger.debug(f'Configure: {" ".join(pkg_list)}')
         _proc = subprocess.run(_cmd, input=self._password + '\n',
@@ -949,11 +952,7 @@ class _ChrootMixin:
         for _line in _proc.stdout.splitlines():
             logger.debug(_line)
 
-        _configured: set = set()
-        for _line in _proc.stdout.splitlines():
-            _m = re.match(r'^Setting up (\S+?)(?::\S+)? \(', _line)
-            if _m:
-                _configured.add(_m.group(1))
+        _configured = self._parse_setting_up(_proc.stdout)
 
         # Anything that was asked to be configured but didn't show up in
         # "Setting up" stdout is a failure.  dpkg may print errors in any
