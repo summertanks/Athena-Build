@@ -1153,23 +1153,40 @@ def _print_src(session, *extras) -> None:
 
 def _print_provides(session, *_extras) -> None:
     """Virtual-package map — only entries with multiple providers, since the
-    full Provides graph is enormous and most entries have a single provider."""
+    full Provides graph is enormous and most entries have a single provider.
+
+    Providers come from the cache's ``package_hashtable`` (which indexes every
+    package under each virtual name it Provides), NOT from ``selected_pkgs``:
+    the dep tree keeps only the single resolved winner per name, so contention
+    sourced from it could never show more than one provider.  Restricted to
+    virtuals at least one of whose providers is in the current selection, so
+    the output stays about this build rather than the whole universe."""
     if not _require_dep_check(session):
         return
-    virtuals = defaultdict(list)
-    for name, pkg in session.dep_tree.selected_pkgs.items():
-        canonical = pkg['Package']
-        if name != canonical:
-            virtuals[name].append((canonical, pkg.version))
-    multi = {v: ps for v, ps in virtuals.items() if len(ps) > 1}
-    tui.console.print(f"Virtual packages with multiple providers ({len(multi)}):")
+    _hash = getattr(getattr(session, 'cache', None), 'package_hashtable', None)
+    if not _hash:
+        tui.console.print("  (no cache index — run `cache parse`)")
+        return
+    _selected = {pkg['Package']
+                 for pkg in session.dep_tree.selected_pkgs.values()}
+    multi: 'dict[str, list[str]]' = {}
+    for name, _vbucket in _hash.items():
+        _providers = {pkg['Package']
+                      for _vp in _vbucket.values() for pkg in _vp}
+        # >1 distinct provider for the name = real contention; keep only those
+        # touching the selection.
+        if len(_providers) > 1 and (_providers & _selected):
+            multi[name] = sorted(_providers)
+    tui.console.print(
+        f"Virtual packages with multiple providers ({len(multi)}):")
     if not multi:
-        tui.console.print("  (every virtual name has a single provider — no contention)")
+        tui.console.print(
+            "  (every virtual name has a single provider — no contention)")
         return
     for v in sorted(multi):
         tui.console.print(f"  {v}")
-        for cn, ver in sorted(multi[v]):
-            tui.console.print(f"      → {cn} ({ver})")
+        for cn in multi[v]:
+            tui.console.print(f"      → {cn}")
 
 
 # ─── Repo / signing views ──────────────────────────────────────────────────

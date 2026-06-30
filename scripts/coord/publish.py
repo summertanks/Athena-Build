@@ -1227,46 +1227,46 @@ def remote_publish(
             # pool once, diff against the local repo, and push anything missing
             # (we own it — it's in our index but never landed).
             # --size-only keeps a complete pool a cheap no-op (same-size skips).
-            if pool_remote_spec is not None:
-                _remote_debs = _transport.list_remote_debs(
-                    pool_remote_spec, ssh_key)
-                if _remote_debs is None:
-                    _status("warning: could not list remote pool — "
-                            "skipping completeness check")
-                else:
-                    _local_debs: dict = {}
-                    for _wr, _, _wfs in os.walk(config.dir_repo):
-                        for _wf in _wfs:
-                            if _wf.endswith(('.deb', '.udeb')):
-                                _wp = os.path.join(_wr, _wf)
-                                _local_debs[os.path.relpath(
-                                    _wp, config.dir_repo)] = _wp
-                    _missing = sorted(set(_local_debs) - _remote_debs)
-                    if _missing:
-                        _status(f"pool completeness: {len(_missing)} .deb(s) "
-                                "indexed but absent on the mirror — pushing")
-                        _comp_fail = 0
-                        for _ci, _crel in enumerate(_missing, start=1):
-                            _ok_c, _det_c = _transport.push_single_deb(
-                                local_path=_local_debs[_crel],
-                                remote_spec=(pool_remote_spec.rstrip('/')
-                                             + '/' + _crel),
-                                ssh_key=ssh_key, overwrite=False)
-                            if on_progress is not None:
-                                on_progress(_ci, len(_missing), _crel, _ok_c)
-                            if not _ok_c:
-                                _comp_fail += 1
-                                logger.error(
-                                    f"coord.publish: completeness push "
-                                    f"{_crel} failed: {_det_c}")
-                        _status(
-                            f"pool completeness: {len(_missing) - _comp_fail} "
-                            f"sent, {_comp_fail} failed")
-                        if _comp_fail:
-                            return False, (
-                                f"pool completeness: {_comp_fail} .deb(s) "
-                                "still missing on the mirror after push — "
-                                "refusing to publish an index that 404s")
+            # (already inside the `if pool_remote_spec is not None:` guard above)
+            _remote_debs = _transport.list_remote_debs(
+                pool_remote_spec, ssh_key)
+            if _remote_debs is None:
+                _status("warning: could not list remote pool — "
+                        "skipping completeness check")
+            else:
+                _local_debs: dict = {}
+                for _wr, _, _wfs in os.walk(config.dir_repo):
+                    for _wf in _wfs:
+                        if _wf.endswith(('.deb', '.udeb')):
+                            _wp = os.path.join(_wr, _wf)
+                            _local_debs[os.path.relpath(
+                                _wp, config.dir_repo)] = _wp
+                _missing = sorted(set(_local_debs) - _remote_debs)
+                if _missing:
+                    _status(f"pool completeness: {len(_missing)} .deb(s) "
+                            "indexed but absent on the mirror — pushing")
+                    _comp_fail = 0
+                    for _ci, _crel in enumerate(_missing, start=1):
+                        _ok_c, _det_c = _transport.push_single_deb(
+                            local_path=_local_debs[_crel],
+                            remote_spec=(pool_remote_spec.rstrip('/')
+                                         + '/' + _crel),
+                            ssh_key=ssh_key, overwrite=False)
+                        if on_progress is not None:
+                            on_progress(_ci, len(_missing), _crel, _ok_c)
+                        if not _ok_c:
+                            _comp_fail += 1
+                            logger.error(
+                                f"coord.publish: completeness push "
+                                f"{_crel} failed: {_det_c}")
+                    _status(
+                        f"pool completeness: {len(_missing) - _comp_fail} "
+                        f"sent, {_comp_fail} failed")
+                    if _comp_fail:
+                        return False, (
+                            f"pool completeness: {_comp_fail} .deb(s) "
+                            "still missing on the mirror after push — "
+                            "refusing to publish an index that 404s")
 
             # Step 5c — push the apt-trust path (dists/<codename>/ tree:
             # InRelease, Release, Release.gpg, per-component Packages +
@@ -1279,7 +1279,7 @@ def remote_publish(
                 _codename = str(config.build_codename).strip('"').strip("'")
             except AttributeError:
                 _codename = ''
-            if _codename and pool_remote_spec is not None:
+            if _codename:
                 _local_dist = os.path.join(
                     config.dir_repo, 'dists', _codename)
                 _remote_dist = (

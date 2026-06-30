@@ -474,16 +474,11 @@ def _audit_and_strip_chroot_hooks(
         )
         return True
     import identity_scan
-    _allow_path = os.path.join(installer_dir, '..', 'installer',
-                               'strip-hooks-allowlist')
-    # The above join is awkward when installer_dir already IS the
-    # installer dir.  Normalise: the canonical home of the allowlist
-    # is `<working>/installer/strip-hooks-allowlist`; reach it from
-    # the installer_dir passed to build_installer_chroot which is
-    # `<working>/installer`.
-    if os.path.basename(os.path.normpath(installer_dir)) == 'installer':
-        _allow_path = os.path.join(installer_dir, 'strip-hooks-allowlist')
-    _allow_path = os.path.normpath(_allow_path)
+    # The canonical home of the allowlist is
+    # `<working>/installer/strip-hooks-allowlist`, and the only caller passes
+    # installer_dir = `<working>/installer`, so reach it directly.
+    _allow_path = os.path.normpath(
+        os.path.join(installer_dir, 'strip-hooks-allowlist'))
 
     logger.info(
         f"audit chroot hooks vs pool ({len(pool_pkg_names)} pkg names); "

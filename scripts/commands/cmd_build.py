@@ -173,9 +173,12 @@ class BuildCommandsMixin(SessionState):
                 "tasksel menu from pkg.list directly (run `cache parse` to "
                 "restore the signed authority)", tui.COLOR_WARNING)
             try:
-                _groups = utils.parse_pkg_list_groups(self.config.pkglist_path)
+                _pkg_lines = utils.readfile(
+                    self.config.pkglist_path).splitlines()
+                _groups = utils.parse_pkg_list_groups(
+                    self.config.pkglist_path, lines=_pkg_lines)
                 _meta = utils.parse_pkg_list_group_meta(
-                    self.config.pkglist_path)
+                    self.config.pkglist_path, lines=_pkg_lines)
             except (OSError, ValueError) as _e:
                 logger.error(f"_generate_tasks_desc: {_e}")
                 return ''

@@ -123,8 +123,9 @@ class SelectPackages:
 
     # ─── Model load / build ──────────────────────────────────────────────
     def _load_model(self) -> None:
-        groups = utils.parse_pkg_list_groups(self._path)
-        self._meta = utils.parse_pkg_list_group_meta(self._path)
+        _lines = utils.readfile(self._path).splitlines()
+        groups = utils.parse_pkg_list_groups(self._path, lines=_lines)
+        self._meta = utils.parse_pkg_list_group_meta(self._path, lines=_lines)
         for gname, names in groups.items():
             self._groups[gname] = [[n, True] for n in names]
         # Append the pool.list tier as the reserved POOL_GROUP (flat file →

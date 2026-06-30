@@ -113,14 +113,21 @@ class ConfigRunCommandsMixin(SessionState):
             except AttributeError:
                 pass
 
-    def _set_include_recommends(self, value: str) -> None:
-        """`set include-recommends <true|false>`"""
+    @staticmethod
+    def _parse_bool(value: str) -> 'Optional[bool]':
+        """Parse a `set <flag> <true|false>` argument.  Returns None for
+        anything that isn't a recognised boolean literal."""
         _v = value.lower()
         if _v in ('true', '1', 'yes', 'on'):
-            _new = True
-        elif _v in ('false', '0', 'no', 'off'):
-            _new = False
-        else:
+            return True
+        if _v in ('false', '0', 'no', 'off'):
+            return False
+        return None
+
+    def _set_include_recommends(self, value: str) -> None:
+        """`set include-recommends <true|false>`"""
+        _new = self._parse_bool(value)
+        if _new is None:
             console.print(
                 f"  invalid bool: {value!r}  (try: true | false)",
                 tui.COLOR_ERROR)
@@ -141,12 +148,8 @@ class ConfigRunCommandsMixin(SessionState):
 
     def _set_include_build_closure(self, value: str) -> None:
         """`set include-build-closure <true|false>`"""
-        _v = value.lower()
-        if _v in ('true', '1', 'yes', 'on'):
-            _new = True
-        elif _v in ('false', '0', 'no', 'off'):
-            _new = False
-        else:
+        _new = self._parse_bool(value)
+        if _new is None:
             console.print(
                 f"  invalid bool: {value!r}  (try: true | false)",
                 tui.COLOR_ERROR)
@@ -200,12 +203,8 @@ class ConfigRunCommandsMixin(SessionState):
 
     def _set_create_local_mirror(self, value: str) -> None:
         """`set create-local-mirror <true|false>` — persist to local.conf."""
-        _v = value.lower()
-        if _v in ('true', '1', 'yes', 'on'):
-            _new = True
-        elif _v in ('false', '0', 'no', 'off'):
-            _new = False
-        else:
+        _new = self._parse_bool(value)
+        if _new is None:
             console.print(
                 f"  invalid bool: {value!r}  (try: true | false)",
                 tui.COLOR_ERROR)

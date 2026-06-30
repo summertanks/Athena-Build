@@ -144,15 +144,17 @@ class Dispatcher:
 
     The loop runs on its own thread started by `start()`."""
 
-    # Idle poll cap — when no animations and no events arrive, wake up
-    # this often so the dispatcher can notice external state (e.g. the
-    # quit flag set from outside, or a producer that crashed without
-    # posting).  1.0s is generous; tuning lower buys nothing.
+    # Idle poll cap — an UPPER bound on how long _compute_timeout would block
+    # when no animations and no events arrive.  NOTE: the per-tick input wait is
+    # additionally clamped to INPUT_POLL_MS (50 ms) below, which is smaller, so
+    # this value never actually sets the wait today — it would only re-engage if
+    # INPUT_POLL_MS were raised above it.
     IDLE_TIMEOUT: float = 1.0
-    # When widgets are alive but they don't expose `next_frame_at`
-    # (e.g. legacy ProgressBar imported from scripts/tui.py), cap the
-    # idle wait at this value so the bar still animates at a usable
-    # rate.  10 Hz is the visible-perception sweet spot.
+    # Upper bound on the idle wait when widgets are alive but don't expose
+    # `next_frame_at` (e.g. legacy ProgressBar from scripts/tui.py).  Like
+    # IDLE_TIMEOUT, the INPUT_POLL_MS clamp masks this value: the effective
+    # animation cadence is INPUT_POLL_MS = 50 ms ≈ 20 Hz, not the 10 Hz this
+    # 0.1s would imply on its own.
     WIDGET_IDLE_TIMEOUT: float = 0.1
     # The UI loop now reads input itself (no input-pump thread).  Cap the
     # per-tick getkey wait so keystrokes + worker output render within this

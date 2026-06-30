@@ -3947,7 +3947,9 @@ def parse_build_pkg_list(path: str) -> 'list[str]':
     return _out
 
 
-def parse_pkg_list_groups(path: str) -> 'dict[str, list[str]]':
+def parse_pkg_list_groups(
+        path: str,
+        lines: 'Optional[list[str]]' = None) -> 'dict[str, list[str]]':
     """Parse a pkg.list file into named groups.
 
     Two supported layouts:
@@ -3968,9 +3970,12 @@ def parse_pkg_list_groups(path: str) -> 'dict[str, list[str]]':
         ValueError: in INI-style mode, a seed appears before any
         `[section]` header (operator probably forgot `[base]`).
         OSError: path is unreadable.
+
+    ``lines`` lets a caller that already read the file (e.g. one calling both
+    this and ``parse_pkg_list_group_meta``) pass the split lines so the file is
+    read once; ``path`` is still used for error messages.
     """
-    _raw = readfile(path)
-    _lines = _raw.splitlines()
+    _lines = readfile(path).splitlines() if lines is None else lines
 
     # First pass: does the file contain ANY `[section]` header?  Decides
     # which mode to parse in.
@@ -4014,7 +4019,9 @@ def parse_pkg_list_groups(path: str) -> 'dict[str, list[str]]':
     return _groups
 
 
-def parse_pkg_list_group_meta(path: str) -> 'dict[str, dict[str, str]]':
+def parse_pkg_list_group_meta(
+        path: str,
+        lines: 'Optional[list[str]]' = None) -> 'dict[str, dict[str, str]]':
     """Parse per-group metadata from a pkg.list file.
 
     Format: a `## Description: ...` comment line directly after a
@@ -4031,9 +4038,11 @@ def parse_pkg_list_group_meta(path: str) -> 'dict[str, dict[str, str]]':
 
     Missing description → group is absent from the returned dict's
     entry value (caller falls back to a default).
+
+    ``lines`` lets a caller share an already-read file with
+    ``parse_pkg_list_groups`` so the pkg.list is read once.
     """
-    _raw = readfile(path)
-    _lines = _raw.splitlines()
+    _lines = readfile(path).splitlines() if lines is None else lines
     _section_re = re.compile(r'^\s*\[([^\]]*)\]\s*$')
     _desc_re = re.compile(r'^\s*##\s*Description:\s*(.+?)\s*$')
 

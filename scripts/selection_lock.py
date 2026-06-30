@@ -239,11 +239,15 @@ def seeds_from_config(config: 'Any') -> dict:
     from the config's list paths.  Shared by assemble_state and the federation
     seeder so both produce the identical shape."""
     _pkg = getattr(config, 'pkglist_path', '')
+    _pkg_lines = utils.readfile(_pkg).splitlines() if _pkg else None
     return {
-        'pkg': utils.parse_pkg_list_groups(_pkg) if _pkg else {},
+        'pkg': (utils.parse_pkg_list_groups(_pkg, lines=_pkg_lines)
+                if _pkg else {}),
         # pkg-group descriptions — preserved so `cache restore` can faithfully
-        # regenerate the `## Description:` lines tasksel needs.
-        'pkg_meta': utils.parse_pkg_list_group_meta(_pkg) if _pkg else {},
+        # regenerate the `## Description:` lines tasksel needs.  Shares the one
+        # file read with parse_pkg_list_groups above.
+        'pkg_meta': (utils.parse_pkg_list_group_meta(_pkg, lines=_pkg_lines)
+                     if _pkg else {}),
         'live': _read_flat_seeds(getattr(config, 'livelist_path', '')),
         'installer': _read_flat_seeds(
             getattr(config, 'installerlist_path', '')),

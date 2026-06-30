@@ -495,8 +495,11 @@ class CacheCommandsMixin(SessionState):
 
         console.print(f"Parsing {self.config.pkglist_path}...")
         try:
-            _pkg_groups = utils.parse_pkg_list_groups(self.config.pkglist_path)
-            _pkg_group_meta = utils.parse_pkg_list_group_meta(self.config.pkglist_path)
+            _pkg_lines = utils.readfile(self.config.pkglist_path).splitlines()
+            _pkg_groups = utils.parse_pkg_list_groups(
+                self.config.pkglist_path, lines=_pkg_lines)
+            _pkg_group_meta = utils.parse_pkg_list_group_meta(
+                self.config.pkglist_path, lines=_pkg_lines)
         except (OSError, ValueError) as e:
             console.print(f"ERROR: cannot read package list {self.config.pkglist_path}: {e}")
             logger.error(f"parse_pkg_list_groups({self.config.pkglist_path}): {e}")
@@ -887,130 +890,132 @@ class CacheCommandsMixin(SessionState):
         # removed packages are mirror-deprecation candidates the operator must
         # acknowledge via `cache select` / `cache restore` / `cache purge-state`.
         # Additions are low-impact (absorbed + warned).  First run bootstraps.
-        if self.config.build_mode != 'build':
-            # `accept-removals` (set by `cache select`) turns the shrink BLOCK
-            # into an accepted re-baseline: the lockfile is rewritten to the new
-            # (smaller) closure and the dropped packages become mirror-
-            # deprecation candidates on the next publish.  A raw `cache parse`
-            # never accepts a shrink.
-            _accept = 'accept-removals' in args
-            _fresh = selection_lock.build_closure(
-                self.dep_tree, self.udeb_dep_tree, self.config)
-            _action, _added, _removed = selection_lock.classify(
-                _lstatus, _lock, _fresh)
-            # ── lifecycle layer inputs ───────────────────────
-            # Source→version union across BOTH trees (udeb-only sources
-            # like anna/debootstrap included) + the snapshot pin.  The
-            # touch itself runs on the non-blocked branches below.
-            _lc_sel = {n: str(s.version)
-                       for n, s in self.dep_tree.selected_srcs.items()}
-            if self.udeb_dep_tree is not None:
-                for _n, _s in self.udeb_dep_tree.selected_srcs.items():
-                    _lc_sel.setdefault(_n, str(_s.version))
-            _lc_pin = getattr(self.config, 'snapshot_timestamp_config', '')
-            if _lc_pin == 'latest':
-                try:
-                    _lc_pin = utils.resolve_snapshot_timestamp(
-                        self.config) or 'latest'
-                except Exception:
-                    _lc_pin = 'latest'
-            _lc_log = os.path.join(self.config.dir_log, 'build')
+        # build mode returns at the early `build_mode == 'build'` branch
+        # above, so the non-build invariant holds for the rest of parse.
+        assert self.config.build_mode != 'build'
+        # `accept-removals` (set by `cache select`) turns the shrink BLOCK
+        # into an accepted re-baseline: the lockfile is rewritten to the new
+        # (smaller) closure and the dropped packages become mirror-
+        # deprecation candidates on the next publish.  A raw `cache parse`
+        # never accepts a shrink.
+        _accept = 'accept-removals' in args
+        _fresh = selection_lock.build_closure(
+            self.dep_tree, self.udeb_dep_tree, self.config)
+        _action, _added, _removed = selection_lock.classify(
+            _lstatus, _lock, _fresh)
+        # ── lifecycle layer inputs ───────────────────────
+        # Source→version union across BOTH trees (udeb-only sources
+        # like anna/debootstrap included) + the snapshot pin.  The
+        # touch itself runs on the non-blocked branches below.
+        _lc_sel = {n: str(s.version)
+                   for n, s in self.dep_tree.selected_srcs.items()}
+        if self.udeb_dep_tree is not None:
+            for _n, _s in self.udeb_dep_tree.selected_srcs.items():
+                _lc_sel.setdefault(_n, str(_s.version))
+        _lc_pin = getattr(self.config, 'snapshot_timestamp_config', '')
+        if _lc_pin == 'latest':
+            try:
+                _lc_pin = utils.resolve_snapshot_timestamp(
+                    self.config) or 'latest'
+            except Exception:
+                _lc_pin = 'latest'
+        _lc_log = os.path.join(self.config.dir_log, 'build')
 
-            def _lc_touch():
-                _st = utils.lifecycle_touch_selected(_lc_log, _lc_sel, _lc_pin)
-                _changed = sum(_v for _k, _v in _st.items()
-                               if _k != 'unchanged')
-                if _changed:
-                    console.print(
-                        f"lifecycle: {_st['created']} created, "
-                        f"{_st['stamped']} stamped, {_st['rolled']} version-"
-                        f"roll(s), {_st['reselected']} re-selected "
-                        f"({_st['unchanged']} unchanged)", tui.COLOR_INFO)
-            if _action == selection_lock.ACTION_BLOCK and not _accept:
-                _rb = sorted(_removed['bins'])
-                _rs = sorted(_removed['srcs'])
+        def _lc_touch():
+            _st = utils.lifecycle_touch_selected(_lc_log, _lc_sel, _lc_pin)
+            _changed = sum(_v for _k, _v in _st.items()
+                           if _k != 'unchanged')
+            if _changed:
                 console.print(
-                    f"cache parse: BLOCKED — the selection closure SHRANK vs "
-                    f"the signed selection.state: {len(_rb)} binary(ies) and "
-                    f"{len(_rs)} source(s) would be dropped.", tui.COLOR_ERROR)
-                for _n in _rb[:20]:
-                    console.print(f"    - bin {_n}", tui.COLOR_ERROR)
-                if len(_rb) > 20:
-                    console.print(f"    … (+{len(_rb) - 20} more bins)",
-                                  tui.COLOR_ERROR)
-                for _n in _rs[:20]:
-                    console.print(f"    - src {_n}", tui.COLOR_ERROR)
-                if len(_rs) > 20:
-                    console.print(f"    … (+{len(_rs) - 20} more srcs)",
-                                  tui.COLOR_ERROR)
-                console.print(
-                    "  These are mirror-deprecation candidates.  Choose one:\n"
-                    "    1. `cache select accept` — accept the removal (updates "
-                    "the lockfile + marks them deprecated on publish)\n"
-                    "    2. `cache restore` — regenerate the list files from "
-                    "the lockfile (undo the edit)\n"
-                    "    3. `cache purge-state` — re-baseline the selection "
-                    "authority (heavy mirror impact)", tui.COLOR_WARNING)
-                self.flags.dep_check_ready = False
-                _spiner.done()
-                return
-            _state = selection_lock.assemble_state(
-                self.dep_tree, self.udeb_dep_tree, self.config, closure=_fresh)
-            if _action == selection_lock.ACTION_BLOCK and _accept:
-                # MAT-10(d): the signed lockfile (selection.state) is the
-                # AUTHORITY, so make it the COMMIT POINT — do the derived
-                # side-effects (mark the dropped sources' build records
-                # deprecated, touch the still-selected set) FIRST, then write
-                # the lockfile LAST.  A crash before the lockfile write leaves
-                # the authority unchanged (old selection) + at worst a few
-                # premature deprecation marks that the next `cache parse`
-                # re-stamps as selected — strictly better than the old order,
-                # where a crash shrank the authority but left the dropped
-                # sources un-deprecated (the drift only `mirror audit` caught).
-                _dep_n = utils.lifecycle_mark_deprecated(
-                    _lc_log, _removed['srcs'], _lc_pin)
-                _lc_touch()
-                selection_lock.write_selection_state(self.config, _state)
-                console.print(
-                    f"cache select accept: re-baselined selection.state — "
-                    f"{len(_removed['bins'])} binary(ies) / "
-                    f"{len(_removed['srcs'])} source(s) DROPPED "
-                    f"({_dep_n} record(s) marked deprecated); they become "
-                    "mirror-deprecation candidates on the next `mirror "
-                    "publish`.", tui.COLOR_HIGHLIGHT)
-                self.flags.dep_check_ready = True
-                _spiner.done()
-                return
-            if _action == selection_lock.ACTION_BOOTSTRAP:
-                # A federation peer must NOT self-baseline a selection from its
-                # own git lists — it adopts the federation's, seeded from the
-                # mirror at register/pull.  Refuse rather than bake a divergent
-                # distribution.  The origin ('first'/'') still bootstraps.
-                if getattr(self.config, 'system_role', '') == 'federation':
-                    _spiner.done()
-                    console.print(
-                        "cache parse: REFUSED — federation peer has no "
-                        "selection.state.  The federation selection is seeded "
-                        "by the mirror; run `mirror pull` (or re-`configure`) "
-                        "to adopt it, then re-run `cache parse`.",
-                        tui.COLOR_ERROR)
-                    self.flags.dep_check_ready = False
-                    return
-                selection_lock.write_selection_state(self.config, _state)
-                console.print(
-                    f"selection.state: created — {len(_fresh['bins'])} "
-                    f"binary(ies) / {len(_fresh['srcs'])} source(s) locked",
-                    tui.COLOR_HIGHLIGHT)
-            else:  # ACTION_REFRESH (unchanged or additions-only)
-                if _added['bins'] or _added['srcs']:
-                    console.print(
-                        f"selection.state: absorbed {len(_added['bins'])} new "
-                        f"binary(ies) / {len(_added['srcs'])} new source(s) "
-                        "(additions are low-impact)", tui.COLOR_WARNING)
-                selection_lock.write_selection_state(self.config, _state)
-            # stamp the lifecycle layer on every selected source
-            # (bootstrap + refresh paths; the accept path touched above).
+                    f"lifecycle: {_st['created']} created, "
+                    f"{_st['stamped']} stamped, {_st['rolled']} version-"
+                    f"roll(s), {_st['reselected']} re-selected "
+                    f"({_st['unchanged']} unchanged)", tui.COLOR_INFO)
+        if _action == selection_lock.ACTION_BLOCK and not _accept:
+            _rb = sorted(_removed['bins'])
+            _rs = sorted(_removed['srcs'])
+            console.print(
+                f"cache parse: BLOCKED — the selection closure SHRANK vs "
+                f"the signed selection.state: {len(_rb)} binary(ies) and "
+                f"{len(_rs)} source(s) would be dropped.", tui.COLOR_ERROR)
+            for _n in _rb[:20]:
+                console.print(f"    - bin {_n}", tui.COLOR_ERROR)
+            if len(_rb) > 20:
+                console.print(f"    … (+{len(_rb) - 20} more bins)",
+                              tui.COLOR_ERROR)
+            for _n in _rs[:20]:
+                console.print(f"    - src {_n}", tui.COLOR_ERROR)
+            if len(_rs) > 20:
+                console.print(f"    … (+{len(_rs) - 20} more srcs)",
+                              tui.COLOR_ERROR)
+            console.print(
+                "  These are mirror-deprecation candidates.  Choose one:\n"
+                "    1. `cache select accept` — accept the removal (updates "
+                "the lockfile + marks them deprecated on publish)\n"
+                "    2. `cache restore` — regenerate the list files from "
+                "the lockfile (undo the edit)\n"
+                "    3. `cache purge-state` — re-baseline the selection "
+                "authority (heavy mirror impact)", tui.COLOR_WARNING)
+            self.flags.dep_check_ready = False
+            _spiner.done()
+            return
+        _state = selection_lock.assemble_state(
+            self.dep_tree, self.udeb_dep_tree, self.config, closure=_fresh)
+        if _action == selection_lock.ACTION_BLOCK and _accept:
+            # MAT-10(d): the signed lockfile (selection.state) is the
+            # AUTHORITY, so make it the COMMIT POINT — do the derived
+            # side-effects (mark the dropped sources' build records
+            # deprecated, touch the still-selected set) FIRST, then write
+            # the lockfile LAST.  A crash before the lockfile write leaves
+            # the authority unchanged (old selection) + at worst a few
+            # premature deprecation marks that the next `cache parse`
+            # re-stamps as selected — strictly better than the old order,
+            # where a crash shrank the authority but left the dropped
+            # sources un-deprecated (the drift only `mirror audit` caught).
+            _dep_n = utils.lifecycle_mark_deprecated(
+                _lc_log, _removed['srcs'], _lc_pin)
             _lc_touch()
+            selection_lock.write_selection_state(self.config, _state)
+            console.print(
+                f"cache select accept: re-baselined selection.state — "
+                f"{len(_removed['bins'])} binary(ies) / "
+                f"{len(_removed['srcs'])} source(s) DROPPED "
+                f"({_dep_n} record(s) marked deprecated); they become "
+                "mirror-deprecation candidates on the next `mirror "
+                "publish`.", tui.COLOR_HIGHLIGHT)
+            self.flags.dep_check_ready = True
+            _spiner.done()
+            return
+        if _action == selection_lock.ACTION_BOOTSTRAP:
+            # A federation peer must NOT self-baseline a selection from its
+            # own git lists — it adopts the federation's, seeded from the
+            # mirror at register/pull.  Refuse rather than bake a divergent
+            # distribution.  The origin ('first'/'') still bootstraps.
+            if getattr(self.config, 'system_role', '') == 'federation':
+                _spiner.done()
+                console.print(
+                    "cache parse: REFUSED — federation peer has no "
+                    "selection.state.  The federation selection is seeded "
+                    "by the mirror; run `mirror pull` (or re-`configure`) "
+                    "to adopt it, then re-run `cache parse`.",
+                    tui.COLOR_ERROR)
+                self.flags.dep_check_ready = False
+                return
+            selection_lock.write_selection_state(self.config, _state)
+            console.print(
+                f"selection.state: created — {len(_fresh['bins'])} "
+                f"binary(ies) / {len(_fresh['srcs'])} source(s) locked",
+                tui.COLOR_HIGHLIGHT)
+        else:  # ACTION_REFRESH (unchanged or additions-only)
+            if _added['bins'] or _added['srcs']:
+                console.print(
+                    f"selection.state: absorbed {len(_added['bins'])} new "
+                    f"binary(ies) / {len(_added['srcs'])} new source(s) "
+                    "(additions are low-impact)", tui.COLOR_WARNING)
+            selection_lock.write_selection_state(self.config, _state)
+        # stamp the lifecycle layer on every selected source
+        # (bootstrap + refresh paths; the accept path touched above).
+        _lc_touch()
 
         self.flags.dep_check_ready = True
 
