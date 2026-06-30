@@ -16711,6 +16711,37 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_cmd_repo_cleanup_report_lists_all_scanned_components():
+    """Regression (audit #68): the cleanup summary's scanned-component list must
+    track utils._STALE_SCAN_SUBDIRS (it hardcoded {main,doc,dbgsym,tests},
+    omitting main-udeb that _scan_stale_files actually scans)."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import commands.cmd_repo as _cr
+    _src = inspect.getsource(_cr)
+    assert '{main,doc,dbgsym,tests}' not in _src, (
+        "scanned-component report hardcodes a list that drifts from "
+        "_STALE_SCAN_SUBDIRS (missing main-udeb)")
+    assert '_STALE_SCAN_SUBDIRS' in _src, (
+        "report must derive the component list from _STALE_SCAN_SUBDIRS")
+
+
+def test_cmd_source_audit_pool_remediation_is_runnable():
+    """Regression (audit #76): the source-audit rebuild-queue command map must
+    not suggest 'source build (pool)' — 'pool' is not a valid _SOURCE_SUBSETS
+    verb, so the command can't be run; pool extras build via 'source build
+    all'."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import commands.cmd_source as _cs
+    _src = inspect.getsource(_cs)
+    assert 'source build (pool)' not in _src, (
+        "audit remediation must not suggest the non-runnable "
+        "'source build (pool)' — map pool to 'source build all'")
+
+
 def test_repo_dispatcher_advertises_merged_package_actions():
     """After the package→repo merge, the cmd_repo dispatcher exposes the
     consolidated actions (audit, repair).  audit_nmu was absorbed into
@@ -41947,6 +41978,8 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_cmd_repo_cleanup_report_lists_all_scanned_components,
+        test_cmd_source_audit_pool_remediation_is_runnable,
         test_repo_dispatcher_advertises_merged_package_actions,
         test_fork_mirror_arch_any_filename_uses_build_arch,
         # ARCH-FILTER — assured foreign-target cross-toolchain gate

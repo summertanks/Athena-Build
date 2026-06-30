@@ -861,9 +861,13 @@ class RepoCommandsMixin(SessionState):
         _bytes_obsolete = (sum(s for *_, s in _orphan)
                            + sum(s for *_, s in _drift)
                            + sum(s for *_, s in _foreign))
+        # Derive the component list from the SAME canon _scan_stale_files
+        # iterates (utils._STALE_SCAN_SUBDIRS) so the report can't understate
+        # what was scanned — it was missing main-udeb.
+        _scanned_comps = ','.join(utils._STALE_SCAN_SUBDIRS)
         console.print(
             f"\nScanned {_total_files} .deb/.udeb file(s) under "
-            f"{self.config.dir_repo}/{{main,doc,dbgsym,tests}}"
+            f"{self.config.dir_repo}/{{{_scanned_comps}}}"
         )
         console.print(
             f"  orphan-source   : {len(_orphan)} file(s) "
