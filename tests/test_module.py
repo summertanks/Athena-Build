@@ -24242,6 +24242,36 @@ def test_buildlog_write_encodes_utf8_under_ascii_locale():
         assert '→' in _content, repr(_content)              # '→' survived
 
 
+def test_readfile_decodes_utf8_under_ascii_locale():
+    """Regression (audit #43): utils.readfile must decode as UTF-8, not the
+    locale default — Debian indices (Packages/Sources) are UTF-8, so under a
+    C/ASCII locale a non-ASCII byte (accented maintainer, em-dash) would raise
+    UnicodeDecodeError (a ValueError) and escape the cache build's OSError-only
+    guards, crashing the whole build."""
+    import sys
+    import tempfile
+    import builtins
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    _real_open = builtins.open
+
+    def _ascii_default_open(file, mode='r', *_a, **_kw):
+        if 'b' not in mode and 'encoding' not in _kw:
+            _kw['encoding'] = 'ascii'
+        return _real_open(file, mode, *_a, **_kw)
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _p = os.path.join(_tmp, 'Packages')
+        with _real_open(_p, 'w', encoding='utf-8') as _fh:
+            _fh.write('Package: foo\nMaintainer: Jérôme — Test <j@x>\n'
+                      'Description: an em — dash\n')
+        with mock.patch.object(utils, 'open', _ascii_default_open,
+                               create=True):
+            _content = utils.readfile(_p)            # must NOT raise
+        assert 'Jérôme' in _content and '—' in _content, repr(_content)
+
+
 def test_buildlog_methods_tolerate_bad_input_and_helpers():
     """OBS-04 safety: accumulation methods + size helpers never raise on
     odd inputs (None, non-numeric, missing paths)."""
@@ -41147,6 +41177,7 @@ def main() -> int:
         test_buildlog_writes_header_sections_and_files,
         test_buildlog_write_never_raises_on_unwritable_dir,
         test_buildlog_write_encodes_utf8_under_ascii_locale,
+        test_readfile_decodes_utf8_under_ascii_locale,
         test_buildlog_methods_tolerate_bad_input_and_helpers,
         test_segregate_appends_relocate_and_purge_events,
         test_virtual_buildlog_writes_predicted_and_filtered,

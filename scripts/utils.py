@@ -4057,7 +4057,14 @@ def parse_pkg_list_group_meta(path: str) -> 'dict[str, dict[str, str]]':
 
 def readfile(filename: str) -> str:
     try:
-        with open(filename, 'r') as f:
+        # encoding='utf-8' (not the locale default): the text files read
+        # through here — Debian Packages/Sources indices, control, pkg lists —
+        # are UTF-8 by spec.  Under a C/POSIX locale the default decoder is
+        # ASCII, so a non-ASCII byte (accented maintainer name, em-dash in a
+        # Description) would raise UnicodeDecodeError (a ValueError) and escape
+        # callers' OSError-only guards, crashing the cache build.
+        # errors='replace' degrades a stray byte instead of failing the read.
+        with open(filename, 'r', encoding='utf-8', errors='replace') as f:
             return f.read()
     except OSError as e:
         raise OSError(f'Cannot read file {filename}: {e}') from e
