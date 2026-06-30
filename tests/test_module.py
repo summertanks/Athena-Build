@@ -8060,6 +8060,19 @@ def test_parse_apt_install_line_variants():
     assert _parse_apt_install_line('apt-install foo >> file.log\n') == (
         ['foo'], False
     )
+    # Regression (audit #12): 'apt-install' appearing ONLY inside a trailing
+    # ' #' inline comment on a non-comment command line must return None, not
+    # raise IndexError (the whole-line gate passes but the comment-stripped
+    # head no longer contains the token).  Without the guard this aborted the
+    # entire chroot-hook audit.
+    assert _parse_apt_install_line(
+        'echo done # call apt-install foo later\n') is None
+    assert _parse_apt_install_line(
+        'mkdir /x   # apt-install bar baz\n') is None
+    # And a real invocation WITH a trailing comment still parses.
+    assert _parse_apt_install_line('apt-install foo # see note\n') == (
+        ['foo'], False
+    )
 
 
 def test_installer_chroot_register_self_appends_debian_installer_stanza():
