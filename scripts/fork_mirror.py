@@ -178,7 +178,7 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
     for _name in _INDEX_FILES:
         _gzip_file(os.path.join(dir_fork, _name))
 
-    _write_release(dir_fork, codename, list(_INDEX_FILES))
+    _write_release(dir_fork, codename, list(_INDEX_FILES), buildconfig.arch)
 
     tui.console.print(
         f"fork_mirror: emitted Release + {len(deb_stanzas)} deb(s) + "
@@ -929,7 +929,7 @@ def _file_hash(path: str, algo: str) -> str:
 
 
 def _write_release(dir_fork: str, codename: str,
-                   index_names: List[str]) -> None:
+                   index_names: List[str], build_arch: str) -> None:
     """Write fork/Release covering uncompressed + .gz variants of each
     index file.  Format mirrors what apt-ftparchive release produces:
     one MD5Sum block + one SHA256 block, each listing every covered file
@@ -954,7 +954,7 @@ def _write_release(dir_fork: str, codename: str,
         f'Suite: {codename}',
         f'Codename: {codename}',
         f'Date: {_date}',
-        'Architectures: amd64 all',
+        f'Architectures: {build_arch} all',
         'Components: ',  # empty for flat layout
         'Description: Athena fork (local source-built packages)',
         'MD5Sum:',

@@ -91,6 +91,24 @@ class ApiBackend(Cli):
         with self._jobs_lock:
             return self._jobs.get(job_id)
 
+    _MAX_COMPLETED_JOBS = 200
+
+    def _prune_completed_jobs(self) -> None:
+        """Cap retained completed (done/error) jobs so a long-lived --api
+        server doesn't accumulate Job records unboundedly (the queue-worker
+        adds one per submit and never evicted any).  Keeps the newest
+        _MAX_COMPLETED_JOBS by finish time; running/queued jobs are never
+        pruned."""
+        with self._jobs_lock:
+            _done = [_j for _j in self._jobs.values()
+                     if _j.state in ('done', 'error')
+                     and _j.finished is not None]
+            if len(_done) <= self._MAX_COMPLETED_JOBS:
+                return
+            _done.sort(key=lambda _j: _j.finished or 0.0)   # finished is non-None here
+            for _old in _done[:-self._MAX_COMPLETED_JOBS]:
+                self._jobs.pop(_old.id, None)
+
     def list_jobs(self) -> 'List[Dict[str, Any]]':
         with self._jobs_lock:
             _items = sorted(self._jobs.values(), key=lambda j: j.submitted)
@@ -165,5 +183,6 @@ class ApiBackend(Cli):
             finally:
                 _job.finished = time.time()
                 self._current = None
+                self._prune_completed_jobs()
         if self._exit_code is None:
             self._exit_code = 0

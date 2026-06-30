@@ -48,7 +48,9 @@ _PKG    = 'pkg'
 # file (no INI sections), but we surface it inside the same selector as one
 # more group so the operator toggles/adds/drops pool-only packages with the
 # identical UI.  On save it routes to config/pool.list (not pkg.list).  The
-# parenthesised name can't collide with a real pkg.list `[group]` header.
+# parenthesised name is RESERVED: a real pkg.list section literally written
+# `[(pool)]` would parse to this same key, so _load_model detects that clash
+# and warns rather than silently conflating the two.
 POOL_GROUP = '(pool)'
 
 
@@ -126,7 +128,14 @@ class SelectPackages:
         for gname, names in groups.items():
             self._groups[gname] = [[n, True] for n in names]
         # Append the pool.list tier as the reserved POOL_GROUP (flat file →
-        # one synthetic group, rendered last).
+        # one synthetic group, rendered last).  A real pkg.list section
+        # literally named [(pool)] parses to this same key and would be
+        # silently overwritten here — detect and warn rather than lose it.
+        if POOL_GROUP in self._groups:
+            utils.logger.warning(
+                f"pkg.list contains a [{POOL_GROUP}] section that collides "
+                f"with the reserved pool tier; the pkg.list group is "
+                f"superseded by config/pool.list")
         self._groups[POOL_GROUP] = [[n, True] for n in _read_flat(self._poolpath)]
         self._meta[POOL_GROUP] = {
             'description': 'config/pool.list — ships in /cdrom/pool, '

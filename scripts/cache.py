@@ -919,10 +919,16 @@ class Cache:
         def _check(kind: str, drops: Dict[str, List[Tuple[str, str]]],
                    hashtable: Dict[str, Dict[Version, List]]) -> None:
             for _name, _entries in drops.items():
-                # Fork's version = max version present in the hashtable
-                # for this name (after supersede, only fork records
-                # remain for these names — by construction of the walk).
-                _fork_versions = list(hashtable.get(_name, {}).keys())
+                # Fork's version = max version present in the hashtable for
+                # this name — but ONLY across records whose real Package field
+                # is this name.  A Provides-injected record (a DIFFERENT binary
+                # that Provides: <name>, keyed under the PROVIDER's own version,
+                # epoch and all) would otherwise inflate the fork version and
+                # defeat the upstream-vs-fork collision gate.
+                _fork_versions = [
+                    _v for _v, _recs in hashtable.get(_name, {}).items()
+                    if any(getattr(_r, 'package', '') == _name for _r in _recs)
+                ]
                 if not _fork_versions:
                     # Should not happen: name was added to _fork_pkg_names
                     # only when a fork record was parsed; either the

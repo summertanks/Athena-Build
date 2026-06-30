@@ -15,7 +15,8 @@ import secrets
 
 logger = logging.getLogger('athena.webapi')
 
-# 32 bytes → 64 hex chars; urlsafe tokens keep curl/header usage painless.
+# 32 bytes → ~43 url-safe base64 chars (secrets.token_urlsafe), not hex;
+# urlsafe tokens keep curl/header usage painless.
 _KEY_BYTES = 32
 
 

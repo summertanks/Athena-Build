@@ -1009,7 +1009,7 @@ class SourceCommandsMixin(SessionState):
                     'pkg':          'source build',
                     'installer':    'source build installer',
                     'live':         'source build live',
-                    'pool':         'source build (pool)',
+                    'pool':         'source build all',
                     'recommended':  'source build recommended',
                     'unclassified': '(none — investigate)',
                 }
@@ -1083,7 +1083,7 @@ class SourceCommandsMixin(SessionState):
                 'pkg':          'source build',
                 'installer':    'source build installer',
                 'live':         'source build live',
-                'pool':         'source build (pool)',
+                'pool':         'source build all',
                 'recommended':  'source build recommended',
                 'unclassified': '(none — investigate)',
             }

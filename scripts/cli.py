@@ -352,7 +352,10 @@ class Cli:
 
             if not self._dispatch_one(line):
                 # Special tokens: quit/exit return False to break the loop.
-                if line.strip() in ('quit', 'exit'):
+                # Key on the FIRST TOKEN like _dispatch_one (which keys on
+                # parts[0]); testing the whole line drifted, so e.g. `quit x`
+                # was dispatched-as-quit but not broken here.
+                if (line.split()[:1] or [''])[0] in ('quit', 'exit'):
                     break
 
         if self._exit_code is None:
@@ -376,8 +379,8 @@ class Cli:
                     # quit/exit ends the queue cleanly; an unknown command
                     # or a handler that raised counts as a failure so the
                     # process exit code is non-zero (CI / scripted installs
-                    # rely on this).
-                    if _cmd.strip() in ('quit', 'exit'):
+                    # rely on this).  Key on the FIRST TOKEN like _dispatch_one.
+                    if (_cmd.split()[:1] or [''])[0] in ('quit', 'exit'):
                         break
                     _failed += 1
             except KeyboardInterrupt:

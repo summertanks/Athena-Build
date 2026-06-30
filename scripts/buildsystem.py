@@ -101,7 +101,7 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         _proc = subprocess.run(['sudo', '-S', '-v'], input=self._password + '\n',
                                capture_output=True, text=True)
         if _proc.returncode != 0:
-            raise RuntimeError(f"Incorrect password or user not in sudoers file: {_proc.stdout.strip()}")
+            raise RuntimeError(f"Incorrect password or user not in sudoers file: {_proc.stderr.strip() or _proc.stdout.strip()}")
 
         # Wipe the chroot now that we have a validated sudo credential.
         # rm -rf the contents (not the directory itself) so dir_chroot remains.
@@ -185,7 +185,7 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
                                capture_output=True, text=True)
         if _proc.returncode != 0:
             raise RuntimeError(
-                f"Incorrect password or user not in sudoers file: {_proc.stdout.strip()}"
+                f"Incorrect password or user not in sudoers file: {_proc.stderr.strip() or _proc.stdout.strip()}"
             )
         _self._password = _password
         _self._password_scrubbed = False

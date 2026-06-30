@@ -172,6 +172,18 @@ class ConfigRunCommandsMixin(SessionState):
     # read-merge-writes the one field (other fields preserved).  build.conf is
     # never touched.
 
+    def _persist_local(self, **fields) -> str:
+        """Persist machine-local field(s) to config/local.conf.  A write
+        failure must NOT abort the in-memory set (the session already holds the
+        new value; only durability is lost) — mirror _set_mode: warn instead of
+        letting the OSError bubble to the generic dispatcher handler.  Returns a
+        status suffix for the setter's console line."""
+        try:
+            utils.write_local_conf(self.config, **fields)
+            return "saved to local.conf"
+        except OSError as _e:
+            return f"WARNING: could not persist to local.conf ({_e})"
+
     def _set_name(self, value: str) -> None:
         """`set name <builder-id>` — this machine's builder identity."""
         _v = value.strip()
@@ -182,8 +194,8 @@ class ConfigRunCommandsMixin(SessionState):
                 tui.COLOR_ERROR)
             return
         self.config.system_name = _v
-        utils.write_local_conf(self.config, name=_v)
-        console.print(f"  name  →  {_v}  (saved to local.conf)",
+        _saved = self._persist_local(name=_v)
+        console.print(f"  name  →  {_v}  ({_saved})",
                       tui.COLOR_HIGHLIGHT)
 
     def _set_create_local_mirror(self, value: str) -> None:
@@ -199,9 +211,9 @@ class ConfigRunCommandsMixin(SessionState):
                 tui.COLOR_ERROR)
             return
         self.config.create_local_mirror = _new
-        utils.write_local_conf(self.config, create_local_mirror=_new)
+        _saved = self._persist_local(create_local_mirror=_new)
         console.print(
-            f"  create-local-mirror  →  {_new}  (saved to local.conf)",
+            f"  create-local-mirror  →  {_new}  ({_saved})",
             tui.COLOR_HIGHLIGHT)
 
     def _set_jobs(self, value: str) -> None:
@@ -218,9 +230,9 @@ class ConfigRunCommandsMixin(SessionState):
                 tui.COLOR_ERROR)
             return
         self.config.max_parallel_builds = _n
-        utils.write_local_conf(self.config, max_parallel_builds=_n)
+        _saved = self._persist_local(max_parallel_builds=_n)
         console.print(
-            f"  jobs (MaxParallelBuilds)  →  {_n}  (saved to local.conf)",
+            f"  jobs (MaxParallelBuilds)  →  {_n}  ({_saved})",
             tui.COLOR_HIGHLIGHT)
 
     def _set_cpus(self, value: str) -> None:
@@ -235,8 +247,8 @@ class ConfigRunCommandsMixin(SessionState):
             console.print(f"  cpus must be >= 0, got {_f}", tui.COLOR_ERROR)
             return
         self.config.build_cpus = _f
-        utils.write_local_conf(self.config, build_cpus=_f)
-        console.print(f"  cpus (BuildCpus)  →  {_f}  (saved to local.conf)",
+        _saved = self._persist_local(build_cpus=_f)
+        console.print(f"  cpus (BuildCpus)  →  {_f}  ({_saved})",
                       tui.COLOR_HIGHLIGHT)
 
     def _set_memory(self, value: str) -> None:
@@ -250,10 +262,10 @@ class ConfigRunCommandsMixin(SessionState):
                 f"got {value!r}", tui.COLOR_ERROR)
             return
         self.config.build_memory = _v
-        utils.write_local_conf(self.config, build_memory=_v)
+        _saved = self._persist_local(build_memory=_v)
         console.print(
             f"  memory (BuildMemory)  →  {_v or '(no cap)'}  "
-            "(saved to local.conf)", tui.COLOR_HIGHLIGHT)
+            f"({_saved})", tui.COLOR_HIGHLIGHT)
 
     def _set_docker_server(self, value: str) -> None:
         """`set docker-server <url>` — local Docker daemon endpoint
@@ -264,10 +276,10 @@ class ConfigRunCommandsMixin(SessionState):
         if _v.lower() in ('local', 'none', ''):
             _v = ''
         self.config.docker_server = _v
-        utils.write_local_conf(self.config, docker_server=_v)
+        _saved = self._persist_local(docker_server=_v)
         console.print(
             f"  docker-server  →  {_v or '(local socket)'}  "
-            "(saved to local.conf)", tui.COLOR_HIGHLIGHT)
+            f"({_saved})", tui.COLOR_HIGHLIGHT)
 
     def _set_signing_uid(self, value: str) -> None:
         """`set signing-uid <'Name <email>'>` — repo signing identity."""
@@ -278,8 +290,8 @@ class ConfigRunCommandsMixin(SessionState):
                 tui.COLOR_ERROR)
             return
         self.config.signing_key_uid = _v
-        utils.write_local_conf(self.config, signing_key_uid=_v)
-        console.print(f"  signing-uid  →  {_v}  (saved to local.conf)",
+        _saved = self._persist_local(signing_key_uid=_v)
+        console.print(f"  signing-uid  →  {_v}  ({_saved})",
                       tui.COLOR_HIGHLIGHT)
 
     _SETTABLE: 'dict[str, Callable]' = {}    # populated below

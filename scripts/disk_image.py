@@ -566,7 +566,11 @@ def build_disk_image(
         if _root_part is not None:
             _fsck = _sudo(['e2fsck', '-f', '-p', _root_part],
                           password, capture=True)
-            if _fsck.returncode in (1, 2):
+            # e2fsck's exit status is a bitmask: 1=errors corrected,
+            # 2=corrected+reboot-recommended, so 3 (=1|2) is also "cleaned".
+            # Treat all of 1..3 as cleaned before the >=4 serious check, else
+            # rc=3 falls through both branches silently.
+            if 1 <= _fsck.returncode < 4:
                 logger.info(
                     f"e2fsck cleaned the root fs (rc={_fsck.returncode})")
             elif _fsck.returncode >= 4:
@@ -603,6 +607,16 @@ def build_disk_image(
         if _loop_dev is not None:
             _sudo(['losetup', '-d', _loop_dev], password, capture=True)
         _sudo(['rmdir', _mnt], password, capture=True)
+        # Remove the sparse intermediate raw image if it survived.
+        # _convert_to_qcow2 unlinks it on the success path, so this only fires
+        # on a failure / early-return path where it would otherwise leak GBs
+        # of (sparse) disk that no later step cleans up.
+        if os.path.exists(_raw):
+            try:
+                os.unlink(_raw)
+            except OSError as _e:
+                logger.warning(
+                    f"could not remove intermediate raw image {_raw}: {_e}")
 
 
 def _has_bios_modules(mnt: str) -> bool:

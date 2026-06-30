@@ -1324,6 +1324,7 @@ def remote_publish(
         # build.json, which lingers after a drop).  Releases ownership to the
         # commons; the .deb stays in the pool for takeover.  Best-effort — a
         # missing/unreadable lockfile just skips emission (no spurious release).
+        _appended_deprecations: 'list' = []   # 6b deprecations, for 6c's view
         try:
             import selection_lock as _sl
             _lock, _lstatus = _sl.read_selection_state(config)
@@ -1352,6 +1353,7 @@ def remote_publish(
                         )
                         _seq = _candidate_seq
                         _dep_appended += 1
+                        _appended_deprecations.append(_dc)
                     except (OSError, ValueError) as _e:
                         logger.warning(
                             "coord.publish: deprecation append failed for "
@@ -1369,8 +1371,12 @@ def remote_publish(
         # the fetched view.  Ownership retained; the old .deb stays in the
         # append-only pool as a labeled prune candidate.  Best-effort.
         try:
+            # Include the 6b deprecations in the view so a file just released
+            # to the commons is NOT re-asserted as obsolete (ownership
+            # retained) here — the deprecation must win the fold.
             _view = dict(_by_builder)
-            _view[builder_id] = list(_view.get(builder_id, [])) + list(_pending)
+            _view[builder_id] = (list(_view.get(builder_id, []))
+                                 + list(_pending) + _appended_deprecations)
             _obs_claims = emit_supersession_obsolescence(
                 builder_id=builder_id,
                 by_builder=_view,

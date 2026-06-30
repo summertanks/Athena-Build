@@ -131,6 +131,13 @@ def _run_rsync_streaming(
             else:
                 _tail.append(_s.decode('utf-8', 'replace'))
     _proc.wait()
+    # Flush the residual tail: rsync's final error line may not be newline-
+    # terminated, so it sits in _buf and was dropped from the failure tail.
+    _resid = _buf.strip()
+    if _resid:
+        _first = _resid.split()[0].replace(b',', b'')
+        if not _first.isdigit():
+            _tail.append(_resid.decode('utf-8', 'replace'))
     return _proc.returncode, ' | '.join(_tail[-5:])
 
 

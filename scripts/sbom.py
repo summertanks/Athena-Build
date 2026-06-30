@@ -12,8 +12,9 @@ Per-source component carries:
     Debian convention)
   - DSC sha256 hash when present (links to the exact source archive)
   - patch count + patch-set hash (`utils.patch_set_hash` over the
-    sorted *.patch files in patch/source/<name>/<version>/); empty
-    hash for pristine sources
+    sorted *.patch files in patch/source/<name>/<version>/); a pristine
+    source (no patches) carries the canonical empty-input SHA-256 digest,
+    not a literally empty string
 
 Top-level `metadata.component` records distribution + version +
 codename + arch + snapshot timestamp so consumers can correlate
@@ -95,7 +96,8 @@ def _component_for_source(src: Any, baseid: str,
     if _sha:
         _comp['hashes'] = [{'alg': 'SHA-256', 'content': _sha}]
 
-    # Patch provenance — empty hash + 0 count for pristine sources.
+    # Patch provenance — 0 count + the canonical empty-input SHA-256 digest
+    # (not a literally empty string) for pristine sources.
     _pkg_patch_dir = os.path.join(
         patch_root, _name, utils.version_no_epoch(src.version),
     )

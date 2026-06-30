@@ -170,10 +170,11 @@ def scan_repo_state(config: 'BuildConfig', subdir: str = 'main',
     """Generate + parse a Packages snapshot of one repo/ subdir.
 
     `subdir` selects which segment of the segregated repo to scan:
-      'main'    installable corpus — default, what `repo audit` uses
-      'doc'     -doc side artifacts
-      'dbgsym'  -dbgsym side artifacts
-      'tests'   -test / -tests side artifacts
+      'main'      installable corpus — default, what `repo audit` uses
+      'main-udeb' debian-installer udebs (Section: debian-installer)
+      'doc'       -doc side artifacts
+      'dbgsym'    -dbgsym side artifacts
+      'tests'     -test / -tests side artifacts
 
     (2026-05-22 fix-up): paths come from
     config.deb_dir_for(subdir), which routes to the new nested
@@ -1037,8 +1038,9 @@ def audit_dep_closure(state: RepoState,
     in the install corpus.  Honours Provides per Debian Policy §7.5
     (versioned Provides count exactly as if they were real pkgs).
 
-    Returns (unresolved, weak): each is a list of
-    (pkg, field, relation_str, why) tuples.
+    Returns (unresolved, weak):
+      - unresolved is a list of (pkg, field, relation_str, why) 4-tuples
+      - weak       is a list of (pkg, field, relation_str) 3-tuples
     """
     from debian.deb822 import PkgRelation
     _unresolved: list = []

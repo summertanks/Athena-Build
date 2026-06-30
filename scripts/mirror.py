@@ -782,7 +782,11 @@ def save_mirror_conf(config, doc: dict) -> bool:
 def mirror_conf_status(config) -> str:
     """The verification status of mirror.conf ('ok'|'missing'|'badsig'|
     'malformed') — lets the `mirror` command group refuse to act on a
-    tampered file up front."""
+    tampered file up front.
+
+    SIDE EFFECT: the first call on a box with legacy mirror.<name>.state files
+    triggers the one-time legacy→mirror.conf migration WRITE (see
+    load_mirror_conf / get_registration)."""
     return load_mirror_conf(config)[1]
 
 
@@ -810,7 +814,14 @@ def reseal_mirror_conf(config) -> 'tuple[bool, str]':
 def get_registration(config) -> dict:
     """The {mirror-name: builder-id} registration map from mirror.conf — the
     sidecar that lets onboarding skip a re-register on a box already joined to
-    a mirror.  Empty on missing / tamper."""
+    a mirror.  Empty on missing / tamper.
+
+    SIDE EFFECT: like every load_mirror_conf reader, the FIRST call on a box
+    still carrying legacy mirror.<name>.state files performs the one-time
+    legacy→mirror.conf migration, which WRITES mirror.conf.  This is
+    deliberate (the read must migrate so a legacy box answers correctly);
+    pass load_mirror_conf(..., migrate=False) only for a strictly
+    side-effect-free status read (e.g. the web API)."""
     _doc, _status = load_mirror_conf(config)
     if _status not in ('ok', 'missing'):
         return {}
@@ -837,7 +848,11 @@ def mirror_state_path(config, name: str) -> str:
 
 def read_mirror_state(config, name: str) -> Optional[dict]:
     """Return the mirror's state dict from mirror.conf, or None if absent /
-    tampered.  Caller treats None as `mirror not registered`."""
+    tampered.  Caller treats None as `mirror not registered`.
+
+    SIDE EFFECT: the first call on a box with legacy mirror.<name>.state files
+    triggers the one-time legacy→mirror.conf migration WRITE (see
+    load_mirror_conf / get_registration)."""
     _doc, _status = load_mirror_conf(config)
     if _status not in ('ok', 'missing'):
         return None                       # badsig / malformed → refuse
