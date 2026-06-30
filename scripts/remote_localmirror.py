@@ -199,7 +199,8 @@ def populate(plan: dict, directory: str) -> dict:
                     'failures': [['__disk__',
                                   f'insufficient space: need {_needed}B '
                                   f'have {_free}B']]}
-    _cum_total = int(plan.get('total_size', 0)) or 1
+    # `or 0` guards a JSON null total_size (int(None) raises) — match line 187.
+    _cum_total = int(plan.get('total_size', 0) or 0) or 1
     _cum_done = 0
     _downloaded = _skipped = 0
     _failures: 'list[list[str]]' = []

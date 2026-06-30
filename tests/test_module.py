@@ -16711,6 +16711,68 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_remote_localmirror_cum_total_guards_null_total_size():
+    """Regression (audit #165): the cumulative total must coerce a JSON-null
+    total_size like line 187 — int(None) raises."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_localmirror
+    assert "int(plan.get('total_size', 0) or 0) or 1" in inspect.getsource(
+        remote_localmirror), "_cum_total must guard a null total_size with `or 0`"
+
+
+def test_fork_mirror_release_architectures_uses_build_arch():
+    """Regression (audit #126): fork Release Architectures line must reflect
+    buildconfig.arch, not a hardcoded 'amd64 all'."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    _src = inspect.getsource(fork_mirror)
+    assert "'Architectures: amd64 all'" not in _src, "arch is hardcoded"
+    assert "f'Architectures: {build_arch} all'" in _src
+
+
+def test_remote_orchestrate_open_tunnel_sets_strict_host_key_checking():
+    """Regression (audit #168): _open_tunnel's ssh argv must include
+    StrictHostKeyChecking=accept-new like _ssh_base."""
+    import inspect
+    import re
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate
+    # ExitOnForwardFailure is unique to _open_tunnel; assert StrictHostKey
+    # follows it in the same argv.
+    assert re.search(
+        r"ExitOnForwardFailure=yes',\s*\n?\s*'-o',"
+        r"\s*'StrictHostKeyChecking=accept-new'",
+        inspect.getsource(remote_orchestrate)), (
+        "_open_tunnel argv must carry StrictHostKeyChecking=accept-new")
+
+
+def test_disk_image_e2fsck_handles_exit_code_three():
+    """Regression (audit #121): e2fsck exit status is a bitmask; rc=3 (=1|2,
+    corrected+reboot) must be treated as cleaned, not fall through silently."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    assert "1 <= _fsck.returncode < 4" in inspect.getsource(disk_image), (
+        "e2fsck cleaned-case must cover rc 1..3, not just (1, 2)")
+
+
+def test_onboarding_checks_set_registration_return():
+    """Regression (audit #145): the federation flow must check
+    mirror.set_registration's return and fail the wizard on False."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    assert "if not _mirror.set_registration" in inspect.getsource(onboarding), (
+        "set_registration failure must abort the wizard (stay un-configured)")
+
+
 def test_dep_drift_hard_dep_violation_omits_empty_constraint():
     """Regression (audit #111): a hard pre_depends/depends violation for an
     UNVERSIONED dep must render the name alone, not 'name ( )' — mirror the
@@ -42090,6 +42152,11 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_remote_localmirror_cum_total_guards_null_total_size,
+        test_fork_mirror_release_architectures_uses_build_arch,
+        test_remote_orchestrate_open_tunnel_sets_strict_host_key_checking,
+        test_disk_image_e2fsck_handles_exit_code_three,
+        test_onboarding_checks_set_registration_return,
         test_dep_drift_hard_dep_violation_omits_empty_constraint,
         test_append_claim_writes_all_bytes,
         test_run_rsync_streaming_flushes_residual_tail,
