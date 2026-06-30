@@ -18064,6 +18064,41 @@ def test_fork_mirror_discover_skips_dirs_missing_debian_control():
         assert found == [], f"expected empty, got {found}"
 
 
+def test_fork_mirror_read_pkg_version_rejects_broken_changelog():
+    """Regression (audit #11): an empty/truncated/malformed debian/changelog
+    must raise ValueError from _read_pkg_version so _generate_source_packages /
+    _build_packages_stanzas (which guard (OSError, ValueError)) log-and-skip
+    the fork — rather than aborting the cache build or silently shipping a
+    'None' version (python-debian's file-handle form yields version=None on a
+    broken changelog instead of raising).  A valid changelog still parses."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as _td:
+        _deb = os.path.join(_td, 'debian')
+        os.makedirs(_deb)
+        _cl = os.path.join(_deb, 'changelog')
+        for _label, _content in [('empty', ''),
+                                 ('whitespace', '   \n'),
+                                 ('garbage', 'not a changelog at all\n')]:
+            with open(_cl, 'w') as _fh:
+                _fh.write(_content)
+            try:
+                _v = fork_mirror._read_pkg_version(_td)
+            except ValueError:
+                pass                              # expected
+            else:
+                raise AssertionError(
+                    f"{_label} changelog accepted, got {_v!r}")
+        # A valid changelog still returns its top version verbatim.
+        with open(_cl, 'w') as _fh:
+            _fh.write(
+                'athena-base-files (12.4+athena1) thor; urgency=low\n\n'
+                '  * test entry\n\n'
+                ' -- Tester <t@example.org>  Mon, 30 Jun 2026 00:00:00 +0000\n')
+        assert fork_mirror._read_pkg_version(_td) == '12.4+athena1'
+
+
 def test_fork_mirror_generate_empty_tree_returns_false():
     """No source trees → False return → no Mirror should be registered
     (skip-if-empty per FORK-01 plan Q6)."""
@@ -40636,6 +40671,7 @@ def main() -> int:
         test_download_file_file_scheme_missing_source,
         test_fork_mirror_discover_skips_repo_subdir,
         test_fork_mirror_discover_skips_dirs_missing_debian_control,
+        test_fork_mirror_read_pkg_version_rejects_broken_changelog,
         test_fork_mirror_generate_empty_tree_returns_false,
         test_fork_mirror_generate_emits_complete_layout,
         test_fork_mirror_strips_epoch_from_constructed_filenames,

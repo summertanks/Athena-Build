@@ -25,7 +25,7 @@ import subprocess
 import time
 from typing import Dict, List, Tuple
 
-from debian.changelog import Changelog
+from debian.changelog import Changelog, ChangelogParseError
 from debian.deb822 import Deb822
 
 import tui
@@ -665,10 +665,25 @@ def _generate_source_packages(pkg_dirs: List[str],
 
 
 def _read_pkg_version(pkg_dir: str) -> str:
-    """Top-entry version from debian/changelog."""
-    with open(os.path.join(pkg_dir, 'debian', 'changelog'), 'r') as fh:
-        _ch = Changelog(fh)
-    return str(_ch.version)
+    """Top-entry version from debian/changelog.
+
+    Raises ValueError on an empty/truncated/malformed changelog so the
+    generate paths (which guard `(OSError, ValueError)`) log-and-skip the
+    fork rather than aborting the whole cache build or silently shipping a
+    bogus version.  python-debian is inconsistent on a broken changelog: the
+    file-handle form (used here) yields a ``None`` version on 1.0.x, while the
+    string form raises IndexError/ChangelogParseError on other versions —
+    normalise BOTH to ValueError.  A missing file still raises OSError.
+    """
+    _path = os.path.join(pkg_dir, 'debian', 'changelog')
+    with open(_path, 'r') as fh:
+        try:
+            _ver = Changelog(fh).version
+        except (IndexError, ChangelogParseError) as e:
+            raise ValueError(f"malformed changelog {_path}: {e}") from e
+    if _ver is None:
+        raise ValueError(f"empty or unparseable changelog {_path}")
+    return str(_ver)
 
 
 def _filename_version(ver: str) -> str:
