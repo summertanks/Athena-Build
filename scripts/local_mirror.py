@@ -272,12 +272,25 @@ def _write_release(directory: str) -> None:
         if os.path.isfile(_p):
             _rows.append((_name, os.path.getsize(_p),
                           utils.get_md5(_p), utils.get_sha256(_p)))
+    # Derive Architectures from the .debs actually present (the _<arch>.deb
+    # filename token), not a hardcoded 'amd64' — a local mirror built on a
+    # non-amd64 host would otherwise ship the wrong arch line.
+    _arches: 'set[str]' = set()
+    try:
+        for _f in os.listdir(directory):
+            if _f.endswith('.deb') and _f.count('_') >= 2:
+                _a = _f.rsplit('_', 1)[1][:-len('.deb')]
+                if _a and _a != 'all':
+                    _arches.add(_a)
+    except OSError:
+        pass
+    _arch_line = ' '.join(sorted(_arches) + ['all'])
     _lines = [
         f'Origin: {LOCAL_ORIGIN}',
         'Label: Athena Local Build Mirror',
         'Suite: local',
         'Codename: local',
-        'Architectures: amd64 all',
+        f'Architectures: {_arch_line}',
         'Components:',                      # empty → flat layout
         f'Date: {formatdate(time.time(), usegmt=True)}',
         'Description: Athena local build-closure mirror',

@@ -1681,6 +1681,13 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             local_mirror=_lm)
         if not _ok:
             console.print(f"  {_detail}", tui.COLOR_ERROR)
+            # add_remote failed — remove the key we copied at step 3, mirroring
+            # cmd_container_remote_delete's cleanup, so a retry/abort doesn't
+            # leave stale credential material in config/.
+            try:
+                os.remove(_keydst)
+            except OSError:
+                pass
             return
         # Fresh per-remote API token for the build agent (REMOTE-API): shipped
         # to the remote + sent back as X-Athena-Token over the SSH tunnel.

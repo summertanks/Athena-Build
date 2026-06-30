@@ -16714,6 +16714,42 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_local_mirror_release_arch_derived_from_debs():
+    """Regression (audit #139): the local mirror Release Architectures line must
+    reflect the .debs actually present (a non-amd64 host), not a hardcoded
+    amd64."""
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import local_mirror
+    with tempfile.TemporaryDirectory() as _td:
+        open(os.path.join(_td, 'foo_1.0_arm64.deb'), 'w').close()
+        open(os.path.join(_td, 'bar_1.0_all.deb'), 'w').close()
+        local_mirror._write_release(_td)
+        with open(os.path.join(_td, 'Release')) as _fh:
+            _r = _fh.read()
+    assert 'Architectures: arm64 all' in _r, _r
+
+
+def test_tier3_cleanup_source_pins():
+    """Pins for Tier-3 fixes #26/#36/#177 (best-effort cleanup / doc accuracy /
+    empty-file guard) where a behavioural harness is disproportionate."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import buildlog
+    import select_packages
+    # #26: copied SSH key removed on the add_remote failure path
+    assert 'os.remove(_keydst)' in inspect.getsource(build), '#26'
+    # #36: the over-broad "MUST NOT raise" claim is softened to be accurate
+    assert 'MUST NOT raise into the build path' not in inspect.getsource(
+        buildlog), '#36'
+    # #177: don't create an empty pool.list
+    assert 'if _pool_sel or os.path.isfile(self._poolpath):' in inspect.getsource(
+        select_packages), '#177'
+
+
 def test_progress_bar_set_max_clamps_to_current_value():
     """Regression (audit #196): set_max must not drop _max below the current
     progress (_value) — that would make `filled` exceed the bar width and
@@ -42508,6 +42544,8 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_local_mirror_release_arch_derived_from_debs,
+        test_tier3_cleanup_source_pins,
         test_progress_bar_set_max_clamps_to_current_value,
         test_tier3_tui_auth_source_pins,
         test_diag_audit_stanza_empty_value_only_required_fields,

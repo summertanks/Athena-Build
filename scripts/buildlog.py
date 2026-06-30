@@ -55,7 +55,11 @@ class BuildLog:
     """Accumulate a verbose per-package build/tunnel narrative and write it
     to ``<log_dir>/<package>.buildlog``.
 
-    All methods are best-effort and MUST NOT raise into the build path.
+    Best-effort: write() swallows every IO error, and the accumulation
+    helpers tolerate the inputs the build path passes (None/odd sizes,
+    non-string values).  They do NOT wrap the message-formatting itself, so a
+    pathological argument whose __str__ raises could still propagate — the
+    callers pass plain build metadata, so that does not arise in practice.
     Typical use::
 
         blog = BuildLog(buildlog_dir, src.package, kind='build')

@@ -509,8 +509,13 @@ class SelectPackages:
         _saved = self._path
         if POOL_GROUP in self._groups:
             _pool_sel = [n for n, s in self._groups[POOL_GROUP] if s]
-            write_flat_list(self._poolpath, _pool_sel)
-            _saved = f'{self._path} + {self._poolpath}'
+            # Don't CREATE an empty pool.list: skip the write when nothing is
+            # selected AND the file doesn't already exist (a spurious empty
+            # file the cache discard-path would orphan).  Still write to empty
+            # an existing pool.list when the operator clears all pool packages.
+            if _pool_sel or os.path.isfile(self._poolpath):
+                write_flat_list(self._poolpath, _pool_sel)
+                _saved = f'{self._path} + {self._poolpath}'
         self._unsaved = False
         self._tui.print(f'  select: saved {_saved}')
         self._render()
