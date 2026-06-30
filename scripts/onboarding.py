@@ -187,8 +187,17 @@ def _prompt_machine_settings(session) -> bool:
     try:
         _jobs = int(_jobs_raw) if _jobs_raw else _default_jobs
     except ValueError:
+        console.print(
+            f"  jobs: {_jobs_raw!r} is not an integer — using {_default_jobs}",
+            tui.COLOR_WARNING)
         _jobs = _default_jobs
-    _jobs = max(1, min(_jobs, 8))
+    _clamped = max(1, min(_jobs, 8))
+    if _clamped != _jobs:
+        # Mirror `set jobs`: surface the clamp instead of silently adjusting.
+        console.print(
+            f"  jobs clamped to {_clamped} (1-8, docker-py pool limit)",
+            tui.COLOR_WARNING)
+    _jobs = _clamped
 
     # Signing UID is NOT prompted here — it must match the key actually on disk.
     # Adopt the real UID of the signing key established by the role flow: the
