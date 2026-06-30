@@ -353,7 +353,11 @@ def run_remote_agent(host: str, local_bundle: str, remote_dir: str,
 
     def _open_tunnel(remote_port: int) -> 'tuple[subprocess.Popen, int]':
         _lp = _free_local_port()
-        _argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes']
+        # StrictHostKeyChecking=accept-new matches the _ssh_base contract so
+        # every ssh site behaves the same (TOFU on first connect, refuse on a
+        # changed key) — _open_tunnel previously omitted it.
+        _argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes',
+                 '-o', 'StrictHostKeyChecking=accept-new']
         if ssh_key:
             _argv += ['-i', ssh_key]
         _argv += ['-N', '-L', f'127.0.0.1:{_lp}:127.0.0.1:{remote_port}', host]
