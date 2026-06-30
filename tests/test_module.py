@@ -15736,6 +15736,26 @@ def test_live_chroot_sources_list_is_self_contained():
     )
 
 
+def test_generate_system_configs_machine_id_stays_empty_for_first_boot():
+    """Regression (audit #48): /etc/machine-id must ship EMPTY so each clone
+    generates a unique id on first boot.  generate_system_configs must write it
+    empty AND must NOT pass --setup-machine-id to systemd-firstboot, which would
+    commit a concrete random id that disk_image.py rsyncs (-aHAX) verbatim into
+    every image — so all clones would share one machine-id (DHCP collisions,
+    journal/systemd identity bleed)."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import chroot
+    _src = inspect.getsource(chroot._ChrootMixin.generate_system_configs)
+    assert "_write_chroot_file('/etc/machine-id', '')" in _src, (
+        "machine-id must be written empty for first-boot generation")
+    # Match the quoted argv literal, not a prose mention in a comment.
+    assert "'--setup-machine-id'" not in _src, (
+        "systemd-firstboot must NOT pass --setup-machine-id — it overrides the "
+        "empty /etc/machine-id with a fixed id shared across every clone")
+
+
 # ─── UX-05 Path B: headless CLI backend (scripts/cli.py) ────────────────────
 
 def _fresh_cli():
@@ -24192,6 +24212,34 @@ def test_buildlog_writes_header_sections_and_files():
         assert 'END libzstd' in _txt
 
 
+def test_install_expand_or_group_resolution_is_deterministic():
+    """Regression (audit #27): _install_expand must resolve OR-groups
+    deterministically.  The frontier was seeded from a set, whose iteration
+    order over str keys is PYTHONHASHSEED-randomized; the OR-group
+    satisfied-check short-circuits on whatever is already in the closure, so an
+    unsorted frontier resolves a genuine OR-group (here P:`A|B`, Q:`B|A`) to a
+    different provider run-to-run — drifting the closure (and the mirror
+    download manifest).  Run the same closure under several PYTHONHASHSEED
+    values in fresh interpreters; the result must be identical."""
+    import sys
+    import subprocess
+    _script = (
+        'import sys; sys.path.insert(0, %r)\n'
+        'import build_closure as bc\n'
+        'bi = {"P": {"Depends": "A | B"}, "Q": {"Depends": "B | A"},'
+        ' "A": {}, "B": {}}\n'
+        'print(",".join(sorted(bc._install_expand(["P", "Q"], bi, {}))))\n'
+    ) % os.path.join(_ROOT, 'scripts')
+    _results = set()
+    for _seed in ('0', '1', '2', '3', '4', '5', '6', '7'):
+        _env = dict(os.environ, PYTHONHASHSEED=_seed)
+        _out = subprocess.run([sys.executable, '-c', _script], env=_env,
+                              capture_output=True, text=True, check=True)
+        _results.add(_out.stdout.strip())
+    assert _results == {'B,P,Q'}, (
+        f"non-deterministic OR-group closure across hash seeds: {_results}")
+
+
 def test_buildlog_write_never_raises_on_unwritable_dir():
     """OBS-04 load-bearing safety invariant: a logging IO failure MUST
     NOT propagate.  The 24-36h repo rebuild cannot be lost to a log write
@@ -24203,6 +24251,73 @@ def test_buildlog_write_never_raises_on_unwritable_dir():
     _b.section('X')
     _b.bullet('y')
     _b.write()   # must not raise — no assertion needed; reaching here passes
+
+
+def test_buildlog_write_encodes_utf8_under_ascii_locale():
+    """Regression (audit #34): BuildLog.write must encode the narrative as
+    UTF-8 — it carries '→'/'…' glyphs (relocation/file + buildcontainer
+    bullets), so under a C/ASCII locale the default text encoder would raise
+    UnicodeEncodeError, the broad except would swallow it, and the .buildlog
+    would silently never be written.  Simulate the C locale by making a
+    no-encoding text open() default to ASCII; assert the log is still written
+    and round-trips the glyph."""
+    import sys
+    import tempfile
+    import builtins
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildlog
+    _real_open = builtins.open
+
+    def _ascii_default_open(file, mode='r', *_a, **_kw):
+        # A C/ASCII locale: a text open with no explicit encoding uses ASCII
+        # (what locale.getpreferredencoding(False) would return).
+        if 'b' not in mode and 'encoding' not in _kw:
+            _kw['encoding'] = 'ascii'
+        return _real_open(file, mode, *_a, **_kw)
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _bl = buildlog.BuildLog(_tmp, 'foo', kind='build')
+        _bl.relocation('foo_1.0_amd64.deb', 'dists/thor/main')   # emits '→'
+        with mock.patch.object(buildlog, 'open', _ascii_default_open,
+                               create=True):
+            _bl.write()
+        assert os.path.isfile(_bl._path), (
+            "buildlog silently not written — UTF-8 encoding lost under the "
+            "simulated ASCII locale")
+        with _real_open(_bl._path, encoding='utf-8') as _fh:
+            _content = _fh.read()
+        assert '→' in _content, repr(_content)              # '→' survived
+
+
+def test_readfile_decodes_utf8_under_ascii_locale():
+    """Regression (audit #43): utils.readfile must decode as UTF-8, not the
+    locale default — Debian indices (Packages/Sources) are UTF-8, so under a
+    C/ASCII locale a non-ASCII byte (accented maintainer, em-dash) would raise
+    UnicodeDecodeError (a ValueError) and escape the cache build's OSError-only
+    guards, crashing the whole build."""
+    import sys
+    import tempfile
+    import builtins
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    _real_open = builtins.open
+
+    def _ascii_default_open(file, mode='r', *_a, **_kw):
+        if 'b' not in mode and 'encoding' not in _kw:
+            _kw['encoding'] = 'ascii'
+        return _real_open(file, mode, *_a, **_kw)
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _p = os.path.join(_tmp, 'Packages')
+        with _real_open(_p, 'w', encoding='utf-8') as _fh:
+            _fh.write('Package: foo\nMaintainer: Jérôme — Test <j@x>\n'
+                      'Description: an em — dash\n')
+        with mock.patch.object(utils, 'open', _ascii_default_open,
+                               create=True):
+            _content = utils.readfile(_p)            # must NOT raise
+        assert 'Jérôme' in _content and '—' in _content, repr(_content)
 
 
 def test_buildlog_methods_tolerate_bad_input_and_helpers():
@@ -26779,6 +26894,75 @@ def test_virtual_build_from_cache_collapses_hashtable_shape():
     _ctrl = _u['libfoo']['1.0-1']
     assert _ctrl['Package'] == 'libfoo'
     assert _ctrl['Depends'] == 'libc6'
+
+
+def test_virtual_validate_canon_map_uses_filtered_universe():
+    """Regression (audit #83): validate's _canon_map must be built from the
+    from_cache-FILTERED _universe (standalone Package==name producer), NOT the
+    raw package/udeb hashtables.  The raw walk took _rec[0] + the apt-highest
+    version, which for a Provides-aliased name (telnet) grabs the epoch-bearing
+    alias inetutils-telnet (2:...) over the standalone and misattributes the
+    binary's source — diverging from synth, which uses the same filtered
+    universe."""
+    import inspect
+    import re
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    import virtual_build as _vb
+    import apt_pkg as _ap
+    _ap.init_system()
+
+    # (a) source pin: the canon block must iterate _universe, not the raw
+    # hashtables (walking those re-introduces the Provides-alias bug).
+    _src = inspect.getsource(BuildSession.cmd_virtual_validate)
+    _m = re.search(r'_canon_map[^\n]*=\s*\{\}.*?(?=_tunnel_srcs)',
+                   _src, re.DOTALL)
+    assert _m, "canon-map construction block not found"
+    _block = _m.group(0)
+    assert 'for _bn, _vers in _universe' in _block, (
+        "canon map must iterate the from_cache-filtered _universe")
+    assert ('package_hashtable' not in _block
+            and 'udeb_hashtable' not in _block), (
+        "canon map must NOT walk the raw hashtables (Provides-alias "
+        "misattribution)")
+
+    # (b) behavioral: from_cache drops the Provides-aliased version, so a canon
+    # map built from _universe attributes telnet to the STANDALONE source.
+    class _Pkg(dict):
+        def __init__(self, **_f):
+            super().__init__()
+            self.update(_f)
+            self.package = _f['Package']
+            self.version = _f['Version']
+
+    class _Cache:
+        package_hashtable = {
+            'telnet': {
+                # standalone transitional dummy (Package == telnet)
+                '0.17+2.4-2': [_Pkg(Package='telnet', Version='0.17+2.4-2',
+                                    Architecture='all',
+                                    Source='netkit-telnet')],
+                # a DIFFERENT binary that Provides: telnet; epoch sorts ABOVE
+                '2:2.4-2': [_Pkg(Package='inetutils-telnet', Version='2:2.4-2',
+                                 Architecture='amd64', Provides='telnet',
+                                 Source='inetutils')],
+            },
+        }
+        udeb_hashtable: dict = {}
+
+    _universe = _vb.from_cache(_Cache())
+    _canon: dict = {}
+    for _bn, _vers in _universe.items():
+        _best_v = _best_r = None
+        for _v, _rec in _vers.items():
+            if (_best_v is None
+                    or _ap.version_compare(str(_v), str(_best_v)) > 0):
+                _best_v, _best_r = _v, _rec
+        if _best_r is not None:
+            _canon[_bn] = (_best_r.get('Source') or _bn).split(' ', 1)[0]
+    assert _canon.get('telnet') == 'netkit-telnet', (
+        f"canon misattributed via Provides alias: {_canon}")
 
 
 def test_virtual_build_build_profile_filter_skips_nodoc_when_active():
@@ -32489,6 +32673,56 @@ def test_canonical_config_round_trip_and_verify():
             assert _f.read() == 'V1PKG\n'
 
 
+def test_apply_canonical_config_is_all_or_nothing():
+    """Regression (audit #86): apply_canonical_config applies the four list
+    files ALL-OR-NOTHING.  If a later list's write fails (bad dir / ENOSPC),
+    pkg.list must NOT be left rewritten with federation content while the
+    others keep stale content and the caller is told 'NOT applied' — a silent
+    split brain where no re-resolve is forced."""
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import config_manifest as _cm
+    with tempfile.TemporaryDirectory() as _td:
+        _o = {n: os.path.join(_td, f'o_{n}.list')
+              for n in ('pkg', 'pool', 'live', 'installer')}
+        for _n, _txt in (('pkg', 'FED-PKG\n'), ('pool', 'FED-POOL\n'),
+                         ('live', 'FED-LIVE\n'), ('installer', 'FED-INST\n')):
+            with open(_o[_n], 'w') as _f:
+                _f.write(_txt)
+        _coord = os.path.join(_td, 'coord')
+        _sha = _cm.write_canonical_config(
+            _coord, _o['pkg'], _o['pool'], _o['live'], _o['installer'])
+        # peer's PRIOR on-disk content that MUST survive a failed apply
+        _p = {n: os.path.join(_td, f'p_{n}.list')
+              for n in ('pkg', 'pool', 'live')}
+        for _n in _p:
+            with open(_p[_n], 'w') as _f:
+                _f.write(f'PRIOR-{_n.upper()}\n')
+        # installer target lives in a NON-EXISTENT dir → staging raises mid-way
+        _bad_installer = os.path.join(_td, 'nope', 'p_installer.list')
+
+        _ok, _det, _payload = _cm.apply_canonical_config(
+            _coord, _sha, _p['pkg'], _p['pool'], _p['live'], _bad_installer)
+        assert _ok is False, (_ok, _det)
+        # all-or-nothing: NONE of the existing lists were mutated
+        for _n in ('pkg', 'pool', 'live'):
+            with open(_p[_n]) as _f:
+                assert _f.read() == f'PRIOR-{_n.upper()}\n', (
+                    f'{_n}.list partially applied on a failed apply: {_det}')
+        assert not os.path.exists(_bad_installer)
+
+        # sanity: a fully-valid apply DOES overwrite all four
+        _good_installer = os.path.join(_td, 'p_installer.list')
+        _ok2, _, _ = _cm.apply_canonical_config(
+            _coord, _sha, _p['pkg'], _p['pool'], _p['live'], _good_installer)
+        assert _ok2 is True
+        with open(_p['pkg']) as _f:
+            assert _f.read() == 'FED-PKG\n'
+        with open(_good_installer) as _f:
+            assert _f.read() == 'FED-INST\n'
+
+
 def test_closure_ledger_write_read_verify_round_trip():
     """Owner writes closure_ledger.json (sha pinned in head); a peer reads it
     only on sha match; empty pin / mismatch / malformed → refused with None."""
@@ -32948,6 +33182,36 @@ def test_coord_store_project_owners_picks_latest_by_seq():
         'alice': [_alice_lower], 'bob': [_bob_higher]})
     assert _owners['foo.deb']['builder'] == 'bob'
     assert _owners['foo.deb']['seq'] == 7
+
+
+def test_project_owners_published_takeover_beats_higher_seq_deprecation():
+    """Regression (audit #104): a builder's higher-seq DEPRECATION marker must
+    NOT outrank another builder's lower-seq live PUBLISHED takeover for the same
+    filename.  seq is builder-local, so ranking purely by (-seq, builder) let an
+    established builder A's deprecation win and report the file as un-owned even
+    though newcomer B legitimately republished and owns it."""
+    _s, _i, _st, *_ = _coord_modules()
+    _alice_dep = _s.new_claim(
+        builder='alice', seq=9, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo.deb', sha256='a' * 64, size=1,
+        snapshot='S1', built_at='T1',
+        claim_state=_s.CLAIM_STATE_DEPRECATED,
+    )
+    _bob_pub = _s.new_claim(
+        builder='bob', seq=2, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo.deb', sha256='a' * 64, size=1,
+        snapshot='S1', built_at='T1',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _owners = _st.project_owners({'alice': [_alice_dep], 'bob': [_bob_pub]})
+    # B's live PUBLISHED claim wins over A's higher-seq deprecation marker.
+    assert _owners['foo.deb']['builder'] == 'bob', _owners['foo.deb']
+    assert _owners['foo.deb']['seq'] == 2
+    # The all-deprecation case (no takeover) still yields no owner.
+    _owners2 = _st.project_owners({'alice': [_alice_dep]})
+    assert _owners2['foo.deb']['builder'] is None, _owners2['foo.deb']
 
 
 def test_coord_store_project_owners_skips_retracted():
@@ -36786,7 +37050,9 @@ def test_cmd_mirror_reclaim_lists_resolves_and_confirms():
         _r = _mk().cmd_mirror_reclaim('srcb', 'force')
         assert _r is True and len(_published) == 1, (_r, _published)
         _a, _intents = _published[0]
-        assert _a == ('m1',)
+        # audit #64: reclaim must publish with --no-iso so the release-media
+        # gate doesn't refuse it when current-snapshot ISOs are absent.
+        assert _a == ('m1', '--no-iso'), _a
         assert [_i['filename'] for _i in _intents] == ['b_1.0_amd64.deb']
         # 3. unmatched target → False, no publish
         _published.clear()
@@ -40780,6 +41046,7 @@ def main() -> int:
         test_write_athena_apt_sources_accepts_file_scheme,
         test_write_athena_apt_sources_noop_when_no_mirrors_and_no_url,
         test_live_chroot_sources_list_is_self_contained,
+        test_generate_system_configs_machine_id_stays_empty_for_first_boot,
         # UX-05 Path B: headless CLI backend
         test_cli_print_writes_to_stdout,
         test_cli_severity_methods_write_to_stderr_with_tags,
@@ -41108,7 +41375,10 @@ def main() -> int:
         test_segregate_never_deletes_existing_published_deb,
         # OBS-04: exhaustive per-package build/tunnel log
         test_buildlog_writes_header_sections_and_files,
+        test_install_expand_or_group_resolution_is_deterministic,
         test_buildlog_write_never_raises_on_unwritable_dir,
+        test_buildlog_write_encodes_utf8_under_ascii_locale,
+        test_readfile_decodes_utf8_under_ascii_locale,
         test_buildlog_methods_tolerate_bad_input_and_helpers,
         test_segregate_appends_relocate_and_purge_events,
         test_virtual_buildlog_writes_predicted_and_filtered,
@@ -41212,6 +41482,7 @@ def main() -> int:
         test_virtual_publish_dry_run_tunneled_target_emits_transfer_and_hash_conflict,
         test_virtual_publish_dry_run_same_sha_no_hash_conflict,
         test_virtual_build_from_cache_collapses_hashtable_shape,
+        test_virtual_validate_canon_map_uses_filtered_universe,
         test_virtual_build_from_cache_merges_udeb_hashtable,
         test_virtual_build_build_profile_filter_skips_nodoc_when_active,
         test_virtual_build_build_profile_filter_positive_profile_required,
@@ -41398,6 +41669,7 @@ def main() -> int:
         test_mirror_builders_register_gates_and_uploads,
         test_revoke_builder_adds_to_revoked_preserving_head,
         test_canonical_config_round_trip_and_verify,
+        test_apply_canonical_config_is_all_or_nothing,
         test_closure_ledger_write_read_verify_round_trip,
         test_closure_gate_runs_in_both_modes,
         test_federation_lab_build_mode_peer_workflow,
@@ -41418,6 +41690,7 @@ def main() -> int:
         test_coord_store_project_owners_single_owner_per_filename,
         test_coord_store_project_owners_tunneled_has_no_owner,
         test_coord_store_project_owners_picks_latest_by_seq,
+        test_project_owners_published_takeover_beats_higher_seq_deprecation,
         test_coord_store_project_owners_skips_retracted,
         test_coord_store_project_owners_handles_empty_input,
         test_coord_reconcile_detect_hash_conflicts_critical_and_info,

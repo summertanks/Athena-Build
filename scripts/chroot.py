@@ -1559,6 +1559,13 @@ class _ChrootMixin:
         # image uses this (surfaced to the operator below); the disk image LOCKS
         # root and adds a passwordless-sudo user instead (disk_image.py).
         _root_pw = secrets.token_urlsafe(12)
+        # NB: deliberately NO --setup-machine-id.  The empty /etc/machine-id
+        # written above is the documented first-boot design — systemd
+        # generates a unique id on each clone's first boot.  --setup-machine-id
+        # treats the empty file as uninitialised and commits a CONCRETE random
+        # id, which disk_image.py rsyncs (-aHAX) verbatim into every image, so
+        # all clones would ship the SAME machine-id (DHCP lease collisions,
+        # cross-host journal/systemd identity bleed).
         _proc = subprocess.run(
             ['sudo', '-S', 'systemd-firstboot',
              f'--root={self._dir_chroot}',
@@ -1566,7 +1573,6 @@ class _ChrootMixin:
              f'--hostname={_id}',
              '--timezone=UTC',
              '--locale=C.UTF-8',
-             '--setup-machine-id',
              '--force'],
             input=self._password + '\n',
             capture_output=True, text=True
@@ -1575,7 +1581,7 @@ class _ChrootMixin:
             tui.console.print(f"WARNING: systemd-firstboot failed: {_proc.stderr.strip()}")
             logger.warning(f"systemd-firstboot stderr: {_proc.stderr.strip()}")
         else:
-            tui.console.print("systemd-firstboot: root password / hostname / machine-id configured")
+            tui.console.print("systemd-firstboot: root password / hostname configured")
             self._announce_root_credential(_root_pw)
 
         # Guarantee the interactive user can escalate (MAT-09).  With root now

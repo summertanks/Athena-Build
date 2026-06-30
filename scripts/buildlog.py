@@ -135,7 +135,14 @@ class BuildLog:
             return
         try:
             _tmp = f"{self._path}.tmp"
-            with open(_tmp, 'w') as _fh:
+            # encoding='utf-8' (not the locale default): the narrative carries
+            # non-ASCII glyphs — '…' from file(), '→' from relocation() and
+            # buildcontainer/cmd_tunnel bullets — so under a C/ASCII locale the
+            # default encoder would raise UnicodeEncodeError, the broad except
+            # below would swallow it, and the .buildlog would silently never be
+            # written.  errors='replace' so an unexpected glyph degrades rather
+            # than loses the whole log.
+            with open(_tmp, 'w', encoding='utf-8', errors='replace') as _fh:
                 _fh.write('\n'.join(self._lines))
                 _fh.write('\n')
             os.replace(_tmp, self._path)
