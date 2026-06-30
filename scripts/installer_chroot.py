@@ -256,10 +256,10 @@ def _resolve_udeb_files(udeb_tree: 'dependencytree.DependencyTree',
     Earlier the param was the top-level repo/ and we joined 'main';
     Stage D pushes the resolved path to the caller for clarity.
 
-    Maps the cache's Packages-index Filename via strip_build_version
-    (drops Debian buildd's +bN bin-NMU suffix).  Post-build NMU strip
-    further normalises the on-disk .udeb to its pristine source
-    version.
+    Maps the cache's Packages-index Filename via normalize_repo_filename
+    (drops the buildd +bN bin-NMU and the +debNuN redistribution suffix),
+    then resolves the actual on-disk file with find_matching_artifact, which
+    accepts either the pristine name OR its +asg<R>u<N> stamped variant.
 
     Missing-on-disk udebs are logged + skipped (warning); caller
     notices if the list is too short.

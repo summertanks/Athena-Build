@@ -130,11 +130,15 @@ def audit_stanza(
             break
     # Unterminated field: a field header (`Name:`) with NO value AND no
     # continuation line following — libdebian-installer trips on this.
+    # Restrict to fields that genuinely REQUIRE a value — flagging every empty
+    # field is a heuristic that false-positives on optional fields a stanza may
+    # legitimately leave blank.
+    _value_required = ('Package', 'Version', 'Description')
     for _f, _v in fields.items():
         if _f == '__MALFORMED__':
             continue
-        if _v == '':
-            _issues.append(f"EMPTY-VALUE: field {_f!r} has empty value")
+        if _v == '' and _f in _value_required:
+            _issues.append(f"EMPTY-VALUE: required field {_f!r} has empty value")
     return _issues
 
 

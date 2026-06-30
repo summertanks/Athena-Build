@@ -30,7 +30,9 @@ Algorithm (closure as a pure function of the seed SET):
   The canonical tie-break (smallest group tuple) is what removes the
   order-dependence: which unsatisfied group is resolved first is a function
   of the group contents, never of the input ordering.  Iterating A/B to a
-  fixpoint yields the minimal closure for the set.
+  fixpoint yields a DETERMINISTIC, order-independent closure for the set
+  (not necessarily the globally minimal one — the canonical OR-group pick may
+  add a satisfiable-but-not-strictly-needed alternative).
 """
 from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union

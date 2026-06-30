@@ -16714,6 +16714,40 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_diag_audit_stanza_empty_value_only_required_fields():
+    """Regression (audit #116): EMPTY-VALUE must flag only fields that REQUIRE a
+    value (Package/Version/Description), not every empty field — an optional
+    field a stanza legitimately leaves blank shouldn't be a finding."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import diag_installer_status as _d
+    # empty OPTIONAL field → no EMPTY-VALUE finding
+    _iss = _d.audit_stanza(
+        {'Package': 'foo', 'Version': '1', 'Description': 'x', 'Homepage': ''},
+        1, ['Package: foo'])
+    assert not any('EMPTY-VALUE' in _i for _i in _iss), _iss
+    # empty REQUIRED field → flagged
+    _iss2 = _d.audit_stanza(
+        {'Package': '', 'Version': '1', 'Description': 'x'}, 1, ['Package:'])
+    assert any('EMPTY-VALUE' in _i and 'Package' in _i for _i in _iss2), _iss2
+
+
+def test_tier3_doc_source_pins():
+    """Doc-accuracy pins for Tier-3 fixes #40/#130/#149 (pure docstring/comment
+    corrections — no behaviour change to assert)."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump
+    import or_resolve
+    import installer_chroot
+    assert "'5.2.15-2+asg1u0+p1'" in inspect.getsource(bump), '#40'
+    assert 'DETERMINISTIC, order-independent closure' in inspect.getsource(
+        or_resolve), '#149'
+    assert 'find_matching_artifact' in inspect.getsource(installer_chroot), \
+        '#130'
+
+
 def test_tier3_misc_source_pins():
     """Regression pins for a cluster of low-reachability Tier-3 fixes (audit
     #21/#55/#75/#78/#95/#133/#159) where a behavioral harness is disproportion-
@@ -42446,6 +42480,8 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_diag_audit_stanza_empty_value_only_required_fields,
+        test_tier3_doc_source_pins,
         test_tier3_misc_source_pins,
         test_resolve_closure_accepts_generator_seeds,
         test_build_patch_list_sorts_by_full_filename,
