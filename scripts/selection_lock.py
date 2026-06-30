@@ -53,6 +53,7 @@ STATUS_OK = 'ok'
 STATUS_MISSING = 'missing'
 STATUS_BADSIG = 'badsig'
 STATUS_MALFORMED = 'malformed'
+STATUS_IOERROR = 'ioerror'   # present but a transient read error (not corruption)
 
 
 def selection_state_path(config: 'utils.BuildConfig') -> str:
@@ -78,9 +79,12 @@ def read_selection_state(
       * ``(None, 'badsig')``   — present but HMAC mismatch (tamper / key change)
       * ``(None, 'malformed')``— present but not valid JSON / not a dict /
                                  missing schema_version
+      * ``(None, 'ioerror')``  — present but a transient READ error (EIO/
+                                 EACCES/NFS) — NOT corruption; retry, don't
+                                 re-baseline
 
-    Callers treat 'badsig' and 'malformed' as HARD errors (do not rebuild),
-    'missing' as the bootstrap trigger.
+    Callers treat 'badsig', 'malformed' and 'ioerror' as HARD errors (do not
+    rebuild / fail closed), 'missing' as the bootstrap trigger.
     """
     _path = selection_state_path(config)
     try:
@@ -89,8 +93,12 @@ def read_selection_state(
     except FileNotFoundError:
         return None, STATUS_MISSING
     except OSError as _e:
+        # A transient READ error (EIO/EACCES/ENFILE/NFS hiccup) — the file
+        # exists but couldn't be read.  Distinct from MALFORMED (a genuine
+        # parse/sig failure below): both fail closed, but IOERROR tells the
+        # operator to retry, not to wipe + re-baseline a healthy lockfile.
         utils.logger.warning(f"selection.state read failed ({_path}): {_e}")
-        return None, STATUS_MALFORMED
+        return None, STATUS_IOERROR
 
     try:
         _state = json.loads(_raw.decode('utf-8'))
@@ -356,7 +364,7 @@ def classify(
         return {'bins': set(), 'srcs': set()}
     if read_status == STATUS_MISSING:
         return ACTION_BOOTSTRAP, _fresh(), _fresh()
-    if read_status in (STATUS_BADSIG, STATUS_MALFORMED):
+    if read_status in (STATUS_BADSIG, STATUS_MALFORMED, STATUS_IOERROR):
         return ACTION_HARDSTOP, _fresh(), _fresh()
     _added, _removed = diff_closure((lock or {}).get('closure', {}), fresh_closure)
     if _removed['bins'] or _removed['srcs']:
@@ -439,7 +447,7 @@ def closure_matches_lock(
     caller, while NOLOCK (authority not written yet) is typically a soft warn."""
     _empty: 'Dict[str, set]' = {'bins': set(), 'srcs': set()}
     _lock, _status = read_selection_state(config)
-    if _status in (STATUS_BADSIG, STATUS_MALFORMED):
+    if _status in (STATUS_BADSIG, STATUS_MALFORMED, STATUS_IOERROR):
         return COHERENCE_BADLOCK, dict(_empty), dict(_empty)
     _fresh = build_closure(dep_tree, udeb_dep_tree, config)
     if _status == STATUS_MISSING or _lock is None:

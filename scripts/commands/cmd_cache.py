@@ -386,7 +386,8 @@ class CacheCommandsMixin(SessionState):
         if self.config.build_mode != 'build':
             _lock, _lstatus = selection_lock.read_selection_state(self.config)
             if _lstatus in (selection_lock.STATUS_BADSIG,
-                            selection_lock.STATUS_MALFORMED):
+                            selection_lock.STATUS_MALFORMED,
+                            selection_lock.STATUS_IOERROR):
                 _spiner.done()
                 console.print(
                     f"cache parse: selection.state is {_lstatus} — refusing to "

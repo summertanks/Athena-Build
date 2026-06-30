@@ -2911,7 +2911,8 @@ class MirrorCommandsMixin(SessionState):
                     # accept→publish window — only CRITICALs fail the audit.
                     if any(_f[0] == 'CRITICAL' for _f in _coh_findings):
                         _all_ok = False
-                elif _lstatus in (_sl.STATUS_BADSIG, _sl.STATUS_MALFORMED):
+                elif _lstatus in (_sl.STATUS_BADSIG, _sl.STATUS_MALFORMED,
+                                  _sl.STATUS_IOERROR):
                     console.print(
                         f"  CRITICAL  selection_state_{_lstatus}: the signed "
                         "selection authority is untrusted — `cache purge-state` "
