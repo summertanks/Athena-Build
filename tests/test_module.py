@@ -16714,6 +16714,43 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_read_selection_state_distinguishes_transient_io_error():
+    """Regression (audit #179): a transient READ error (the file is present but
+    unreadable — EIO/EACCES/NFS) must return STATUS_IOERROR, not
+    STATUS_MALFORMED.  MALFORMED falsely flags tamper and tells the operator to
+    wipe + re-baseline a healthy lockfile.  Both still fail closed."""
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+            dir_log = _td
+        # Make selection.state a DIRECTORY → open() raises IsADirectoryError
+        # (an OSError that is NOT FileNotFoundError).
+        os.makedirs(_sl.selection_state_path(_Cfg()))
+        _lock, _status = _sl.read_selection_state(_Cfg())
+        assert _status == _sl.STATUS_IOERROR, _status
+        assert _lock is None
+        # classify still treats it as a hard stop (fail closed).
+        assert _sl.classify(_status, None, {})[0] == _sl.ACTION_HARDSTOP
+
+
+def test_cli_quit_detection_keys_on_first_token():
+    """Regression (audit #53): the REPL and one-shot loops must decide quit/exit
+    on the FIRST token like _dispatch_one (which keys on parts[0]); testing the
+    whole line drifted, so `quit x` was dispatched-as-quit but not broken."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import cli
+    _src = inspect.getsource(cli)
+    assert _src.count("(line.split()[:1] or [''])[0] in ('quit', 'exit')") >= 1
+    assert _src.count("(_cmd.split()[:1] or [''])[0] in ('quit', 'exit')") >= 1
+    assert "line.strip() in ('quit', 'exit')" not in _src
+
+
 def test_fork_version_gate_ignores_provides_injected_records():
     """Regression (audit #47): the fork-vs-upstream collision gate must compute
     the fork version only from records whose real Package field is the name. A
@@ -42288,6 +42325,8 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_read_selection_state_distinguishes_transient_io_error,
+        test_cli_quit_detection_keys_on_first_token,
         test_fork_version_gate_ignores_provides_injected_records,
         test_diag_installer_status_reports_folded_line,
         test_select_packages_detects_reserved_pool_group_clash,
