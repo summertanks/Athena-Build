@@ -1675,6 +1675,24 @@ class MirrorCommandsMixin(SessionState):
             _ok_all = _ok_all and _bok
         return _ok_all
 
+    def _bind_keyring_and_read_claims(self, fetched: str, head: dict):
+        """Load the fetched builder keyring, restrict it to the pubkeys bound
+        in the tier-1-signed head (FED-03 D), and read + verify all claims under
+        it.  Returns ``(by_builder, binding_drop_msg)``; the caller prints the
+        drop message in its own format.  The single uniform keyring-binding +
+        claim-verification path for the mirror coord commands (audit #66)."""
+        import coord.identity as _id
+        import coord.store as _store
+        _keyring = _id.load_keyring(
+            os.path.join(fetched, 'keyring', 'builders'))
+        _keyring, _dropped, _has_bind = _id.verified_keyring_from_head(
+            _keyring, head)
+        _bmsg = _id.binding_drop_summary(_dropped, _has_bind)
+        _by_builder = _store.read_all_claims(
+            os.path.join(fetched, 'claims'), _keyring,
+            head.get('revoked_builders') or {})
+        return _by_builder, _bmsg
+
     def cmd_mirror_pull(self, *args):
         """mirror pull [<name>] — fetch from one mirror, or all when no name.
 
@@ -1698,8 +1716,6 @@ class MirrorCommandsMixin(SessionState):
         import mirror as _mirror
         import signing
         import coord.head as _head_mod
-        import coord.identity as _id
-        import coord.store as _store
         import coord.transport as _transport
         import coord.schema as _schema
         _keys = self._coord_self_keys()
@@ -1788,17 +1804,10 @@ class MirrorCommandsMixin(SessionState):
             # Refresh the canonical pkg.list/pool.list from the owner so
             # source-select changes propagate to every builder.
             self._apply_canonical_config(_fetched, _head)
-            _keyring = _id.load_keyring(
-                os.path.join(_fetched, 'keyring', 'builders'))
-            # FED-03 D: trust only pubkeys bound in the tier-1-signed head.
-            _keyring, _dropped, _has_bind = _id.verified_keyring_from_head(
-                _keyring, _head)
-            _bmsg = _id.binding_drop_summary(_dropped, _has_bind)
+            _by_builder, _bmsg = self._bind_keyring_and_read_claims(
+                _fetched, _head)
             if _bmsg:
                 console.print(f"  {_bmsg}", tui.COLOR_WARNING)
-            _revoked = _head.get('revoked_builders') or {}
-            _by_builder = _store.read_all_claims(
-                os.path.join(_fetched, 'claims'), _keyring, _revoked)
             _total = sum(len(_v) for _v in _by_builder.values())
             console.print(
                 f"  verified: {_total} claim(s) across "
@@ -2083,8 +2092,6 @@ class MirrorCommandsMixin(SessionState):
         import mirror as _mirror
         import signing
         import coord.head as _head_mod
-        import coord.identity as _id
-        import coord.store as _store
         import coord.transport as _transport
         _keys = self._coord_self_keys()
         if _keys is None:
@@ -2144,17 +2151,10 @@ class MirrorCommandsMixin(SessionState):
                     "trust the fetched tree.", tui.COLOR_ERROR)
                 _all_ok = False
                 continue
-            _keyring = _id.load_keyring(
-                os.path.join(_fetched, 'keyring', 'builders'))
-            # FED-03 D: trust only pubkeys bound in the tier-1-signed head.
-            _keyring, _dropped, _has_bind = _id.verified_keyring_from_head(
-                _keyring, _head)
-            _bmsg = _id.binding_drop_summary(_dropped, _has_bind)
+            _by_builder, _bmsg = self._bind_keyring_and_read_claims(
+                _fetched, _head)
             if _bmsg:
                 console.print(f"  {_bmsg}", tui.COLOR_WARNING)
-            _by_builder = _store.read_all_claims(
-                os.path.join(_fetched, 'claims'), _keyring,
-                _head.get('revoked_builders') or {})
             _cands = _mirror.local_ahead_candidates(
                 _by_builder, _bid, self.config.dir_repo, _buildlog)
             if not _cands:
@@ -2237,7 +2237,6 @@ class MirrorCommandsMixin(SessionState):
         import arch_filter
         import coord.publish as _publish
         import coord.head as _head_mod
-        import coord.identity as _id
         import coord.store as _store
         import coord.transport as _transport
         _keys = self._coord_self_keys()
@@ -2298,17 +2297,10 @@ class MirrorCommandsMixin(SessionState):
                     "trust the fetched tree.", tui.COLOR_ERROR)
                 _all_ok = False
                 continue
-            _keyring = _id.load_keyring(
-                os.path.join(_fetched, 'keyring', 'builders'))
-            # FED-03 D: trust only pubkeys bound in the tier-1-signed head.
-            _keyring, _dropped, _has_bind = _id.verified_keyring_from_head(
-                _keyring, _head)
-            _bmsg = _id.binding_drop_summary(_dropped, _has_bind)
+            _by_builder, _bmsg = self._bind_keyring_and_read_claims(
+                _fetched, _head)
             if _bmsg:
                 console.print(f"  {_bmsg}", tui.COLOR_WARNING)
-            _by_builder = _store.read_all_claims(
-                os.path.join(_fetched, 'claims'), _keyring,
-                _head.get('revoked_builders') or {})
             _owners = _store.project_owners(_by_builder)
             _foreign = sorted(
                 _fn for _fn, _rec in _owners.items()
@@ -2596,8 +2588,6 @@ class MirrorCommandsMixin(SessionState):
         import mirror as _mirror
         import signing
         import coord.head as _head_mod
-        import coord.identity as _id
-        import coord.store as _store
         import coord.transport as _transport
         import coord.reconcile as _reconcile
 
@@ -2652,17 +2642,10 @@ class MirrorCommandsMixin(SessionState):
                 _per_mirror.append({'name': _n, 'head': None,
                                     'by_builder': {}, 'url': _url})
                 continue
-            _keyring = _id.load_keyring(
-                os.path.join(_fetched, 'keyring', 'builders'))
-            # FED-03 D: trust only pubkeys bound in the tier-1-signed head.
-            _keyring, _dropped, _has_bind = _id.verified_keyring_from_head(
-                _keyring, _head)
-            _bmsg = _id.binding_drop_summary(_dropped, _has_bind)
+            _by_builder, _bmsg = self._bind_keyring_and_read_claims(
+                _fetched, _head)
             if _bmsg:
                 console.print(f"  {_n}: {_bmsg}", tui.COLOR_WARNING)
-            _revoked = _head.get('revoked_builders') or {}
-            _by_builder = _store.read_all_claims(
-                os.path.join(_fetched, 'claims'), _keyring, _revoked)
             _per_mirror.append({'name': _n, 'head': _head,
                                 'by_builder': _by_builder, 'url': _url})
             # Federation gate
