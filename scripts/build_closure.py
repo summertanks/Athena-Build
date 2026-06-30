@@ -29,6 +29,9 @@ from typing import Dict, Iterable, List, Optional, Set
 
 from debian.deb822 import PkgRelation
 
+# Shared immutable empty set for the provides-intersection fast path.
+_EMPTY_SET: 'frozenset[str]' = frozenset()
+
 # ── Tier seeds ──────────────────────────────────────────────────────────────
 # Edit these to re-shape the tiers; they are intentionally explicit (not
 # pattern-matched) so the toolchain/language boundary is auditable.  Anything
@@ -85,12 +88,69 @@ def _rels(raw: str) -> 'list':
     return PkgRelation.parse_relations(raw) if raw else []
 
 
+def _arch_applies(arch_list: 'Optional[list]', build_arch: str) -> bool:
+    """Whether a relation qualified ``[...]`` applies when building for
+    *build_arch*.  Conservative on wildcards (``any``/``linux-any``/``any-amd64``
+    …): an unrecognised pattern leaves the relation IN, because over-fetching a
+    build-dep is harmless whereas dropping a needed one breaks the build."""
+    if not arch_list:
+        return True
+    _pos = [_a for (_en, _a) in arch_list if _en]
+    _neg = [_a for (_en, _a) in arch_list if not _en]
+    if any(('any' in _a) or ('-' in _a) for _a in _pos + _neg):
+        return True
+    if _pos:
+        return build_arch in _pos
+    if _neg:
+        return build_arch not in _neg
+    return True
+
+
+def _profiles_apply(restr: 'Optional[list]', profiles: 'frozenset[str]') -> bool:
+    """Whether a relation's build-profile restriction ``<...> <...>`` is
+    satisfied by the active *profiles* set (OR across groups, AND within a
+    group; an enabled term needs its profile active, a negated term needs it
+    inactive).  ``<stage1>`` drops when no profiles are active; ``<!nocheck>``
+    stays."""
+    if not restr:
+        return True
+    for _grp in restr:
+        if all(((_p in profiles) == _en) for (_en, _p) in _grp):
+            return True
+    return False
+
+
+def _filter_grp(or_group: 'list', build_arch: 'Optional[str]',
+                profiles: 'Optional[frozenset]') -> 'list':
+    """Drop the relations in *or_group* that do not apply to the target arch /
+    active build profiles.  When both filters are ``None`` the group is returned
+    unchanged (the historical, unfiltered behaviour)."""
+    if build_arch is None and profiles is None:
+        return or_group
+    _out = []
+    for _r in or_group:
+        if build_arch is not None and not _arch_applies(_r.get('arch'),
+                                                         build_arch):
+            continue
+        if profiles is not None and not _profiles_apply(_r.get('restrictions'),
+                                                        profiles):
+            continue
+        _out.append(_r)
+    return _out
+
+
 def _install_expand(seeds: 'Iterable[str]', bin_index: dict,
-                    provides_index: dict) -> 'Set[str]':
+                    provides_index: dict,
+                    build_arch: 'Optional[str]' = None,
+                    profiles: 'Optional[frozenset]' = None) -> 'Set[str]':
     """The install closure of *seeds* over hard edges (Depends + Pre-Depends),
     resolved within ``bin_index``.  Unknown seeds and unsatisfiable groups are
     silently skipped — this is a closure, not a validator."""
     _inset: 'Set[str]' = {s for s in seeds if s in bin_index}
+    # Pre-set-ify the provides lists once: the satisfied-check below otherwise
+    # rebuilds a set() per relation per group per package on the hot frontier.
+    _prov_sets: 'Dict[str, Set[str]]' = {
+        _k: set(_v) for _k, _v in provides_index.items()}
     # sorted(), not list(): set iteration order over str keys is
     # PYTHONHASHSEED-randomized, and the OR-group satisfied-check below
     # short-circuits on whatever is already in _inset — so an unsorted frontier
@@ -108,9 +168,12 @@ def _install_expand(seeds: 'Iterable[str]', bin_index: dict,
             for _grp in _rels(_entry.get(_field, '')):
                 if not _grp:
                     continue
+                _grp = _filter_grp(_grp, build_arch, profiles)
+                if not _grp:
+                    continue
                 # already satisfied by something in the set?
                 if any((_r.get('name') in _inset)
-                       or (set(provides_index.get(_r.get('name', ''), ()))
+                       or (_prov_sets.get(_r.get('name', ''), _EMPTY_SET)
                            & _inset)
                        for _r in _grp):
                     continue
@@ -167,6 +230,8 @@ def compute_build_closure(
     src_build_depends: 'Dict[str, str]',
     bin_index: 'Dict[str, dict]',
     provides_index: 'Dict[str, list]',
+    build_arch: 'Optional[str]' = None,
+    build_profiles: 'Optional[frozenset]' = None,
 ) -> 'Dict[str, object]':
     """Compute the full build closure: the transitive install closure (over
     hard Depends + Pre-Depends edges) of every selected source's Build-Depends,
@@ -178,6 +243,14 @@ def compute_build_closure(
                          Build-Depends-Indep + Build-Depends-Arch, joined).
       bin_index:         {bin_name: {'Depends':.., 'Pre-Depends':..}} universe.
       provides_index:    {virtual_name: [provider_name, ...]}.
+      build_arch:        target architecture; when given, relations whose
+                         ``[arch ...]`` qualifier excludes it are dropped
+                         (wildcards are kept conservatively).  None ⇒ no arch
+                         filtering (historical behaviour).
+      build_profiles:    active build-profile set; when given, relations whose
+                         ``<profile ...>`` restriction is unsatisfied are
+                         dropped (e.g. ``<stage1>`` with an empty set).  None ⇒
+                         no profile filtering.
 
     Returns a dict:
       'all'           : Set[str] full build closure (toolchain base included).
@@ -195,6 +268,11 @@ def compute_build_closure(
         for _grp in _rels(src_build_depends.get(_src, '')):
             if not _grp:
                 continue
+            _grp = _filter_grp(_grp, build_arch, build_profiles)
+            if not _grp:
+                # Entire group is arch-/profile-excluded — not applicable to
+                # this build, so it is NOT unsatisfiable; just skip it.
+                continue
             _pk = _pick(_grp, bin_index, provides_index)
             if _pk:
                 _direct.add(_pk)
@@ -203,6 +281,7 @@ def compute_build_closure(
 
     # 2. transitive install closure of the direct build-deps + toolchain base
     _all = _install_expand(_direct | set(TOOLCHAIN_SEEDS),
-                           bin_index, provides_index)
+                           bin_index, provides_index,
+                           build_arch, build_profiles)
 
     return {'all': _all, 'unsatisfiable': _unsat}

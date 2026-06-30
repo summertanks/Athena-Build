@@ -95,8 +95,11 @@ def _download(url: str, dest: str, expected_sha: str, expected_size: int,
     try:
         _resp = urllib.request.urlopen(_req, timeout=120)
     except urllib.error.HTTPError as _e:
+        # Defensive: callers only fetch when _existing < expected_size, so the
+        # 416 'range past EOF = already complete' arm is not normally reached;
+        # kept so a redundant re-fetch of a finished file degrades gracefully.
         if _e.code == 416 and expected_size and _existing >= expected_size:
-            return (True, 'already complete')     # range past EOF = done
+            return (True, 'already complete')
         return (False, f'HTTP {_e.code}')
     except (urllib.error.URLError, OSError, http.client.HTTPException) as _e:
         return (False, f'{type(_e).__name__}: {_e}')

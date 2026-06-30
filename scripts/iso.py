@@ -146,10 +146,10 @@ class _IsoMixin:
         # under /live/filesystem.squashfs on the boot device and mounts it as
         # the root filesystem with overlayfs.
         cfg = self._config
-        # Strip any stray quotes that may be embedded in the config values
-        # (e.g. VERSION = "0.1" parsed with the surrounding quotes intact).
-        _name     = cfg.build_distribution.strip('"').strip("'")
-        _version  = cfg.build_version.strip('"').strip("'")
+        # build_distribution / build_version are already _strip_quotes'd when
+        # BuildConfig loads them (utils.py), so use them directly.
+        _name     = cfg.build_distribution
+        _version  = cfg.build_version
         # Pick a random live-user name per build so SSH attackers do not
         # have a fixed `root` (or `user`) target — the username becomes
         # the first secret an attacker has to guess.  live-config (already

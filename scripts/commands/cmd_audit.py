@@ -41,8 +41,9 @@ def _dedupe_bidirectional_conflicts(conflicts):
         if _other_canon.startswith('<virtual ') and _other_canon.endswith('>'):
             _other_canon = _other_canon[len('<virtual '):-1]
         _key = frozenset({_consumer, _other_canon})
-        # Tiebreak: prefer the entry where consumer sorts first by name,
-        # so subsequent runs of the same audit produce stable output.
+        # On a bidirectional collision keep the first-encountered entry;
+        # the caller feeds `unresolved` in a deterministic order, so this
+        # yields stable output without a per-name tiebreak.
         if _key in _seen:
             continue
         _seen.add(_key)
@@ -782,8 +783,12 @@ class AuditCommandsMixin(SessionState):
                 "orphan sidecars",
                 f"{len(_sidecars)} `.verified` with no .deb/.udeb — "
                 f"`repo repair cleanup` sweeps them", ok=True)
-        _n_stale = len(_orphan) + len(_drift) + len(_foreign)
-        if _n_stale == 0 and not _malformed:
+        # Gate composition matches _preflight_audit_repo: orphan + drift +
+        # malformed.  Foreign cross-toolchain artifacts are surfaced (below)
+        # but do NOT gate, exactly as the preflight's _foreign_note() does.
+        _n_stale = len(_orphan) + len(_drift) + len(_malformed)
+        _n_show = _n_stale + len(_foreign)
+        if _n_show == 0:
             self._audit_row(f"stale files ({_total} files)",
                             "clean — no orphan-source or drift residue")
             return
@@ -797,10 +802,10 @@ class AuditCommandsMixin(SessionState):
             f"{_n_stale} stale ({_bytes / 1024 / 1024:.1f} MB) — "
             f"{len(_orphan)} orphan-source, {len(_drift)} version-drift"
             f"{_frn}{_mal}",
-            # Match the early-return gate above (which counts _malformed): a
-            # malformed artifact must color the row amber, not green.
-            ok=(_n_stale == 0 and not _malformed))
-        if _n_stale:
+            # _n_stale already counts _malformed; foreign-cross is non-gating
+            # (informational), so it never colors the row amber.
+            ok=(_n_stale == 0))
+        if _n_show:
             # Short preview — one line per source for orphans (collapses
             # the task-* family case), individual lines for drift.  Full
             # detail lives in `repo repair cleanup` (dry-run).
@@ -938,12 +943,12 @@ class AuditCommandsMixin(SessionState):
                 _other.append(_target)
             elif _in_dt and not _in_r:
                 _build_failed.append(_target)
-            elif _in_up and not _in_dt:
+            elif _in_up:
+                # _in_dt is necessarily False here (the two branches above
+                # consume every _in_dt case), so `_in_up` alone suffices.
                 _missed_by_parse.append(_target)
-            elif not _in_up:
-                _transitional.append(_target)
             else:
-                _other.append(_target)
+                _transitional.append(_target)
 
         def _ref_count(lst):
             return sum(len(_consumers_by_target[_t]) for _t in lst)

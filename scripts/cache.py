@@ -150,13 +150,6 @@ class Cache:
         # "this mirror has no udebs to contribute"; not an error.
         self.mirror_udeb_cache_files: Dict[str, str] = {}
 
-        # InRelease info
-        self.release_info = ''
-
-        # Cache data
-        self.pkg_list: List[str] = []
-        self.src_list: List[str] = []
-
         self.required: List[str] = []
         self.important: List[str] = []
         # udeb-world equivalents.  Sparse — bookworm has

@@ -90,7 +90,7 @@ def parse_stanzas(content: str) -> List[Tuple[int, Dict[str, str], List[str]]]:
 
 
 def audit_stanza(
-    fields: Dict[str, str], lineno: int, raw_lines: List[str]
+    fields: Dict[str, str], raw_lines: List[str]
 ) -> List[str]:
     """Return a list of issues with this stanza that could trip
     libdebian-installer's parser."""
@@ -174,7 +174,7 @@ def main(path: str) -> int:
         _is_new = _pkg in _NEW_SEEDS
         if _is_new:
             _new_seen += 1
-        _issues = audit_stanza(_fields, _line_start, _raw)
+        _issues = audit_stanza(_fields, _raw)
         if _issues:
             _any_issue = True
             _tag = '[NEW]' if _is_new else '     '

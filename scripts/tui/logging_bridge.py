@@ -25,7 +25,11 @@ def _tab_for_logger(name: str) -> str:
     """All log records land in the single 'log' tab (three-tab UX:
     console / log / status).  The per-stage origin is preserved as a
     bracketed prefix on the message (see `_stage_prefix`), so a single
-    scrollback still shows which stage emitted each line."""
+    scrollback still shows which stage emitted each line.
+
+    ``name`` is accepted for call-site symmetry with `_stage_prefix` (both
+    take ``record.name``) but is intentionally unused — every record routes
+    to the one 'log' tab; differentiation lives in the message prefix."""
     return 'log'
 
 

@@ -16954,11 +16954,11 @@ def test_diag_audit_stanza_empty_value_only_required_fields():
     # empty OPTIONAL field → no EMPTY-VALUE finding
     _iss = _d.audit_stanza(
         {'Package': 'foo', 'Version': '1', 'Description': 'x', 'Homepage': ''},
-        1, ['Package: foo'])
+        ['Package: foo'])
     assert not any('EMPTY-VALUE' in _i for _i in _iss), _iss
     # empty REQUIRED field → flagged
     _iss2 = _d.audit_stanza(
-        {'Package': '', 'Version': '1', 'Description': 'x'}, 1, ['Package:'])
+        {'Package': '', 'Version': '1', 'Description': 'x'}, ['Package:'])
     assert any('EMPTY-VALUE' in _i and 'Package' in _i for _i in _iss2), _iss2
 
 
@@ -17004,9 +17004,13 @@ def test_tier3_misc_source_pins():
     # #95: drift requires the binary to actually be present in the pool
     assert '_latest is not None and _fn != _latest' in inspect.getsource(
         _pub), '#95'
-    # #55: stale-files row colour matches the gate (counts malformed)
-    assert 'ok=(_n_stale == 0 and not _malformed)' in inspect.getsource(
-        _ca), '#55'
+    # #55/#56: stale-files row colour matches the gate, which now counts
+    # malformed by folding it into _n_stale (audit #56 aligned the audit row
+    # with _preflight_audit_repo), so ok=(_n_stale == 0) still ambers a
+    # malformed-only repo.
+    _casrc = inspect.getsource(_ca)
+    assert 'len(_drift) + len(_malformed)' in _casrc, '#55/#56'
+    assert 'ok=(_n_stale == 0))' in _casrc, '#55/#56'
     # #75: the .disabled marker hint is an f-string (real pkg name)
     assert 'f\'run `source fork {pkg} enabled` to \'' in inspect.getsource(
         _cs), '#75'
@@ -18261,10 +18265,10 @@ def test_logging_bridge_splits_multiline_records():
 
 def test_per_module_logger_names_pin_routing():
     """Each scripts/*.py module's bare module-level `logger` must point
-    at the right logger name so its records route to the right TUI tab
-    via _tab_for_logger.  Pinned to prevent silent regression.  Bare
-    'athena' falls back to the 'build' tab (post log-tab removal) —
-    the cross-stage helpers are orchestrator-adjacent."""
+    at the right logger name so its records carry the right `[stage]`
+    prefix (via _stage_prefix) in the single shared 'log' tab — all
+    records land in 'log' (see _tab_for_logger), so this pins the logger
+    NAME, not a per-tab route.  Pinned to prevent silent regression."""
     import re
     expected = {
         # cache stage — cache parse / dep walk / fork mirror / dep drift
@@ -22466,9 +22470,6 @@ def _make_offline_cache(tmpdir: str,
         for _id in packages
     ]
     c._compression_openers = []
-    c.release_info = ''
-    c.pkg_list = []
-    c.src_list = []
     c.required = []
     c.important = []
     c.udeb_required = []

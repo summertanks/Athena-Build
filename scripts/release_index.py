@@ -93,7 +93,8 @@ def _human_size(n: int) -> str:
         if _f < 1024.0 or _u == 'TB':
             return f"{_f:.0f} {_u}" if _u == 'B' else f"{_f:.1f} {_u}"
         _f /= 1024.0
-    return f"{n} B"
+    # The loop always returns (the 'TB' arm is unconditional); unreachable.
+    raise AssertionError('unreachable')  # pragma: no cover
 
 
 def render_index_html(manifest: dict) -> str:

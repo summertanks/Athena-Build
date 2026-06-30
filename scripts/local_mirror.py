@@ -117,8 +117,14 @@ def plan(cache: Any, dep_tree: Any, config: Any,
             _src.get('Build-Depends-Indep', '') or '',
             _src.get('Build-Depends-Arch', '') or '',
         ]))
+    # Honour the target arch and active build profiles so the closure matches
+    # what dpkg-buildpackage actually pulls: arch-excluded build-deps (e.g.
+    # ``foo [!amd64]``) and stage-gated ones (``<stage1>``) are dropped rather
+    # than over-fetched.  An empty profile set = the standard (no-stage) build.
     _closure = build_closure.compute_build_closure(
-        list(dep_tree.selected_srcs.keys()), _sbd, bin_index, provides)
+        list(dep_tree.selected_srcs.keys()), _sbd, bin_index, provides,
+        build_arch=getattr(config, 'arch', None),
+        build_profiles=frozenset())
 
     _entries: 'List[dict]' = []
     _stanzas: 'List[str]' = []
@@ -371,4 +377,5 @@ def human_size(n: int) -> str:
         if _f < 1024 or _u == 'TB':
             return f'{_f:.1f}{_u}'
         _f /= 1024
-    return f'{_f:.1f}TB'
+    # The loop always returns (the 'TB' arm is unconditional); unreachable.
+    raise AssertionError('unreachable')  # pragma: no cover

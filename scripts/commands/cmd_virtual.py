@@ -371,10 +371,10 @@ class VirtualCommandsMixin(SessionState):
             "source(s)", tui.COLOR_INFO)
 
         # ---- Phase: repo audit ----------------------------------------
-        _install_corpus: 'frozenset[str]' = frozenset()
-        if self.dep_tree is not None:
-            _install_corpus |= frozenset(
-                getattr(self.dep_tree, 'selected_pkgs', {}).keys())
+        # self.dep_tree is guaranteed non-None here (the method returns early
+        # above when it is None), so no guard is needed for it.
+        _install_corpus: 'frozenset[str]' = frozenset(
+            getattr(self.dep_tree, 'selected_pkgs', {}).keys())
         if self.udeb_dep_tree is not None:
             _install_corpus |= frozenset(
                 getattr(self.udeb_dep_tree, 'selected_pkgs', {}).keys())

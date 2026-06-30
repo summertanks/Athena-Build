@@ -179,7 +179,9 @@ def audit_identity(root: str,
                                 'line':    line.rstrip()[:200],
                                 'token':   token,
                             })
-            except (OSError, UnicodeDecodeError):
+            except OSError:
+                # errors='replace' on the open above means decoding never
+                # raises UnicodeDecodeError; only open/read OSError reaches here.
                 continue
     return findings
 
