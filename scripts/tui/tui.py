@@ -248,7 +248,6 @@ class Tui:
     def attr_reverse(self) -> int:
         """curses.A_REVERSE — exposed so controllers can highlight the
         cursor row without importing curses directly."""
-        import curses
         return curses.A_REVERSE
 
     def attr_color(self, color_index: int) -> int:

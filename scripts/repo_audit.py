@@ -879,7 +879,6 @@ def _build_provides_index(packages: dict) -> dict:
     fields.  Uses python-debian's PkgRelation parser — handles the
     `name (= V)` versioned-Provides syntax that Debian Policy §7.5
     requires for satisfying versioned virtual deps."""
-    from debian.deb822 import PkgRelation
     _index: dict = {}
     for _pkg, _entry in packages.items():
         _raw = _entry.get('Provides', '')
@@ -1042,7 +1041,6 @@ def audit_dep_closure(state: RepoState,
       - unresolved is a list of (pkg, field, relation_str, why) 4-tuples
       - weak       is a list of (pkg, field, relation_str) 3-tuples
     """
-    from debian.deb822 import PkgRelation
     _unresolved: list = []
     _weak: list = []
 
@@ -1172,7 +1170,6 @@ def audit_conflict_cohort(state: RepoState, cohort: frozenset,
     Self-conflict via Provides (`A Conflicts: X` where `A Provides: X`
     is the only provider) is filtered as a no-op.
     """
-    from debian.deb822 import PkgRelation
     _conflicts: list = []
 
     for _pkg, _entry in state.packages.items():

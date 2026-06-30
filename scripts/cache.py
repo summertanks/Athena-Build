@@ -80,10 +80,6 @@ class Cache:
 
     _arch_table: DpkgArchTable
 
-    # Operators accepted by apt_pkg.check_dep; anything else defaults to '>='.
-    # Sourced from utils.VALID_CONSTRAINTS so cache + dependencytree stay
-    # in lockstep (HK-01b consolidation).
-    _VALID_CONSTRAINTS = utils.VALID_CONSTRAINTS
 
     def __init__(self, buildconfig: BuildConfig):
         """Builds the Cache by fetching Packages + Sources for every Mirror
