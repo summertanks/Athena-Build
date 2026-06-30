@@ -1835,6 +1835,43 @@ def list_snapshots_between(config: 'BuildConfig', after_ts: str,
     return sorted(_seen)
 
 
+def list_snapshots_and_latest(
+        config: 'BuildConfig',
+        after_ts: str) -> 'Tuple[Optional[str], List[str]]':
+    """One GET of [Snapshot] TimestampApi → ``(latest, between)``.
+
+    `latest` matches :func:`_query_snapshot_latest`: the min over archive keys
+    of each key's max timestamp (the covering latest valid for every archive),
+    or None on query failure / malformed data.  `between` matches
+    :func:`list_snapshots_between`: distinct timestamps strictly after
+    `after_ts` and up to (inclusive) `latest`, unioned across keys, sorted
+    ascending.  Lets a caller that needs BOTH (snapshot list / select) avoid
+    the double GET those two helpers would otherwise do."""
+    try:
+        resp = _http_session().get(
+            config.snapshot_timestamp_api, timeout=_HTTP_TIMEOUT_FAST,
+            headers=_HTTP_HEADERS)
+        resp.raise_for_status()
+        result = resp.json()['result']
+        _latest_per_key = {_k: result[_k][-1]
+                           for _k in config.snapshot_archive_keys}
+    except Exception as e:
+        logger.warning(f"list_snapshots_and_latest: query failed: {e}")
+        return None, []
+    for _ts in _latest_per_key.values():
+        if not _SNAPSHOT_TS_RE.match(_ts):
+            logger.warning(
+                f"list_snapshots_and_latest: malformed timestamp {_ts!r}")
+            return None, []
+    _latest = min(_latest_per_key.values())
+    _seen: set = set()
+    for _k in config.snapshot_archive_keys:
+        for _ts in result.get(_k, []) or []:
+            if _SNAPSHOT_TS_RE.match(_ts) and after_ts < _ts <= _latest:
+                _seen.add(_ts)
+    return _latest, sorted(_seen)
+
+
 def _validate_snapshot_timestamp(
         ts: str, mirrors: 'List[Mirror]',
         snapshot_baseurl: str = 'https://snapshot.debian.org/archive',

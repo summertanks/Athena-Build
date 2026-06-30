@@ -212,7 +212,10 @@ class SnapshotCommandsMixin(SessionState):
             console.print("  snapshot pinning is DISABLED")
             return
         _cur = self._snapshot_current()
-        _latest = self._snapshot_latest()
+        # Single GET → (latest, in-range candidates) instead of a separate
+        # _snapshot_latest + list_snapshots_between query (audit #73).
+        _latest, _cands = utils.list_snapshots_and_latest(
+            self.config, _cur or '')
         console.print("Snapshot timeline:")
         console.print(f"  [ current ] {_cur or '(unresolved)'}"
                       + (f"  ({utils.format_snapshot_timestamp(_cur)})"
@@ -220,7 +223,6 @@ class SnapshotCommandsMixin(SessionState):
         if not (_cur and _latest):
             console.print(f"  [ latest ] {_latest or '(query failed)'}")
             return
-        _cands = utils.list_snapshots_between(self.config, _cur, _latest)
         if not _cands:
             console.print(f"  [ latest ] {_latest}  (current is already latest — "
                           f"nothing to advance to)")
@@ -413,12 +415,12 @@ class SnapshotCommandsMixin(SessionState):
             console.print("snapshot select: current pin unresolved — set one "
                           "with `snapshot select <ts>`", tui.COLOR_ERROR)
             return
-        _latest = self._snapshot_latest()
+        # Single GET → (latest, in-range candidates) (audit #73).
+        _latest, _cands = utils.list_snapshots_and_latest(self.config, _cur)
         if not _latest:
             console.print("snapshot select: could not query available snapshots",
                           tui.COLOR_ERROR)
             return
-        _cands = utils.list_snapshots_between(self.config, _cur, _latest)
         if not _cands:
             console.print(f"snapshot select: current {_cur} is already at/after "
                           f"latest {_latest} — nothing to advance to.")

@@ -95,11 +95,13 @@ def surface_closure(dep_tree, seed_names: 'Iterable[str]',
             _c = _canonical(_selected, _e)
             if _c is not None:
                 _extras_canon.add(_c)
-        _changed = True
-        while _changed:
-            _changed = False
+        # Scan only the FRONTIER of newly-added nodes each round (first round
+        # = the whole closure) rather than rescanning the entire closure every
+        # round — equivalent fixpoint, far fewer rescans on large closures.
+        _frontier: 'Set[str]' = set(_closure)
+        while _frontier:
             _wanted: 'Set[str]' = set()
-            for _n in _closure:
+            for _n in _frontier:
                 _pkg = _selected.get(_n)
                 if _pkg is None:
                     continue
@@ -108,16 +110,19 @@ def surface_closure(dep_tree, seed_names: 'Iterable[str]',
                     if _c is not None and _c in _extras_canon \
                             and _c not in _closure:
                         _wanted.add(_c)
+            _new_nodes: 'Set[str]' = set()
             for _w in sorted(_wanted):
-                _changed = True
                 _closure.add(_w)
+                _new_nodes.add(_w)
                 _stack.append(_w)
             while _stack:
                 _n = _stack.pop()
                 for _d in _hard_dep_edges(_selected, _n):
                     if _d not in _closure:
                         _closure.add(_d)
+                        _new_nodes.add(_d)
                         _stack.append(_d)
+            _frontier = _new_nodes
     return _closure
 
 

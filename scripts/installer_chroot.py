@@ -270,6 +270,12 @@ def _resolve_udeb_files(udeb_tree: 'dependencytree.DependencyTree',
     )
     _files: List[str] = []
     _main = dir_udebs
+    # List the udeb dir ONCE so find_matching_artifact's stamped-variant scan
+    # doesn't re-listdir per candidate udeb.
+    try:
+        _main_listing = os.listdir(_main)
+    except OSError:
+        _main_listing = []
     for _name in udeb_tree.selected_pkgs:
         _pkg = udeb_tree.selected_pkgs[_name]
         if _name != _pkg['Package']:
@@ -288,7 +294,8 @@ def _resolve_udeb_files(udeb_tree: 'dependencytree.DependencyTree',
         # stamped udeb (e.g. busybox-udeb after a security delta) resolves as
         # "missing" and is dropped from the initrd → kernel panic "no init found"
         # (no /bin/sh, since busybox is gone).
-        _match = utils.find_matching_artifact(_main, _filename)
+        _match = utils.find_matching_artifact(
+            _main, _filename, dir_listing=_main_listing)
         if _match:
             _files.append(_match)
             continue

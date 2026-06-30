@@ -354,7 +354,8 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
 
 
 def find_matching_artifact(dst_dir: str,
-                           predicted_filename: str) -> 'Optional[str]':
+                           predicted_filename: str,
+                           dir_listing: 'Optional[list]' = None) -> 'Optional[str]':
     """Return the on-disk path of `predicted_filename` in `dst_dir`, or of an
     +asg<R>u<N>-stamped variant of it (match_pristine_base), else None.
 
@@ -363,12 +364,18 @@ def find_matching_artifact(dst_dir: str,
     _source_state) don't loop the way the exact-filename match did.
     The exact-name fast path avoids a listdir in the common pristine case;
     only a missing exact file triggers the (single-version, single-snapshot
-    local) directory scan."""
+    local) directory scan.
+
+    `dir_listing` lets a caller that resolves MANY files against the same
+    `dst_dir` (e.g. the chroot unpack/retry passes) pass `os.listdir(dst_dir)`
+    once so the stamped-variant scan doesn't re-listdir per file.  None ⇒ scan
+    the directory here (historical behaviour)."""
     _exact = os.path.join(dst_dir, predicted_filename)
     if os.path.isfile(_exact):
         return _exact
     try:
-        for _cand in os.listdir(dst_dir):
+        _entries = os.listdir(dst_dir) if dir_listing is None else dir_listing
+        for _cand in _entries:
             if (_cand.endswith(('.deb', '.udeb'))
                     and match_pristine_base(predicted_filename, _cand)
                     and os.path.isfile(os.path.join(dst_dir, _cand))):

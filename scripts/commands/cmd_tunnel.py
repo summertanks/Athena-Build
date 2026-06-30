@@ -223,6 +223,10 @@ class TunnelCommandsMixin(SessionState):
         _upstream_paths: 'dict[str, str]' = {}
         _upstream_urls: 'dict[str, str]' = {}
         _upstream_sha256s: 'dict[str, str]' = {}
+        # Cache each component dir's listing so the per-binary stale-file wipe
+        # below doesn't re-listdir the dir once per binary (was quadratic for
+        # large firmware sources that route many files into one pool dir).
+        _dir_listings: 'dict[str, list]' = {}
         for _filename in _upstream_files:
             _dst_dir = self.config.deb_dest_for_filename(_filename, _comp)
             _dest = os.path.join(_dst_dir, _filename)
@@ -235,30 +239,35 @@ class TunnelCommandsMixin(SessionState):
             _bin_name = _filename.split('_', 1)[0]
             _target_ver = _filename.split('_')[1]
             _target_pristine = utils.strip_nmu_suffix(_target_ver)
-            try:
-                for _existing in os.listdir(_dst_dir):
-                    if not _existing.endswith(('.deb', '.udeb')):
-                        continue
-                    if _existing.split('_', 1)[0] != _bin_name:
-                        continue
-                    if _existing == _filename:
-                        continue
-                    _ex_ver = _existing.split('_')[1]
-                    if utils.pristine_base(_ex_ver) == _target_pristine:
-                        continue
-                    _stale = os.path.join(_dst_dir, _existing)
-                    logger.info(
-                        f"tunnel {src_pkg.package}: removing stale "
-                        f"non-matching {_existing} (target pristine "
-                        f"{_target_pristine})")
-                    try:
-                        os.remove(_stale)
-                        _purged_stale.append(_existing)
-                    except OSError as _e:
-                        logger.warning(
-                            f"tunnel {src_pkg.package}: rm {_stale}: {_e}")
-            except OSError:
-                pass
+            _listing = _dir_listings.get(_dst_dir)
+            if _listing is None:
+                try:
+                    _listing = os.listdir(_dst_dir)
+                except OSError:
+                    _listing = []
+                _dir_listings[_dst_dir] = _listing
+            for _existing in list(_listing):
+                if not _existing.endswith(('.deb', '.udeb')):
+                    continue
+                if _existing.split('_', 1)[0] != _bin_name:
+                    continue
+                if _existing == _filename:
+                    continue
+                _ex_ver = _existing.split('_')[1]
+                if utils.pristine_base(_ex_ver) == _target_pristine:
+                    continue
+                _stale = os.path.join(_dst_dir, _existing)
+                logger.info(
+                    f"tunnel {src_pkg.package}: removing stale "
+                    f"non-matching {_existing} (target pristine "
+                    f"{_target_pristine})")
+                try:
+                    os.remove(_stale)
+                    _purged_stale.append(_existing)
+                    _listing.remove(_existing)   # keep the cached listing current
+                except OSError as _e:
+                    logger.warning(
+                        f"tunnel {src_pkg.package}: rm {_stale}: {_e}")
 
             if os.path.isfile(_dest):
                 logger.info(f"tunnel {src_pkg.package}: {_filename} already present, skipping download")

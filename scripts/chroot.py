@@ -1107,6 +1107,16 @@ class _ChrootMixin:
         # component (live-boot-doc, live-config-doc caught live).  Search
         # main first, then the doc component.
         _doc = _main.replace(f'{os.sep}main{os.sep}', f'{os.sep}doc{os.sep}')
+        # List each component dir ONCE up front so the stamped-variant scan in
+        # find_matching_artifact doesn't re-listdir per package on every pass.
+        try:
+            _main_listing = os.listdir(_main)
+        except OSError:
+            _main_listing = []
+        try:
+            _doc_listing = os.listdir(_doc) if _doc != _main else _main_listing
+        except OSError:
+            _doc_listing = []
         for pkg in pkg_list:
             # a hard-coded seed (e.g. the libc bootstrap) may be
             # absent on a minimal selection — skip+warn like the installer
@@ -1124,9 +1134,11 @@ class _ChrootMixin:
             # find_matching_artifact accepts the pristine name OR its stamped
             # variant — without it, every stamped .deb (openssl, glibc, … from a
             # security delta) is "not found" and dropped from the chroot.
-            _filepath = utils.find_matching_artifact(_main, _filename)
+            _filepath = utils.find_matching_artifact(
+                _main, _filename, dir_listing=_main_listing)
             if not _filepath and _doc != _main:
-                _filepath = utils.find_matching_artifact(_doc, _filename)
+                _filepath = utils.find_matching_artifact(
+                    _doc, _filename, dir_listing=_doc_listing)
             if not _filepath:
                 tui.console.print(f"WARNING: .deb not found, skipping: {_filename}")
                 logger.warning(

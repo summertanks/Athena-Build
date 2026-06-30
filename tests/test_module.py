@@ -28974,16 +28974,19 @@ def test_snapshot_select_interactive_sets_chosen_current():
             def get_response(self):
                 return next(_answers)
 
-        _sl = utils.list_snapshots_between
-        utils.list_snapshots_between = lambda _c, _a, _u: [
-            '20260518T000000Z', '20260526T134919Z']
+        # audit #73: the interactive picker now does a single
+        # list_snapshots_and_latest GET → (latest, candidates).
+        _sl = utils.list_snapshots_and_latest
+        utils.list_snapshots_and_latest = lambda _c, _a: (
+            '20260526T134919Z',
+            ['20260518T000000Z', '20260526T134919Z'])
         _sp, _sc = cmd_snapshot.Prompt, build.console.print
         cmd_snapshot.Prompt = _FakePrompt
         build.console.print = lambda *a, **k: None
         try:
             _sess._snapshot_select_interactive()
         finally:
-            utils.list_snapshots_between = _sl
+            utils.list_snapshots_and_latest = _sl
             cmd_snapshot.Prompt, build.console.print = _sp, _sc
         assert utils.read_snapshot_state(_sess.config)['current'] == \
             '20260518T000000Z', "picker must set the chosen ts as current"
