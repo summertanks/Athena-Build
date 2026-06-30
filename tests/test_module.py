@@ -27306,6 +27306,58 @@ def test_needs_bump_build_predicts_transpose_filename():
         assert _sess._needs_bump_build('bar', _delta, 1) is False
 
 
+def test_needs_bump_build_shim_signed_uses_binary_own_version():
+    """Regression (audit #6): _needs_bump_build must predict each binary's
+    filename from the binary's OWN upstream version (like the normalizer and
+    virtual_build), NOT source.pristine + the SOURCE's suffix.  For shim-signed
+    the binary's trailing marker (~deb12u1, after the embedded +15.8-1) differs
+    from the source suffix (+deb12u1), so the source-suffix reconstruction
+    predicts +asg (wrong SIGN) and never matches the ~asg file the build
+    actually writes — an infinite-rebuild risk.  With the binary's own version
+    the predicted file is the ~asg one the normalizer produces, so a present
+    file means no rebuild."""
+    import sys
+    import types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        _log = os.path.join(_tmp, 'log')
+        os.makedirs(os.path.join(_log, 'build'))
+        _sess = BuildSession.__new__(BuildSession)
+
+        class _Cfg:
+            build_version = '1'
+            dir_log = _log
+
+            def deb_dest_for_filename(self, f, component='main'):
+                return _tmp
+        _sess.config = _Cfg()
+
+        class _BinPkg:
+            def __init__(self, v):
+                self.version = v
+        # The binary's OWN upstream version carries a TRAILING ~deb12u1 (after
+        # the embedded +15.8-1); the source's is a trailing +deb12u1.
+        _sess.dep_tree = types.SimpleNamespace(selected_pkgs={
+            'shim-signed': _BinPkg('1.44~1+deb12u1+15.8-1~deb12u1')})
+        _sess.udeb_dep_tree = None
+        # The predicted filename carries the binary's PRISTINE base.
+        _sess._predicted_files_for_source = lambda n: [
+            'shim-signed_1.44~1+deb12u1+15.8-1_amd64.deb']
+
+        class _Src:
+            version = '1.44~1+deb12u1'         # source's own (trailing +deb12u1)
+
+        assert _sess._needs_bump_build('shim-signed', _Src(), 1) is True
+        # Plant the ~asg file the normalizer actually writes (NOT +asg).
+        open(os.path.join(
+            _tmp, 'shim-signed_1.44~1+deb12u1+15.8-1~asg1u1_amd64.deb'),
+            'w').close()
+        # Present → no rebuild.  The buggy +asg predictor would look for the
+        # wrong-signed name and still report True here.
+        assert _sess._needs_bump_build('shim-signed', _Src(), 1) is False
+
+
 def test_audit_state_reclassifies_security_respin_as_needs_bump():
     """`_audit_state` surfaces a same-base security/NMU re-spin as
     'needs_bump' when `_source_state` calls it 'ok' (lenient +asg presence)
@@ -40879,6 +40931,7 @@ def main() -> int:
         test_generate_top_release_avoids_self_reference_via_tempfile,
         # UPD-01 step 6: workload + Guard A preflight
         test_needs_bump_build_predicts_transpose_filename,
+        test_needs_bump_build_shim_signed_uses_binary_own_version,
         test_audit_state_reclassifies_security_respin_as_needs_bump,
         test_preflight_stamp_invariant_roundtrips_and_flags_bad_version,
         # UPD-01 steps 7-8: snapshot commands + repo refresh orchestrator

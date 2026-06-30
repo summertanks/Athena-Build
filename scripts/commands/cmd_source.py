@@ -682,11 +682,32 @@ class SourceCommandsMixin(SessionState):
                 continue
             _bin, _ver, _arch = _parts
             _ext = os.path.splitext(_f)[1]
-            # Reconstruct this binary's upstream version (its pristine base +
-            # the source's redistribution suffix) and transpose it exactly as
-            # the build will.
+            # Derive this binary's expected on-disk version the SAME way the
+            # normalizer (_normalize_built_artifacts) and virtual_build do:
+            # from the binary's OWN upstream version (strip a binNMU, then
+            # transpose the trailing redistribution marker), NOT the source's
+            # pristine base + the SOURCE's suffix.  They diverge when a binary's
+            # trailing token differs from the source's — e.g. shim-signed, whose
+            # source is 1.44~1+deb12u1 but whose binary appends +15.8-1~deb12u1,
+            # so the binary's trailing marker is ~deb12u1 while the source suffix
+            # is +deb12u1.  Reconstructing from the source suffix would predict
+            # +asg (wrong sign) and never match the ~asg file the build actually
+            # writes → infinite rebuild.  Fall back to the source-suffix
+            # reconstruction only when the binary isn't in a selection (the
+            # trees aren't loaded), where the two agree anyway.
+            _bin_pkg = None
+            _dt = getattr(self, 'dep_tree', None)
+            if _dt is not None:
+                _bin_pkg = _dt.selected_pkgs.get(_bin)
+            _udt = getattr(self, 'udeb_dep_tree', None)
+            if _bin_pkg is None and _udt is not None:
+                _bin_pkg = _udt.selected_pkgs.get(_bin)
+            _bin_ver = (str(_bin_pkg.version)
+                        if _bin_pkg is not None
+                        and getattr(_bin_pkg, 'version', None)
+                        else _ver + _src_suffix)
             _expected_ver = utils.transposed_version(
-                _ver + _src_suffix, 'asg', release, _patch_level)
+                utils.strip_binNMU(_bin_ver)[0], 'asg', release, _patch_level)
             _expected = f'{_bin}_{_expected_ver}_{_arch}{_ext}'
             _dst = self.config.deb_dest_for_filename(_f, _comp)
             if not os.path.isfile(os.path.join(_dst, _expected)):
