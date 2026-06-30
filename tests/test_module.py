@@ -24474,6 +24474,67 @@ def test_comp03_segregate_rolls_back_on_move_failure():
         assert os.path.exists(os.path.join(_scratch, 'first_1.0_amd64.deb'))
 
 
+def test_segregate_rollback_never_destroys_kept_existing_published_deb():
+    """Regression (audit #7, buildcontainer:2015-2045): on a multi-binary
+    rebuild where one binary is a byte-identical (kept-existing) collision
+    and a LATER sibling's move fails, the rollback must NOT rename the
+    already-published kept-existing .deb out of the repo.  The old code
+    appended the kept-existing path to _moved_paths, so the rollback loop
+    renamed it into the scratch dir — which build()'s finally then rmtrees,
+    silently destroying a previously-published artifact.  Kept-existing files
+    are now tracked separately (_kept_existing) and excluded from rollback."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    from unittest import mock
+    with tempfile.TemporaryDirectory() as _tmp:
+        _scratch = os.path.join(_tmp, 'stage')
+        _dest = os.path.join(_tmp, 'dists', 'thor', 'main', 'binary-amd64')
+        os.makedirs(_scratch)
+        os.makedirs(_dest)
+        # binary A: collides with an already-published artifact (kept-existing)
+        _kept = 'liba_1.0_amd64.deb'
+        with open(os.path.join(_dest, _kept), 'w') as fh:
+            fh.write('PUBLISHED-A')           # already on disk in a published dir
+        with open(os.path.join(_scratch, _kept), 'w') as fh:
+            fh.write('REBUILT-A-dup')         # byte-identical rebuild dup
+        # binary B: its move fails (dest is a file → makedirs raises OSError)
+        _boom = 'libb_1.0_amd64.deb'
+        with open(os.path.join(_scratch, _boom), 'w') as fh:
+            fh.write('REBUILT-B')
+        _boom_blocker = os.path.join(_tmp, 'blocker')
+        with open(_boom_blocker, 'w') as fh:
+            fh.write('x')                      # a FILE → makedirs() on it raises
+
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+
+        class _FakeConfig:
+            def deb_dest_for_filename(self, _f, component='main'):
+                if _f == _boom:
+                    return _boom_blocker        # makedirs raises → rollback
+                return _dest
+
+        class _Src:
+            package = 'multi'
+
+        _bc.config = _FakeConfig()
+        # Force the order that triggers the bug: kept-existing collision FIRST
+        # (so its dest is recorded), then the failing sibling.  segregate calls
+        # os.listdir(source_dir) exactly once.
+        with mock.patch.object(buildcontainer.os, 'listdir',
+                               return_value=[_kept, _boom]):
+            _moved = _bc._segregate_built_artifacts(_Src(), _scratch)
+
+        # All-or-nothing: the failed source returns [].
+        assert _moved == [], _moved
+        # THE bug: the already-published kept-existing file must survive intact.
+        _kept_path = os.path.join(_dest, _kept)
+        assert os.path.exists(_kept_path), (
+            "rollback destroyed the already-published kept-existing .deb!")
+        with open(_kept_path) as fh:
+            assert fh.read() == 'PUBLISHED-A', (
+                "kept-existing published .deb was modified during rollback")
+
+
 def test_comp03_build_uses_per_worker_scratch_dir_in_volume_bind():
     """COMP-03 Phase 1 AST contract: BuildContainer.build() must:
       1. Compute a per-build _scratch_dir under config.dir_build_stage
@@ -40774,6 +40835,7 @@ def main() -> int:
         test_comp03_segregate_does_not_read_self_repo_path,
         test_comp03_segregate_cross_source_isolation_via_scratch_dir,
         test_comp03_segregate_rolls_back_on_move_failure,
+        test_segregate_rollback_never_destroys_kept_existing_published_deb,
         test_comp03_build_uses_per_worker_scratch_dir_in_volume_bind,
         test_comp03_buildconfig_creates_and_validates_dir_build_stage,
         test_comp03_buildcontainer_init_sweeps_build_stage_survivors,
