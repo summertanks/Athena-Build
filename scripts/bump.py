@@ -30,7 +30,7 @@ See docs/bump-mechanics.md for the full rationale and the exact rules.
 import hashlib
 import os
 import re
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 # sha256 of the empty byte string — the patch_set_hash an UNPATCHED source
 # carries (utils.patch_set_hash([]) hashes "").  A record whose patch_set_hash
@@ -385,45 +385,36 @@ def find_matching_artifact(dst_dir: str,
     return None
 
 
-def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
-    """Return (new_text, strip_count) — strips NMU suffix from the
-    Version field AND every version constraint in dep-related fields
-    of a DEBIAN/control text.
+def _rewrite_control_text(
+        content: str,
+        version_op: 'Callable[[str], str]') -> 'tuple[str, int]':
+    """Shared scaffold for :func:`strip_nmu_from_control_text` and
+    :func:`transpose_control_text`.  Applies ``version_op`` (a version-string
+    rewrite) to the Version field AND every version constraint in dep-related
+    fields of a DEBIAN/control text; records the pre-rewrite Version in
+    ``X-Athena-Upstream-Version`` when it changed (CVE-tracking provenance);
+    and collapses the same-upstream-sibling ``>>/<<`` idiom to
+    ``(= <new Version>)``.
 
-    When Version actually changes (i.e. an NMU suffix existed and got
-    stripped), an `X-Athena-Upstream-Version:` line is inserted right
-    after the new Version line carrying the original (pre-strip)
-    version.  This preserves CVE-tracking provenance: tools that read
-    the installed dpkg DB would otherwise misclassify our pristine-
-    versioned binaries as the pre-security-update upstream version
-    (see docs/cve-tracking.md).  The field is omitted when Version
-    didn't change — pristine sources need no record since their
-    Version IS the upstream version.
-
-    Walks fields line-by-line (handles multi-line continuation).
-    Idempotent: re-running on already-stripped text counts zero strips
-    and skips the X-field insertion (already present from the prior run).
+    Walks fields line-by-line (handles multi-line continuation per the deb822
+    wrap convention: a field starts at column 0 with ``Name:``; continuation
+    lines start with whitespace).  Returns (new_text, change_count).  Idempotent
+    on already-rewritten text (zero changes; X-field insertion skipped).
     """
     _total = 0
     _content = content
 
-    # Snapshot the original Version up front so we know what (if
-    # anything) to record in X-Athena-Upstream-Version.  Done before
-    # the strip rewrite so the value is the genuine pre-strip Version.
+    # Snapshot the original Version up front so we know what (if anything) to
+    # record in X-Athena-Upstream-Version — before the rewrite mutates it.
     _orig_match = re.search(r'^Version: (\S+)\s*$', _content, re.MULTILINE)
     _orig_version = _orig_match.group(1) if _orig_match else ''
-    _stripped_version = (
-        strip_nmu_suffix(_orig_version) if _orig_version else ''
-    )
-    _version_was_stripped = (
-        bool(_stripped_version) and _stripped_version != _orig_version
-    )
+    _new_version = version_op(_orig_version) if _orig_version else ''
+    _version_changed = bool(_new_version) and _new_version != _orig_version
 
-    # Strip from the Version: field.
     def _sub_version(_m: 're.Match') -> str:
         nonlocal _total
         _old = _m.group(1)
-        _new = strip_nmu_suffix(_old)
+        _new = version_op(_old)
         if _new != _old:
             _total += 1
         return f'Version: {_new}'
@@ -433,12 +424,10 @@ def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
         _sub_version, _content, count=1, flags=re.MULTILINE,
     )
 
-    # Provenance: record the pre-strip upstream Version as an X-field
-    # right after the (now-stripped) Version line.  Only when the
-    # strip actually changed the Version (pristine packages need
-    # nothing) and only when the field isn't already present
-    # (idempotent re-runs).
-    if _version_was_stripped and 'X-Athena-Upstream-Version:' not in _content:
+    # Provenance: record the pre-rewrite upstream Version as an X-field right
+    # after the (now-rewritten) Version line — only when it actually changed and
+    # the field isn't already present (idempotent re-runs).
+    if _version_changed and 'X-Athena-Upstream-Version:' not in _content:
         _content = re.sub(
             r'^(Version: \S+)\s*$',
             lambda _m: (
@@ -448,54 +437,50 @@ def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
             _content, count=1, flags=re.MULTILINE,
         )
 
-    # Per-relation version-constraint stripper: matches `(OP VERSION)`
-    # within a dep-field's value.  Operator is preserved verbatim.
-    _constraint_re = re.compile(
-        r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)'
-    )
+    # Per-relation version-constraint rewriter: matches `(OP VERSION)` within a
+    # dep-field's value.  Operator is preserved verbatim.
+    _constraint_re = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
 
     def _sub_constraint(_m: 're.Match') -> str:
         nonlocal _total
         _op, _ver = _m.group(1), _m.group(2)
-        _new_ver = strip_nmu_suffix(_ver)
+        _new_ver = version_op(_ver)
         if _new_ver != _ver:
             _total += 1
         return f'({_op} {_new_ver})'
 
-    # Walk lines; only rewrite inside a relation field block.  Uses
-    # the deb822 wrap-on-continuation convention: a field starts at
-    # column 0 with `Name:`; continuation lines start with whitespace.
     _new_lines: 'list[str]' = []
     _in_target = False
     for _line in _content.splitlines(keepends=True):
         if _line and _line[0] not in (' ', '\t'):
             _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
-            if _m:
-                _in_target = _m.group(1) in _NMU_STRIP_FIELDS
-            else:
-                _in_target = False
+            _in_target = _m is not None and _m.group(1) in _NMU_STRIP_FIELDS
         # (continuation lines inherit the surrounding _in_target state)
         if _in_target:
             _new_lines.append(_constraint_re.sub(_sub_constraint, _line))
         else:
             _new_lines.append(_line)
-
     _content = ''.join(_new_lines)
 
-    # Pair-rewrite pass: detect the upstream "same-upstream-sibling"
-    # idiom (`X (>> V), X (<< V-.)`) and collapse it to `X (= our_version)`.
-    # See docs/strip-nmu-sibling-constraint-idiom.md for the full
-    # rationale + impact analysis.  Briefly: the >> half fails after
-    # strip-NMU because Policy §5.6.12 makes our `V-0` equal to bare `V`;
-    # the maintainer's intent was "any debrev of same upstream", which
-    # in our atomic-source-build pipeline reduces to "the exact sibling
-    # binary version we produce".
+    # Pair-rewrite pass: collapse the same-upstream-sibling idiom
+    # (`X (>> V), X (<< V-.)`) to `X (= our_version)`.  See
+    # docs/strip-nmu-sibling-constraint-idiom.md for the rationale.
     _our_version = _extract_version(_content)
     if _our_version:
         _content, _pairs = _rewrite_sibling_idiom_in_text(_content, _our_version)
         _total += _pairs
 
     return _content, _total
+
+
+def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
+    """Return (new_text, strip_count) — strips NMU suffix from the Version
+    field AND every version constraint in dep-related fields of a DEBIAN/control
+    text, recording the pre-strip Version in ``X-Athena-Upstream-Version`` (CVE
+    provenance; see docs/cve-tracking.md) when it changed.  Pristine sources
+    (Version unchanged) get no X-field.  Idempotent.  Thin wrapper over
+    :func:`_rewrite_control_text` with the per-version op = strip_nmu_suffix."""
+    return _rewrite_control_text(content, strip_nmu_suffix)
 
 
 def _extract_version(content: str) -> 'Optional[str]':
@@ -827,71 +812,12 @@ def transpose_control_text(content: str, prefix: str,
 
     The +pP / +bN patch/force suffix is NOT applied here — that is the deb-level
     step (:func:`transpose_deb`), which restamps the collapsed sibling pins to
-    the exact final version.  Idempotent on already-transposed text.
+    the exact final version.  Idempotent on already-transposed text.  Thin
+    wrapper over :func:`_rewrite_control_text` with the per-version op =
+    transpose(v, prefix, release).
     """
-    _total = 0
-    _content = content
-
-    _orig_match = re.search(r'^Version: (\S+)\s*$', _content, re.MULTILINE)
-    _orig_version = _orig_match.group(1) if _orig_match else ''
-    _transposed_version = (
-        transpose(_orig_version, prefix, release) if _orig_version else ''
-    )
-    _version_changed = (
-        bool(_transposed_version) and _transposed_version != _orig_version
-    )
-
-    def _sub_version(_m: 're.Match') -> str:
-        nonlocal _total
-        _old = _m.group(1)
-        _new = transpose(_old, prefix, release)
-        if _new != _old:
-            _total += 1
-        return f'Version: {_new}'
-
-    _content = re.sub(
-        r'^Version: (\S+)\s*$',
-        _sub_version, _content, count=1, flags=re.MULTILINE,
-    )
-
-    if _version_changed and 'X-Athena-Upstream-Version:' not in _content:
-        _content = re.sub(
-            r'^(Version: \S+)\s*$',
-            lambda _m: (
-                f'{_m.group(1)}\n'
-                f'X-Athena-Upstream-Version: {_orig_version}'
-            ),
-            _content, count=1, flags=re.MULTILINE,
-        )
-
-    _constraint_re = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
-
-    def _sub_constraint(_m: 're.Match') -> str:
-        nonlocal _total
-        _op, _ver = _m.group(1), _m.group(2)
-        _new_ver = transpose(_ver, prefix, release)
-        if _new_ver != _ver:
-            _total += 1
-        return f'({_op} {_new_ver})'
-
-    _new_lines: 'list[str]' = []
-    _in_target = False
-    for _line in _content.splitlines(keepends=True):
-        if _line and _line[0] not in (' ', '\t'):
-            _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
-            _in_target = _m is not None and _m.group(1) in _NMU_STRIP_FIELDS
-        if _in_target:
-            _new_lines.append(_constraint_re.sub(_sub_constraint, _line))
-        else:
-            _new_lines.append(_line)
-    _content = ''.join(_new_lines)
-
-    _our_version = _extract_version(_content)
-    if _our_version:
-        _content, _pairs = _rewrite_sibling_idiom_in_text(_content, _our_version)
-        _total += _pairs
-
-    return _content, _total
+    return _rewrite_control_text(
+        content, lambda _v: transpose(_v, prefix, release))
 
 
 # Exact-pin matcher: a `<name> (= <version>)` constraint inside a relation
