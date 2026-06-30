@@ -23598,7 +23598,7 @@ def test_validate_canonical_attribution_tunnel_and_build_config():
         _stats, _findings = _vb.validate_against_build_records(
             source_names=['prod', 'consumer', 'tun'],
             source_lookup=lambda n: _sources.get(n),
-            package_universe=_universe, asg_ledger={}, release=1,
+            package_universe=_universe, release=1,
             arch='amd64', buildlog_dir=_log, repo_dir=os.path.join(_root, 'repo'),
             canonical_src_map=_canon, tunnel_sources=frozenset({'tun'}))
         # prod: shared declared + on disk (canonical=prod) → matched.
@@ -23664,7 +23664,7 @@ def test_validate_transpose_prediction_matches_built_asg():
         _stats, _findings = _vb.validate_against_build_records(
             source_names=['foosrc'],
             source_lookup=lambda n: _sources.get(n),
-            package_universe=_universe, asg_ledger=_led, release=1,
+            package_universe=_universe, release=1,
             arch='amd64', buildlog_dir=_log,
             repo_dir=os.path.join(_root, 'repo'),
             canonical_src_map=_canon)
@@ -26825,7 +26825,7 @@ def test_virtual_build_synthesize_source_binaries_end_to_end():
     }
     _recs = _vb.synthesize_source_binaries(
         source=_StubSrc(), package_universe=_universe,
-        asg_ledger={}, release=1, arch='amd64',
+        release=1, arch='amd64',
     )
     assert len(_recs) == 2
     _by_name = {_r['Package']: _r for _r in _recs}
@@ -26872,7 +26872,7 @@ def test_virtual_build_metapackage_uses_binary_upstream_version():
     }
     _recs = _vb.synthesize_source_binaries(
         source=_StubGccDefaults(), package_universe=_universe,
-        asg_ledger={}, release=1, arch='amd64',
+        release=1, arch='amd64',
     )
     _by_name = {_r['Package']: _r for _r in _recs}
     # Versions match upstream binary Version (NOT source 1.213).
@@ -26919,7 +26919,7 @@ def test_virtual_build_metapackage_per_binary_transpose():
     }
     _recs = _vb.synthesize_source_binaries(
         source=_StubGccDefaults(), package_universe=_universe,
-        asg_ledger=_ledger, release=1, arch='amd64',
+        release=1, arch='amd64',
     )
     _by_name = {_r['Package']: _r for _r in _recs}
     # No trailing +deb on either binary → both ship pristine.
@@ -26954,7 +26954,7 @@ def test_virtual_build_transposes_inherited_depends_constraint():
     }
     _recs = _vb.synthesize_source_binaries(
         source=_StubSrc(), package_universe=_universe,
-        asg_ledger={}, release=1, arch='amd64',
+        release=1, arch='amd64',
     )
     assert len(_recs) == 1
     # Constraint transposed: now '2.06-13+asg1u2', not '+deb12u2'.
@@ -26997,7 +26997,7 @@ def test_virtual_build_skips_binaries_from_other_canonical_source():
     # fires because linux IS being synthesized elsewhere in this run.
     _recs = _vb.synthesize_source_binaries(
         source=_StubSignedSrc(), package_universe=_universe,
-        asg_ledger={}, release=1, arch='amd64',
+        release=1, arch='amd64',
         peer_sources={'linux', 'linux-signed-amd64'},
     )
     _names = {_r['Package'] for _r in _recs}
@@ -27207,7 +27207,7 @@ def test_virtual_build_canonical_filter_off_when_peer_not_in_scope():
     # source is absent → filter MUST NOT fire.
     _recs = _vb.synthesize_source_binaries(
         source=_StubFork(), package_universe=_universe,
-        asg_ledger={}, release=1, arch='amd64',
+        release=1, arch='amd64',
         peer_sources={'athena-cdrom-setup'},
     )
     assert len(_recs) == 1
@@ -27820,7 +27820,7 @@ def test_virtual_build_delta_uses_source_version_not_per_binary():
     _ledger = {'bash': ['5.2.15-2'], 'bash-static': ['5.2.15-2']}
     _recs = _vb.synthesize_source_binaries(
         source=_Bash(), package_universe=_universe,
-        asg_ledger=_ledger, release=1, arch='amd64',
+        release=1, arch='amd64',
         peer_sources={'bash'})
     # No delta (source is pristine), no lineage (ledger pristine
     # entries don't trigger).  Synth must NOT stamp.
@@ -27848,13 +27848,13 @@ def test_virtual_build_per_binary_version_is_intrinsic():
     _ledger: 'dict' = {'curl': ['7.88.1-10']}
     _r1 = _vb.synthesize_source_binaries(
         source=_Curl(), package_universe=_universe,
-        asg_ledger=_ledger, release=1, arch='amd64',
+        release=1, arch='amd64',
         peer_sources={'curl'})
     assert _r1[0]['Version'] == '7.88.1-10+asg1u14'
     # override_source_version does not alter the per-binary transpose.
     _r2 = _vb.synthesize_source_binaries(
         source=_Curl(), package_universe=_universe,
-        asg_ledger=_ledger, release=1, arch='amd64',
+        release=1, arch='amd64',
         peer_sources={'curl'},
         override_source_version='7.88.1-10')
     assert _r2[0]['Version'] == '7.88.1-10+asg1u14'
@@ -27886,7 +27886,7 @@ def test_virtual_build_transpose_preserves_epoch():
     }
     _recs = _vb.synthesize_source_binaries(
         source=_Bind9(), package_universe=_universe,
-        asg_ledger=_ledger, release=1, arch='amd64',
+        release=1, arch='amd64',
         peer_sources={'bind9'},
     )
     _by_name = {_r['Package']: _r for _r in _recs}
@@ -27923,7 +27923,7 @@ def test_virtual_build_synthesize_source_filters_by_profile():
                             'Source': 'apt', 'Architecture': 'amd64'}}
              for b in _AptSrc.binary}
     _recs = _vb.synthesize_source_binaries(
-        source=_AptSrc(), package_universe=_univ, asg_ledger={},
+        source=_AptSrc(), package_universe=_univ,
         release=1, arch='amd64', peer_sources={'apt'},
         active_profiles=frozenset({'nodoc', 'nocheck', 'noinsttest'}))
     _names = {_r['Package'] for _r in _recs}

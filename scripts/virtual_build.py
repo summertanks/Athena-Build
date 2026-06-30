@@ -44,6 +44,64 @@ logger = logging.getLogger('athena')
 # ─────────────────────────── Synthesizer primitives ──────────────────
 
 
+def _parse_relations_safe(raw: str) -> 'Optional[list]':
+    """Parse a Depends-like relation string with python-debian, returning None
+    when the string is empty, python-debian is unavailable, or the parse
+    raises — every caller degrades to the raw string on None."""
+    if not raw:
+        return None
+    try:
+        from debian.deb822 import PkgRelation
+    except ImportError:
+        return None
+    try:
+        return PkgRelation.parse_relations(raw)
+    except Exception:
+        return None
+
+
+def _apply_transpose(relations: 'list', release: int) -> bool:
+    """In-place: TRANSPOSE every constraint version (trailing +debNuK →
+    +asg<R>uK) in already-parsed PkgRelation `relations`.  Returns True iff a
+    version changed.  See _transpose_relation for the rationale."""
+    _changed = False
+    for _or_group in relations:
+        for _rel in _or_group:
+            _vc = _rel.get('version')
+            if not _vc:
+                continue
+            _op, _cur = _vc
+            _new = utils.transpose(_cur, 'asg', release)
+            if _new != _cur:
+                _rel['version'] = (_op, _new)
+                _changed = True
+    return _changed
+
+
+def _apply_sibling_pins(relations: 'list',
+                        sibling_ver_map: Dict[str, str],
+                        sibling_pristine_map: Dict[str, str]) -> bool:
+    """In-place sibling-pin rewrite on already-parsed `relations` (see
+    _rewrite_sibling_pins for the per-target pristine-matching rationale).
+    Returns True iff a constraint changed."""
+    _changed = False
+    for _or_group in relations:
+        for _rel in _or_group:
+            _name = _rel.get('name', '')
+            if _name not in sibling_ver_map:
+                continue
+            _vc = _rel.get('version')
+            if not _vc:
+                continue
+            _op, _cur = _vc
+            _target_pristine = sibling_pristine_map.get(_name, '')
+            if (_target_pristine
+                    and utils.pristine_base(_cur) == _target_pristine):
+                _rel['version'] = (_op, sibling_ver_map[_name])
+                _changed = True
+    return _changed
+
+
 def _transpose_relation(raw: str, release: int) -> str:
     """TRANSPOSE every constraint version in a Depends-like relation string
     (trailing +debNuK → +asg<R>uK).  Mirrors what real-build's
@@ -56,29 +114,10 @@ def _transpose_relation(raw: str, release: int) -> str:
     Run BEFORE sibling-pin rewriting; the latter matches on ``pristine_base``,
     which is unaffected by the transpose.
     """
-    if not raw:
+    _relations = _parse_relations_safe(raw)
+    if _relations is None or not _apply_transpose(_relations, release):
         return raw
-    try:
-        from debian.deb822 import PkgRelation
-    except ImportError:
-        return raw
-    try:
-        _relations = PkgRelation.parse_relations(raw)
-    except Exception:
-        return raw
-    _changed = False
-    for _or_group in _relations:
-        for _rel in _or_group:
-            _vc = _rel.get('version')
-            if not _vc:
-                continue
-            _op, _cur = _vc
-            _new = utils.transpose(_cur, 'asg', release)
-            if _new != _cur:
-                _rel['version'] = (_op, _new)
-                _changed = True
-    if not _changed:
-        return raw
+    from debian.deb822 import PkgRelation
     return PkgRelation.str(_relations)
 
 
@@ -124,33 +163,35 @@ def _rewrite_sibling_pins(raw: str,
     round-trip so we don't have to handle every operator + whitespace
     edge case by hand.
     """
-    if not raw or not sibling_ver_map:
+    if not sibling_ver_map:
         return raw
-    try:
-        from debian.deb822 import PkgRelation
-    except ImportError:
+    _relations = _parse_relations_safe(raw)
+    if _relations is None or not _apply_sibling_pins(
+            _relations, sibling_ver_map, sibling_pristine_map):
         return raw
-    try:
-        _relations = PkgRelation.parse_relations(raw)
-    except Exception:
+    from debian.deb822 import PkgRelation
+    return PkgRelation.str(_relations)
+
+
+def _transpose_and_pin_relation(raw: str, release: int,
+                                sibling_ver_map: Dict[str, str],
+                                sibling_pristine_map: Dict[str, str]) -> str:
+    """Combined single-parse form of :func:`_transpose_relation` followed by
+    :func:`_rewrite_sibling_pins`: transpose every constraint version, THEN
+    rewrite sibling pins, parsing + serialising the relation string ONCE rather
+    than twice.  Order matches the two-pass form — and is equivalent because
+    sibling-pin matching is on ``pristine_base``, which the transpose leaves
+    unchanged."""
+    _relations = _parse_relations_safe(raw)
+    if _relations is None:
         return raw
-    _changed = False
-    for _or_group in _relations:
-        for _rel in _or_group:
-            _name = _rel.get('name', '')
-            if _name not in sibling_ver_map:
-                continue
-            _vc = _rel.get('version')
-            if not _vc:
-                continue
-            _op, _cur = _vc
-            _target_pristine = sibling_pristine_map.get(_name, '')
-            if (_target_pristine
-                    and utils.pristine_base(_cur) == _target_pristine):
-                _rel['version'] = (_op, sibling_ver_map[_name])
-                _changed = True
+    _changed = _apply_transpose(_relations, release)
+    if sibling_ver_map:
+        _changed = _apply_sibling_pins(
+            _relations, sibling_ver_map, sibling_pristine_map) or _changed
     if not _changed:
         return raw
+    from debian.deb822 import PkgRelation
     return PkgRelation.str(_relations)
 
 
@@ -258,14 +299,11 @@ def synthesize_binary_record(
         _raw = upstream_record.get(_field)
         if not _raw:
             continue
-        # Two-pass rewriting: NMU strip first (every constraint
-        # version), THEN sibling pin rewriting (per-target).  Same
-        # order as real-build: strip_nmu_from_control_text runs
-        # before any sibling-pin restamping.
-        _transposed = _transpose_relation(_raw, release)
-        _rewritten = _rewrite_sibling_pins(
-            _transposed, sibling_ver_map, sibling_pristine_map)
-        _rec[_field] = _rewritten
+        # Transpose (every constraint version) THEN sibling-pin rewrite
+        # (per-target) — same order as real-build (strip_nmu_from_control_text
+        # before sibling-pin restamping), but in a single parse/serialise pass.
+        _rec[_field] = _transpose_and_pin_relation(
+            _raw, release, sibling_ver_map, sibling_pristine_map)
     for _field in ('Priority', 'Section', 'Essential',
                    'Multi-Arch', 'Homepage'):
         _val = upstream_record.get(_field)
@@ -479,7 +517,7 @@ def _package_list_index(
 
 def synthesize_source_binaries(
     source: Any, package_universe: Dict[str, Dict[str, Any]],
-    asg_ledger: Optional[Dict[str, List[str]]], release: int,
+    release: int,
     arch: str, was_patched: bool = False,
     peer_sources: 'Optional[set[str]]' = None,
     active_profiles: 'frozenset[str]' = frozenset(),
@@ -500,10 +538,6 @@ def synthesize_source_binaries(
     The wrapper helper :func:`from_cache` packs cache.package_hashtable
     into this shape automatically.
 
-    `asg_ledger` is retained for call-site compatibility but is no longer
-    consulted for the version decision — the update number is intrinsic to each
-    binary's upstream version under the transpose scheme.
-
     `arch` is the build architecture for filename synthesis (the
     BuildConfig.arch).  We don't actually filter by Architecture: here
     — every binary upstream declared as compatible ships; the closure
@@ -520,9 +554,6 @@ def synthesize_source_binaries(
     _binaries: List[str] = list(getattr(source, 'binary', []) or [])
     if not _binaries:
         return []
-    # `asg_ledger` is retained in the signature for call-site compatibility but
-    # is no longer consulted for the version decision — K is intrinsic to each
-    # binary's own upstream version under the transpose scheme.
 
     # Step 1 — per-binary upstream resolution.  Real dpkg-buildpackage
     # writes each binary's filename with its OWN Version from
@@ -771,7 +802,7 @@ def validate_against_build_records(
     source_names: 'List[str]',
     source_lookup: 'Any',  # callable: name -> Source or dict
     package_universe: 'Dict[str, Dict[str, Any]]',
-    asg_ledger: 'Optional[Dict[str, List[str]]]', release: int,
+    release: int,
     arch: str, buildlog_dir: str,
     active_profiles: 'frozenset[str]' = frozenset(),
     repo_dir: 'Optional[str]' = None,
@@ -852,50 +883,32 @@ def validate_against_build_records(
         if not _real_files:
             continue
         _stats['sources_checked'] += 1
-        _was_patched = bool(getattr(_src, 'patch_list', None))
-        # Use repo-walk-derived files (authoritative) for the
-        # at-build-time signals too.  `output_hashes` would miss
-        # udebs from the reconstruction's per-binary N detection.
-        # asg_ledger is no longer consulted for the version decision (K is
-        # intrinsic), so no historical reconstruction is needed.
-        # Derive at-build-time SOURCE state from the same set — the
-        # only authoritative record of what actually got built.
-        #   _src_pristine_at_build: pristine_base of any output's
-        #       filename version.  Used as source-version override so
-        #       synth's delta check uses the at-build pristine, not
-        #       today's drifted source.version.
-        #   _at_build_delta: True if ANY output carries an asg suffix.
-        #       That suffix is direct evidence that real-build's
-        #       delta-or-lineage check fired.  When N_built=1 with no
-        #       prior ledger entries (which reconstruction trims to
-        #       empty), lineage didn't fire — so delta must have.
-        #       Real-build's delta sources: source NMU (cache today
-        #       may show different NMU), was_patched (we read today),
-        #       binary NMU during build (transient).  We collapse all
-        #       three into a single "force delta=True" signal because
-        #       the output IS the receipt.
+        # Derive the at-build-time SOURCE pristine base from the authoritative
+        # repo-walk-derived output filenames (output_hashes would miss udebs).
+        # _src_pristine_at_build = pristine_base of the first output's filename
+        # version, used as the source-version override so synth's delta check
+        # uses the at-build pristine, not today's (possibly drifted)
+        # source.version.
         _src_pristine_at_build = ''
-        _at_build_delta = False
         for _fn in _real_files:
             _pr = utils.parse_deb_filename(_fn)
             if _pr is None:
                 continue
-            if not _src_pristine_at_build:
-                _src_pristine_at_build = utils.pristine_base(_pr[1])
-            if utils.parse_asg_suffix(_pr[1]) is not None:
-                _at_build_delta = True
+            _src_pristine_at_build = utils.pristine_base(_pr[1])
+            break
         # Predict at the EXACT patch level the build recorded (P), so the
-        # transpose prediction matches the built version rather than guessing
-        # from was_patched.  Falls back to 0 for pre-v6 records.
+        # transpose prediction matches the built version rather than guessing.
+        # Falls back to 0 for pre-v6 records.  override_patch_level always wins
+        # over was_patched in synthesize, so we neither compute nor pass
+        # was_patched / a historical at-build delta here.
         try:
             _rec_patch_level = int(_rec.get('patch_bump_count', 0) or 0)
         except (TypeError, ValueError):
             _rec_patch_level = 0
         _virt = synthesize_source_binaries(
             source=_src, package_universe=package_universe,
-            asg_ledger=None, release=release,
+            release=release,
             arch=arch,
-            was_patched=_at_build_delta or _was_patched,
             peer_sources=set(source_names),
             active_profiles=active_profiles,
             override_source_version=_src_pristine_at_build or None,

@@ -63,7 +63,6 @@ class VirtualCommandsMixin(SessionState):
                 "run `cache build` + `cache parse`.", tui.COLOR_ERROR)
             return False
         import virtual_build as _vb
-        import repo_audit as _ra
         _selected_srcs: dict = dict(
             getattr(self.dep_tree, 'selected_srcs', {}) or {})
         if self.udeb_dep_tree is not None:
@@ -80,7 +79,6 @@ class VirtualCommandsMixin(SessionState):
                            .strip('"').strip("'"))
         except (TypeError, ValueError):
             _release = 1
-        _asg_ledger = _ra.published_ledger(self.config) or {}
         _universe = _vb.from_cache(self.cache)
         # Canonical-source map: binary_name -> upstream `Source:` (the REAL
         # producer), built from the deb + udeb indices.  Lets validate
@@ -131,7 +129,7 @@ class VirtualCommandsMixin(SessionState):
             tui.COLOR_INFO)
         _stats, _findings = _vb.validate_against_build_records(
             source_names=_scope, source_lookup=_lookup,
-            package_universe=_universe, asg_ledger=_asg_ledger,
+            package_universe=_universe,
             release=_release, arch=self.config.arch,
             buildlog_dir=_buildlog,
             active_profiles=frozenset(
@@ -275,7 +273,6 @@ class VirtualCommandsMixin(SessionState):
                 "must complete first.", tui.COLOR_ERROR)
             return False
         import virtual_build as _vb
-        import repo_audit as _ra
         import mirror as _mirror
         import coord.identity as _id
         import coord.store as _store
@@ -309,7 +306,6 @@ class VirtualCommandsMixin(SessionState):
                            .strip('"').strip("'"))
         except (TypeError, ValueError):
             _release = 1
-        _asg_ledger = _ra.published_ledger(self.config) or {}
         _universe = _vb.from_cache(self.cache)
         _arch = self.config.arch
 
@@ -338,7 +334,7 @@ class VirtualCommandsMixin(SessionState):
             _was_patched = bool(getattr(_src, 'patch_list', None))
             _src_records = _vb.synthesize_source_binaries(
                 source=_src, package_universe=_universe,
-                asg_ledger=_asg_ledger, release=_release,
+                release=_release,
                 arch=_arch, was_patched=_was_patched,
                 peer_sources=set(_scope_names),
                 active_profiles=frozenset(
