@@ -25,7 +25,6 @@ The bound port (127.0.0.1:0 → OS-assigned) and the agent PID are written to
 them after launching the agent detached.
 """
 import argparse
-import glob
 import json
 import os
 import re
@@ -249,10 +248,7 @@ def run_build(
         stop.set()
         return
 
-    _outputs = sorted(
-        os.path.basename(_f)
-        for _pat in ('*.deb', '*.udeb')
-        for _f in glob.glob(os.path.join(_out_dir, _pat)))
+    _outputs = remote_build.collect_outputs(_out_dir)
 
     _snap = state.snapshot()
     if _snap['abort_requested']:

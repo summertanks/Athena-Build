@@ -10,9 +10,10 @@ fcntl advisory locking when appending so a concurrent rebuild from
 the same builder doesn't interleave bytes mid-line.
 
 Reads fold over EVERY *.jsonl in the directory.  The "logical sidecar"
-that consumers see is this merge.  Per-line signature verification is
-applied at read time (identity.verify_claim_against_keyring); failed
-lines are discarded with a logged warning, not raised.
+that consumers see is this merge.  Signature verification is applied at
+read time by read_all_claims / read_builder_claims (builder-in-keyring +
+not-revoked + per-line identity.verify_claim); failed lines are discarded
+with a logged warning, not raised.
 
 Append discipline: write a complete JSONL line in one write(), fsync,
 then release.  POSIX guarantees a single write() of length ≤ PIPE_BUF

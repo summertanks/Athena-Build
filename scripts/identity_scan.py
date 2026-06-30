@@ -279,12 +279,22 @@ def _parse_apt_install_line(line: str) -> Optional[Tuple[List[str], bool]]:
     # plumbing, not an apt-install argument.
     _redirect_token_literals = {'|', '>', '<', '>>', '<<', '&>', '|&'}
     _redirect_token_re = re.compile(r'^\d*[<>]&?\d*$')
+    # A redirect/pipe attached to a token without a space — `brltty>log`,
+    # `foo|tee`, `bar&` — splits the token: the part before the operator is
+    # the last package, everything from the operator on is shell plumbing.
+    _embedded_redir_re = re.compile(r'[<>|&]')
 
     pkgs: List[str] = []
     for _t in tokens:
         if not _t:
             continue
         if _t in _redirect_token_literals or _redirect_token_re.match(_t):
+            break
+        _m = _embedded_redir_re.search(_t)
+        if _m:
+            _left = _t[:_m.start()]
+            if _left and not _left.startswith(('-', '$')):
+                pkgs.append(_left)
             break
         if _t.startswith('-'):
             continue

@@ -2545,7 +2545,7 @@ def test_sta37_build_chroot_gates_on_incomplete_set():
             lambda seed, install_set=None: [(['A', 'B'], True)])
         bs._unpack_packages = lambda pkgs, quiet=False: set(pkgs)
         bs._configure_packages = lambda pkgs, force_deps=False: set(pkgs)
-        bs._configure_chroot = lambda is_final=False: set()
+        bs._configure_chroot = lambda: set()
 
         class _QProc:
             returncode = 0
@@ -2711,7 +2711,7 @@ def test_configure_chroot_final_pass_counts_stderr_failures():
     chroot_module.subprocess = types.SimpleNamespace(
         run=lambda *a, **k: _Proc())
     try:
-        _configured = bs._configure_chroot(is_final=True)
+        _configured = bs._configure_chroot()
     finally:
         chroot_module.subprocess = _orig_subprocess
 

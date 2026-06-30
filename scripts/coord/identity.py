@@ -214,27 +214,6 @@ def load_keyring(keyring_dir: str) -> Dict[str, str]:
     return _out
 
 
-def verify_claim_against_keyring(
-    claim: dict, keyring: Dict[str, str],
-    revoked: 'Optional[Dict[str, str]]' = None,
-) -> bool:
-    """Look up the claim's `builder` in the keyring and verify with that
-    pubkey.  Returns False if:
-      - builder not in keyring (unregistered identity)
-      - builder is in revoked (revocation propagated through coord-head)
-      - signature itself doesn't verify
-    """
-    _bid = claim.get('builder')
-    if not isinstance(_bid, str):
-        return False
-    if revoked and _bid in revoked:
-        return False
-    _pub = keyring.get(_bid)
-    if _pub is None:
-        return False
-    return verify_claim(claim, _pub)
-
-
 # ──────────────── FED-03 D: tier-1-signed builder bindings ────────────────
 # A builder's id→pubkey binding is authenticated by recording sha256(pubkey)
 # in the coord-head's `builders` map, which is tier-1 GPG-signed + freshness-

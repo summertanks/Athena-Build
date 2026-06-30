@@ -322,7 +322,13 @@ class ConfigRunCommandsMixin(SessionState):
             console.print(
                 f"  usage: set {args[0]} <value>", tui.COLOR_ERROR)
             return
-        _param, _value = args[0], args[1]
+        _param = args[0]
+        # Rejoin the remaining tokens so space-containing values survive the
+        # dispatcher's line.split() — e.g. `set signing-uid 'Name <email>'`.
+        _value = ' '.join(args[1:])
+        if (len(_value) >= 2 and _value[0] == _value[-1]
+                and _value[0] in ('"', "'")):
+            _value = _value[1:-1]            # strip one layer of quotes
         _handler = self._SETTABLE.get(_param)
         if _handler is None:
             console.print(

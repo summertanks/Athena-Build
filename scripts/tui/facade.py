@@ -165,6 +165,14 @@ class Prompt:
                 if self._type == PROMPT_YESNO:
                     console.print('  no input (EOF) — defaulting to n')
                     return 'n'
+                if self._type == PROMPT_OPTIONS:
+                    # No safe default for a multiple-choice prompt: returning an
+                    # out-of-range/empty answer would crash consumers that index
+                    # by it (e.g. int(choice) - 1).  Fail cleanly instead.
+                    console.print(
+                        '  no input (EOF) — cannot choose an option')
+                    raise EOFError(
+                        f'no input for required choice: {self._message!r}')
                 break
             if self._type == PROMPT_OPTIONS and answer not in self._options:
                 console.print(f'  Please enter one of: {", ".join(self._options)}')

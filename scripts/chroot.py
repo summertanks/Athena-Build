@@ -210,7 +210,7 @@ class _ChrootMixin:
                 "retrying any postinst-deferred packages..."
             )
             logger.info("final configure sweep: dpkg --configure -a")
-            _final_configured = self._configure_chroot(is_final=True)
+            _final_configured = self._configure_chroot()
             configured |= _final_configured
 
             # Cross-batch stragglers — retried AFTER the sweep, in
@@ -256,7 +256,7 @@ class _ChrootMixin:
                     "Re-running final configure sweep after "
                     "unpack retries...")
                 logger.info("final configure sweep #2 (post unpack retries)")
-                configured |= self._configure_chroot(is_final=True)
+                configured |= self._configure_chroot()
         except RuntimeError as e:
             tui.console.print(f"ERROR: chroot install aborted — {e}")
             logger.error(f"build_chroot install loop: {e}")
@@ -483,7 +483,7 @@ class _ChrootMixin:
              os.path.lexists(os.path.join(_chroot, 'usr/bin/sh')))
         )
 
-    def _configure_chroot(self, is_final: bool = False) -> set:
+    def _configure_chroot(self) -> set:
         """Run `dpkg --configure -a` and return the set of successfully configured package names.
 
         Automatically selects between two modes based on whether dpkg is present
@@ -502,19 +502,15 @@ class _ChrootMixin:
             DPKG_ROOT workarounds apply here, but the packages that configure in
             these early rounds (libc6, libssl3, …) do not trigger them.
 
-        Args:
-            is_final: True only for the post-loop cleanup pass.  Intermediate
-                      round failures are expected (packages waiting on deps that
-                      arrive in a later round) and are silently logged to file.
-                      Only the final pass surfaces errors on the console so the
-                      user gets a single, definitive signal.
+        This is always the post-loop cleanup pass: every caller invokes it after
+        the unpack rounds, so failures here are real and surfaced on the console
+        (no intermediate-round "deferred, will retry" mode).
 
         Returns a set of base package names (arch suffix stripped) that dpkg
         reported as "Setting up X (version)" — i.e., successfully configured.
         Failed packages are NOT in the returned set.
         """
-        if is_final:
-            logger.info("configure_chroot: final dpkg --configure -a (surfaces errors)")
+        logger.info("configure_chroot: final dpkg --configure -a (surfaces errors)")
         _chroot = self._dir_chroot
         _dpkg_in_chroot = self._chroot_dpkg_available()
 
@@ -546,34 +542,26 @@ class _ChrootMixin:
             for _line in _proc.stderr.splitlines():
                 logger.debug(_line)
             _mode = 'chroot' if _dpkg_in_chroot else 'chrootless'
-            if is_final:
-                # Final pass failures are real — surface them immediately.
-                # dpkg writes the error lines to STDERR (parsing stdout
-                # reported "0 failed" while gnome-menus was half-configured
-                # — caught live 2026-06-11), and the package name is the
-                # regex group, not the last token ("(--configure):").
-                _failed = sorted({
-                    _m.group(1).split(':')[0]
-                    for _stream in (_proc.stdout, _proc.stderr)
-                    for l in _stream.splitlines()
-                    if (_m := re.match(
-                        r'dpkg: error processing package (\S+)', l))
-                })
-                tui.console.print(
-                    f'Final configure had errors — {len(_failed)} package(s) failed: '
-                    f'{", ".join(_failed[:5])}{"…" if len(_failed) > 5 else ""}'
-                )
-                logger.error(
-                    f'_configure_chroot final ({_mode}): '
-                    f'{len(_failed)} failed — see log for details'
-                )
-            else:
-                # Intermediate round: expected for packages waiting on deps from
-                # a later round.  Log to file only; do not clutter the console.
-                logger.warning(
-                    f'Round configure ({_mode}): some packages deferred — '
-                    f'will retry in next round'
-                )
+            # Final pass failures are real — surface them immediately.
+            # dpkg writes the error lines to STDERR (parsing stdout
+            # reported "0 failed" while gnome-menus was half-configured
+            # — caught live 2026-06-11), and the package name is the
+            # regex group, not the last token ("(--configure):").
+            _failed = sorted({
+                _m.group(1).split(':')[0]
+                for _stream in (_proc.stdout, _proc.stderr)
+                for l in _stream.splitlines()
+                if (_m := re.match(
+                    r'dpkg: error processing package (\S+)', l))
+            })
+            tui.console.print(
+                f'Final configure had errors — {len(_failed)} package(s) failed: '
+                f'{", ".join(_failed[:5])}{"…" if len(_failed) > 5 else ""}'
+            )
+            logger.error(
+                f'_configure_chroot final ({_mode}): '
+                f'{len(_failed)} failed — see log for details'
+            )
 
         _configured: set = set()
         for _line in _proc.stdout.splitlines():

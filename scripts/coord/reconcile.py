@@ -20,9 +20,10 @@ Three audit modes (per the plan):
 
 This module is policy-aware via `coord.policy` but does NOT make the
 publishing decision — `coord.publish` reads PUBLISH_HALT and acts.
-Reconcile only reports; the report's CRITICAL count surfaces to the
-operator via cmd_coord_audit (P1 wired) or as a publish-gate
-precondition (P3).
+Reconcile only reports.  audit_local / audit_cross / audit_repo are
+staged primitives with no production caller yet — they are intended to
+surface their CRITICAL count to the operator via a future `coord audit`
+command and/or as a publish-gate precondition (P3), not wired today.
 
 Findings vocabulary:
 

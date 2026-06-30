@@ -146,6 +146,16 @@ def run_container(bundle: str, tag: str, cmd_str: str,
         stderr=(subprocess.STDOUT if out is not None else None)).returncode
 
 
+def collect_outputs(out_dir: str) -> 'list[str]':
+    """Sorted basenames of the .deb/.udeb artifacts a build left in *out_dir*.
+    Shared by main() here and remote_agent's post-build block so both control
+    planes report the identical artifact set."""
+    return sorted(
+        os.path.basename(_f)
+        for _pat in ('*.deb', '*.udeb')
+        for _f in glob.glob(os.path.join(out_dir, _pat)))
+
+
 def main(argv: 'list[str] | None' = None) -> int:
     _p = argparse.ArgumentParser(
         prog="remote_build.py",
@@ -169,10 +179,7 @@ def main(argv: 'list[str] | None' = None) -> int:
         _params.get("localmirror_dir"))
 
     _out = os.path.join(_bundle, "out")
-    _outputs = sorted(
-        os.path.basename(_f)
-        for _pat in ("*.deb", "*.udeb")
-        for _f in glob.glob(os.path.join(_out, _pat)))
+    _outputs = collect_outputs(_out)
     _log(f"container exit={_exit}; {len(_outputs)} artifact(s): {_outputs}")
     print(f"{RESULT_MARKER} "
           + json.dumps({"package": _pkg, "exit_code": _exit,
