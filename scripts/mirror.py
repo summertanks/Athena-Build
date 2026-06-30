@@ -860,6 +860,18 @@ def read_mirror_state(config, name: str) -> Optional[dict]:
     return _st if isinstance(_st, dict) else None
 
 
+def _load_mirror_states(config) -> 'dict':
+    """Load + verify mirror.conf ONCE and return its ``{name: state}`` map
+    (empty on missing/tampered).  For the loop-based accessors below that would
+    otherwise call read_mirror_state per mirror — re-loading + re-HMAC-verifying
+    the whole file each iteration (audit #141)."""
+    _doc, _status = load_mirror_conf(config)
+    if _status not in ('ok', 'missing'):
+        return {}
+    _mirrors = _doc.get('mirrors', {})
+    return _mirrors if isinstance(_mirrors, dict) else {}
+
+
 def write_mirror_state(config, name: str, state: dict) -> bool:
     """Set the mirror's entry in mirror.conf + re-sign.  Refuses to write on
     top of a tampered file (reseal first)."""
@@ -914,9 +926,8 @@ def find_mirror_by_url(config, url: str) -> Optional[str]:
     _norm = _normalize_url(url)
     if _norm is None:
         return None
-    for _name in list_mirrors(config):
-        _st = read_mirror_state(config, _name)
-        if _st and _st.get('url') == _norm:
+    for _name, _st in _load_mirror_states(config).items():
+        if isinstance(_st, dict) and _st.get('url') == _norm:
             return _name
     return None
 
@@ -962,9 +973,8 @@ def add_mirror(
             f"invalid URL {url!r} "
             "(publish URLs must be ssh:// or file:///abs/path)")
     # Refuse duplicate URLs across mirror names
-    for _other in list_mirrors(config):
-        _ost = read_mirror_state(config, _other)
-        if _ost and _ost.get('url') == _norm:
+    for _other, _ost in _load_mirror_states(config).items():
+        if isinstance(_ost, dict) and _ost.get('url') == _norm:
             return False, (
                 f"URL {_norm!r} already registered as mirror {_other!r}")
     _type = type or _infer_type(_norm)
@@ -1003,9 +1013,8 @@ def all_mirror_urls(config) -> 'list[str]':
     when the URL-only projection is sufficient (federation-gate
     set-comparison, federation-drift detection)."""
     _out: 'list[str]' = []
-    for _n in list_mirrors(config):
-        _st = read_mirror_state(config, _n)
-        if _st and _st.get('url'):
+    for _st in _load_mirror_states(config).values():
+        if isinstance(_st, dict) and _st.get('url'):
             _out.append(_st['url'])
     return _out
 
@@ -2078,9 +2087,8 @@ def all_mirror_neighbour_records(config) -> 'list[dict]':
     to its own ``--proto`` for them (which is N/A for file:// anyway).
     """
     _out: 'list[dict]' = []
-    for _n in list_mirrors(config):
-        _st = read_mirror_state(config, _n)
-        if not _st:
+    for _st in _load_mirror_states(config).values():
+        if not isinstance(_st, dict):
             continue
         _url = _st.get('url') or ''
         if not _url:

@@ -291,6 +291,20 @@ _DEP_AFFECTING_FIELDS = frozenset((
 ))
 
 
+def _parse_control(pkg_dir: str) -> 'List[Deb822]':
+    """Parse debian/control into its Deb822 paragraphs (source stanza first,
+    then one per binary).  Returns [] when the file is missing/unreadable.  The
+    single control-reading path for fork_mirror — handles line-folded values +
+    multi-stanza forks correctly (audit #125)."""
+    _control = os.path.join(pkg_dir, 'debian', 'control')
+    try:
+        with open(_control) as fh:
+            return list(Deb822.iter_paragraphs(fh))
+    except (OSError, ValueError) as e:
+        logger.warning(f"fork_mirror: control unreadable for {pkg_dir}: {e}")
+        return []
+
+
 def _compute_dep_hash(pkg_dir: str) -> str:
     """SHA256 over debian/changelog version + debian/control's dep-
     affecting fields, in stable canonical form.
@@ -323,24 +337,19 @@ def _compute_dep_hash(pkg_dir: str) -> str:
     _h.update(_ver.encode('utf-8'))
     _h.update(b'\0')
 
-    # Parse debian/control via Deb822 — handles line-folded values
-    # + multi-stanza forks correctly.
-    try:
-        with open(os.path.join(pkg_dir, 'debian', 'control')) as fh:
-            for _stanza in Deb822.iter_paragraphs(fh):
-                _name = _stanza.get('Package', _stanza.get('Source', '<unknown>'))
-                _h.update(b'stanza|')
-                _h.update(_name.encode('utf-8'))
+    # _parse_control handles line-folded values + multi-stanza forks.
+    for _stanza in _parse_control(pkg_dir):
+        _name = _stanza.get('Package', _stanza.get('Source', '<unknown>'))
+        _h.update(b'stanza|')
+        _h.update(_name.encode('utf-8'))
+        _h.update(b'\0')
+        for _field in sorted(_DEP_AFFECTING_FIELDS):
+            if _field in _stanza:
+                _val = ' '.join(_stanza[_field].split())
+                _h.update(_field.encode('utf-8'))
+                _h.update(b'=')
+                _h.update(_val.encode('utf-8'))
                 _h.update(b'\0')
-                for _field in sorted(_DEP_AFFECTING_FIELDS):
-                    if _field in _stanza:
-                        _val = ' '.join(_stanza[_field].split())
-                        _h.update(_field.encode('utf-8'))
-                        _h.update(b'=')
-                        _h.update(_val.encode('utf-8'))
-                        _h.update(b'\0')
-    except OSError as e:
-        logger.warning(f"fork_mirror: control unreadable for {pkg_dir}: {e}")
     return _h.hexdigest()
 
 
@@ -370,16 +379,10 @@ def _binary_names_from_control(pkg_dir: str) -> List[str]:
     underscore split (`athena-tasksel-data_*` doesn't match
     `athena-tasksel_*`).
     """
-    _names: List[str] = []
-    _ctrl = os.path.join(pkg_dir, 'debian', 'control')
-    try:
-        with open(_ctrl) as fh:
-            for _line in fh:
-                if _line.startswith('Package:'):
-                    _names.append(_line.split(':', 1)[1].strip())
-    except OSError as e:
-        logger.warning(f"fork_mirror: cannot parse {_ctrl}: {e}")
-    return _names
+    # Deb822 parse (not a bespoke startswith) so line-folded Package fields
+    # and multi-stanza forks are handled correctly.
+    return [_stanza['Package'] for _stanza in _parse_control(pkg_dir)
+            if 'Package' in _stanza]
 
 
 def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
@@ -743,12 +746,8 @@ def _build_packages_stanzas(pkg_dirs: List[str], build_arch: str
         except (OSError, ValueError):
             continue
 
-        _control = os.path.join(_pkg_dir, 'debian', 'control')
-        try:
-            with open(_control, 'r') as fh:
-                _stanzas = list(Deb822.iter_paragraphs(fh))
-        except (OSError, ValueError) as e:
-            logger.warning(f"fork_mirror: cannot parse {_control}: {e}")
+        _stanzas = _parse_control(_pkg_dir)
+        if not _stanzas:
             continue
 
         if not _stanzas:
