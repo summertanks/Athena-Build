@@ -304,10 +304,18 @@ def generate_repo_indexes(
             _udeb_rel = f'dists/{_suite}/{_comp}/debian-installer/binary-{arch}'
             _udeb_abs = os.path.join(repo_root, _udeb_rel)
             if os.path.isdir(_udeb_abs):
+                # allow_empty=True (parity with generate_apt_repo): the
+                # debian-installer/binary-<arch> dir is created unconditionally
+                # at BuildConfig init, but udebs only come from the installer
+                # pipeline — so a repo with .debs but no udebs has a present-
+                # but-empty dir.  Without allow_empty the zero-entry
+                # dpkg-scanpackages output is treated as a failure and aborts
+                # the whole publish; an empty debian-installer component is
+                # valid, so write an empty Packages index instead.
                 if not _scan_packages_to(
                         repo_root, _udeb_rel,
                         os.path.join(_udeb_abs, 'Packages'),
-                        password, udeb=True):
+                        password, udeb=True, allow_empty=True):
                     return False
                 if not _write_subdir_release(
                         _udeb_abs, _suite, _codename, _comp, arch, password):

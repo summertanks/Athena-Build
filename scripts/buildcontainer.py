@@ -1980,6 +1980,12 @@ class BuildContainer:
         additive, never alters the move/rollback control flow.
         """
         _moved_paths: 'list[str]' = []
+        # Files already present in a published dir on an exact-name (byte-
+        # identical) rebuild: kept in place, NOT moved.  Tracked separately
+        # from _moved_paths so the rollback loop below never renames a
+        # published artifact out of the repo — doing so would DESTROY it,
+        # because build()'s finally-block rmtrees source_dir.
+        _kept_existing: 'list[str]' = []
         try:
             _files = [
                 _f for _f in os.listdir(source_dir)
@@ -2020,24 +2026,27 @@ class BuildContainer:
                         # prunable intermediate that the build()
                         # finally-block rmtrees anyway).
                         #
-                        # CRITICAL: still append `_dst` to `_moved_paths`
-                        # so the build flow (normalize, output_hashes,
-                        # repo audit downstream) SEES the artifact.
-                        # Without this, the build record's `outputs` /
-                        # `output_hashes` are silently incomplete:
+                        # CRITICAL: still record `_dst` in `_kept_existing`
+                        # (merged into the return below) so the build flow
+                        # (normalize, output_hashes, repo audit downstream)
+                        # SEES the artifact.  Without this, the build record's
+                        # `outputs` / `output_hashes` are silently incomplete:
                         # the kept-existing file is real and downstream
                         # treats absence-from-record as "wasn't built"
                         # (caught 2026-06-06 — 497 udebs on disk, 0 of
                         # 985 build.json records carried any udeb
                         # reference, breaking virtual validate's
-                        # over-prediction analysis).
+                        # over-prediction analysis).  It must NOT go in
+                        # `_moved_paths`: it was never moved out of a
+                        # published dir, so the rollback loop must never
+                        # rename it back into (and thus delete) it.
                         logger.warning(
                             f"segregate: {_f} already present in "
                             f"{_dst_dir} — keeping existing (append-only), "
                             f"dropping rebuilt dup"
                         )
                         os.remove(_src)
-                        _moved_paths.append(_dst)
+                        _kept_existing.append(_dst)
                         if events is not None:
                             events.append(
                                 ('purge', _f,
@@ -2067,12 +2076,17 @@ class BuildContainer:
                                 f"{_back} also failed: {_re}"
                             )
                     return []
-        if _moved_paths:
+        if _moved_paths or _kept_existing:
             logger.info(
                 f"segregate: {len(_moved_paths)} artifact(s) from "
                 f"{src_pkg.package} placed in repo/ subdirs"
+                + (f" ({len(_kept_existing)} kept existing)"
+                   if _kept_existing else "")
             )
-        return _moved_paths
+        # Merge kept-existing into the return so downstream output tracking
+        # sees every real artifact; rollback above only ever touched
+        # genuinely-moved files (_moved_paths), never these.
+        return _moved_paths + _kept_existing
 
     def check_build(self, src_pkg: Source,
                     expected_files: 'list[str]') -> bool:

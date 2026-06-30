@@ -4992,6 +4992,39 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
     )
 
 
+def test_apt_repo_generate_repo_indexes_udeb_scan_allows_empty():
+    """Regression (audit #18, apt_repo.py:307-311): the udeb (debian-installer)
+    Packages scan in generate_repo_indexes must pass allow_empty=True, matching
+    the sibling generate_apt_repo.  The debian-installer/binary-<arch> dir is
+    created unconditionally at BuildConfig init, but udebs only come from the
+    installer pipeline — so a repo with .debs but no udebs has a present-but-
+    empty dir.  Without allow_empty, dpkg-scanpackages' zero-entry output is
+    treated as a failure (_run_dpkg_scan, allow_empty=False branch) and
+    _scan_packages_to → generate_repo_indexes → cmd_index_repo aborts the whole
+    publish."""
+    import inspect
+    import re
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+    _src = inspect.getsource(apt_repo.generate_repo_indexes)
+    # The udeb scan call passes udeb=True; the fix appends allow_empty=True
+    # immediately after it (matching generate_apt_repo).  Keying on the
+    # adjacency avoids brittle balanced-paren matching across the inner
+    # os.path.join(...) argument.
+    assert 'udeb=True' in _src, (
+        'udeb _scan_packages_to call not found in generate_repo_indexes')
+    assert re.search(r'udeb=True,\s*allow_empty=True', _src), (
+        "generate_repo_indexes udeb scan must pass allow_empty=True (parity "
+        "with generate_apt_repo) — a present-but-empty debian-installer/ dir "
+        "is valid and must not abort the publish")
+    # And confirm the sibling it mirrors still sets it, so the parity claim
+    # this test pins can't silently rot.
+    _sib = inspect.getsource(apt_repo.generate_apt_repo)
+    assert re.search(r'udeb=True,\s*allow_empty=True', _sib), (
+        "generate_apt_repo (the parity reference) no longer sets "
+        "allow_empty=True on its udeb scan")
+
+
 def test_cmd_repo_dispatcher_drops_index_and_tunnel_hints():
     """`repo index` / `repo tunnel` were retired and their redirect hints
     removed — the dispatcher no longer special-cases either action; both
@@ -15217,6 +15250,35 @@ def test_signing_generate_and_verify_roundtrip_real_gpg():
         assert ok, msg
 
 
+def test_signing_verify_key_uses_on_disk_uid_not_config_peer_onboarding():
+    """INTEGRATION regression (audit #8, signing.py:327-345): verify_key must
+    resolve the UID of the key ACTUALLY on disk (actual_signing_uid), not
+    config.signing_key_uid.  A federation peer imports the origin's tier-1 key
+    whose UID differs from the peer's machine-local default; the old code
+    filtered get_key_info + --local-user by the configured UID, so the
+    freshly-imported key was falsely reported unusable and onboarding aborted.
+    Generate a key under one UID, point config at a DIFFERENT UID, assert
+    verify_key still succeeds.  Skipped silently if gpg is absent."""
+    import shutil
+    import tempfile
+    if shutil.which('gpg') is None:
+        return
+    from signing import generate_key, verify_key
+    with tempfile.TemporaryDirectory() as tmp:
+        _home = os.path.join(tmp, 'gnupg')
+
+        class _GenCfg:                       # the origin: generates the key
+            dir_gnupg = _home
+            signing_key_uid = 'Origin Federation <origin@example.org>'
+        assert generate_key(_GenCfg(), _key_length=2048) is True
+
+        class _PeerCfg:                      # the peer: same homedir (imported
+            dir_gnupg = _home                # key), but a stale/default UID it
+            signing_key_uid = 'Athena Build <athena@local>'   # never updated
+        ok, msg = verify_key(_PeerCfg())
+        assert ok, msg                       # must NOT fail on UID mismatch
+
+
 # ─── CONF-02 phase 3: signing key gate at top of build_chroot ─────────────
 
 def _stub_session_for_signing_gate():
@@ -24474,6 +24536,67 @@ def test_comp03_segregate_rolls_back_on_move_failure():
         assert os.path.exists(os.path.join(_scratch, 'first_1.0_amd64.deb'))
 
 
+def test_segregate_rollback_never_destroys_kept_existing_published_deb():
+    """Regression (audit #7, buildcontainer:2015-2045): on a multi-binary
+    rebuild where one binary is a byte-identical (kept-existing) collision
+    and a LATER sibling's move fails, the rollback must NOT rename the
+    already-published kept-existing .deb out of the repo.  The old code
+    appended the kept-existing path to _moved_paths, so the rollback loop
+    renamed it into the scratch dir — which build()'s finally then rmtrees,
+    silently destroying a previously-published artifact.  Kept-existing files
+    are now tracked separately (_kept_existing) and excluded from rollback."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    from unittest import mock
+    with tempfile.TemporaryDirectory() as _tmp:
+        _scratch = os.path.join(_tmp, 'stage')
+        _dest = os.path.join(_tmp, 'dists', 'thor', 'main', 'binary-amd64')
+        os.makedirs(_scratch)
+        os.makedirs(_dest)
+        # binary A: collides with an already-published artifact (kept-existing)
+        _kept = 'liba_1.0_amd64.deb'
+        with open(os.path.join(_dest, _kept), 'w') as fh:
+            fh.write('PUBLISHED-A')           # already on disk in a published dir
+        with open(os.path.join(_scratch, _kept), 'w') as fh:
+            fh.write('REBUILT-A-dup')         # byte-identical rebuild dup
+        # binary B: its move fails (dest is a file → makedirs raises OSError)
+        _boom = 'libb_1.0_amd64.deb'
+        with open(os.path.join(_scratch, _boom), 'w') as fh:
+            fh.write('REBUILT-B')
+        _boom_blocker = os.path.join(_tmp, 'blocker')
+        with open(_boom_blocker, 'w') as fh:
+            fh.write('x')                      # a FILE → makedirs() on it raises
+
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+
+        class _FakeConfig:
+            def deb_dest_for_filename(self, _f, component='main'):
+                if _f == _boom:
+                    return _boom_blocker        # makedirs raises → rollback
+                return _dest
+
+        class _Src:
+            package = 'multi'
+
+        _bc.config = _FakeConfig()
+        # Force the order that triggers the bug: kept-existing collision FIRST
+        # (so its dest is recorded), then the failing sibling.  segregate calls
+        # os.listdir(source_dir) exactly once.
+        with mock.patch.object(buildcontainer.os, 'listdir',
+                               return_value=[_kept, _boom]):
+            _moved = _bc._segregate_built_artifacts(_Src(), _scratch)
+
+        # All-or-nothing: the failed source returns [].
+        assert _moved == [], _moved
+        # THE bug: the already-published kept-existing file must survive intact.
+        _kept_path = os.path.join(_dest, _kept)
+        assert os.path.exists(_kept_path), (
+            "rollback destroyed the already-published kept-existing .deb!")
+        with open(_kept_path) as fh:
+            assert fh.read() == 'PUBLISHED-A', (
+                "kept-existing published .deb was modified during rollback")
+
+
 def test_comp03_build_uses_per_worker_scratch_dir_in_volume_bind():
     """COMP-03 Phase 1 AST contract: BuildContainer.build() must:
       1. Compute a per-build _scratch_dir under config.dir_build_stage
@@ -33652,6 +33775,26 @@ def test_coord_reconcile_publish_halt_round_trip():
         assert _back == 'test conflict: alpha vs beta'
 
 
+def test_publish_halt_reason_fails_closed_on_unreadable_sentinel():
+    """Regression (audit #99, reconcile.py:542-550): an unreadable PUBLISH_HALT
+    sentinel (present but open() raises a non-FileNotFoundError OSError) must
+    fail CLOSED — return a non-None reason so the publish caller refuses — not
+    return None ('no halt → publish allowed') and silently publish past an
+    active halt.  Only a genuine absence (FileNotFoundError) maps to None."""
+    _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        assert _r.publish_halt_reason(_td) is None            # absent → allowed
+        # Make the sentinel NAME a directory so open() raises IsADirectoryError
+        # — an OSError that is NOT FileNotFoundError.
+        os.makedirs(os.path.join(_td, _p.PUBLISH_HALT_FILENAME))
+        _reason = _r.publish_halt_reason(_td)
+        assert _reason is not None, (
+            "unreadable PUBLISH_HALT must fail closed (non-None) so callers "
+            "refuse — got None, which would allow publishing past an active "
+            "halt")
+        assert 'unreadable' in _reason.lower()
+
+
 def test_coord_reconcile_audit_local_orphan_detection():
     """A claim for a file absent from the pool surfaces as a WARN
     orphan finding."""
@@ -40416,6 +40559,7 @@ def main() -> int:
         test_format_gpg_time_empty_returns_default,
         test_format_gpg_time_garbage_returns_raw,
         test_signing_generate_and_verify_roundtrip_real_gpg,
+        test_signing_verify_key_uses_on_disk_uid_not_config_peer_onboarding,
         # CONF-02 phase 3: signing key gate at top of build_chroot
         test_signing_key_verified_flag_default_false,
         test_ensure_signing_key_verified_true_when_key_exists,
@@ -40774,6 +40918,7 @@ def main() -> int:
         test_comp03_segregate_does_not_read_self_repo_path,
         test_comp03_segregate_cross_source_isolation_via_scratch_dir,
         test_comp03_segregate_rolls_back_on_move_failure,
+        test_segregate_rollback_never_destroys_kept_existing_published_deb,
         test_comp03_build_uses_per_worker_scratch_dir_in_volume_bind,
         test_comp03_buildconfig_creates_and_validates_dir_build_stage,
         test_comp03_buildcontainer_init_sweeps_build_stage_survivors,
@@ -41072,6 +41217,7 @@ def main() -> int:
         test_coord_reconcile_detect_hash_conflicts_multi_binary_same_source_no_false_positive,
         test_coord_reconcile_detect_hash_conflicts_same_filename_diff_sha_is_critical,
         test_coord_reconcile_publish_halt_round_trip,
+        test_publish_halt_reason_fails_closed_on_unreadable_sentinel,
         test_coord_reconcile_audit_local_orphan_detection,
         test_coord_reconcile_audit_local_hash_mismatch_critical,
         test_coord_publish_retract_and_re_audit_collapses,
@@ -41206,6 +41352,7 @@ def main() -> int:
         test_apt_repo_generate_repo_indexes_walks_all_suites_and_components,
         test_apt_repo_generate_repo_indexes_skips_when_binary_dir_missing,
         test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others,
+        test_apt_repo_generate_repo_indexes_udeb_scan_allows_empty,
         test_cmd_repo_dispatcher_drops_index_and_tunnel_hints,
         test_stage_d_no_old_repo_subdir_paths_in_production_code,
         test_stage_d_buildconfig_paths_use_new_nested_layout,
