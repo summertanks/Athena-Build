@@ -607,6 +607,16 @@ def build_disk_image(
         if _loop_dev is not None:
             _sudo(['losetup', '-d', _loop_dev], password, capture=True)
         _sudo(['rmdir', _mnt], password, capture=True)
+        # Remove the sparse intermediate raw image if it survived.
+        # _convert_to_qcow2 unlinks it on the success path, so this only fires
+        # on a failure / early-return path where it would otherwise leak GBs
+        # of (sparse) disk that no later step cleans up.
+        if os.path.exists(_raw):
+            try:
+                os.unlink(_raw)
+            except OSError as _e:
+                logger.warning(
+                    f"could not remove intermediate raw image {_raw}: {_e}")
 
 
 def _has_bios_modules(mnt: str) -> bool:
