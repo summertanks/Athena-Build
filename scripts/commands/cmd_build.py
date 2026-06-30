@@ -1046,10 +1046,19 @@ class BuildCommandsMixin(SessionState):
         _lines      = _r.stdout.splitlines()
         _total      = len(_lines)
         _incomplete = [l.split()[0] for l in _lines if l and not l.endswith('\tinstall')]
-        _check('All packages fully installed',
-               not _incomplete,
-               f'{_total} packages installed' if not _incomplete
-               else f'{len(_incomplete)} incomplete: {", ".join(_incomplete[:4])}')
+        # Fold the returncode in: if `dpkg --get-selections` itself failed
+        # (broken dpkg db, missing root, sudo refusal) its stdout is empty, so
+        # `_incomplete` is [] and the check would falsely PASS.  Surface the
+        # failure distinctly.
+        if _r.returncode != 0:
+            _check('All packages fully installed', False,
+                   f'dpkg --get-selections failed (rc={_r.returncode}): '
+                   f'{_r.stderr.strip().splitlines()[0][:60] if _r.stderr.strip() else "no output"}')
+        else:
+            _check('All packages fully installed',
+                   not _incomplete,
+                   f'{_total} packages installed' if not _incomplete
+                   else f'{len(_incomplete)} incomplete: {", ".join(_incomplete[:4])}')
 
         # ── Check 3: kernel ──────────────────────────────────────────────────────
         # version-aware display (matches what the ISO/disk builders
