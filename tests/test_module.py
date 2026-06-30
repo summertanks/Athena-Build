@@ -2960,6 +2960,26 @@ def test_buildsystem_scrub_password_idempotent():
     bs.scrub_password()  # should not raise
 
 
+def test_buildsystem_password_failure_reports_stderr():
+    """Regression (audit #37): the sudo password-validation failures (__init__
+    and for_iso) must surface _proc.stderr — where sudo writes 'Sorry, try
+    again.' / 'not in the sudoers file' — not the empty stdout, matching the
+    wipe handler.  Reading stdout printed a blank reason."""
+    import inspect
+    import re
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildsystem
+    _msgs = re.findall(
+        r'Incorrect password or user not in sudoers file: \{([^}]*)\}',
+        inspect.getsource(buildsystem))
+    assert _msgs, "password-validation error messages not found"
+    for _m in _msgs:
+        assert '_proc.stderr' in _m, (
+            f"password-failure message must read _proc.stderr (sudo writes its "
+            f"diagnostics there), got: {_m}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # download_source surfaces HTTP / short-download errors clearly
 # ─────────────────────────────────────────────────────────────────────────────
@@ -40617,6 +40637,7 @@ def main() -> int:
         test_buildsystem_scrub_password_clears_field,
         test_buildsystem_password_property_raises_after_scrub,
         test_buildsystem_scrub_password_idempotent,
+        test_buildsystem_password_failure_reports_stderr,
         test_download_source_surfaces_http_error_clearly,
         test_download_source_surfaces_short_download_clearly,
         test_docker_server_guard_accepts_safe_targets,
