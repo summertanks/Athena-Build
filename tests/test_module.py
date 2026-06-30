@@ -16711,6 +16711,46 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_dep_drift_hard_dep_violation_omits_empty_constraint():
+    """Regression (audit #111): a hard pre_depends/depends violation for an
+    UNVERSIONED dep must render the name alone, not 'name ( )' — mirror the
+    alt-dep path's conditional."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dep_drift
+    _src = inspect.getsource(dep_drift)
+    assert '({_dep[2]} {_dep[1]}) — {_why}' not in _src, (
+        "hard-dep violation unconditionally formats a constraint, yielding "
+        "'name ( )' for unversioned deps")
+
+
+def test_append_claim_writes_all_bytes():
+    """Regression (audit #106): append_claim must loop os.write until the whole
+    JSONL line is written — a short write would otherwise silently truncate a
+    ledger line, breaking the one-complete-line-per-write invariant."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.store as _store
+    assert 'while _written < len(_line)' in inspect.getsource(_store), (
+        "append_claim must write-all (loop os.write), not a single os.write "
+        "whose return value is discarded")
+
+
+def test_run_rsync_streaming_flushes_residual_tail():
+    """Regression (audit #108): _run_rsync_streaming must flush the residual
+    _buf after wait() — rsync's final error line may not be newline-terminated
+    and would otherwise be dropped from the failure tail."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.transport as _t
+    assert '_resid = _buf.strip()' in inspect.getsource(_t), (
+        "the residual un-newline-terminated tail line must be flushed after "
+        "_proc.wait()")
+
+
 def test_read_artifact_truncated_uses_byte_counts():
     """Regression (audit #214): read_artifact's tail 'truncated' flag compared
     the byte size to a CHARACTER-length sum; a multibyte line made sum(chars) <
@@ -42050,6 +42090,9 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_dep_drift_hard_dep_violation_omits_empty_constraint,
+        test_append_claim_writes_all_bytes,
+        test_run_rsync_streaming_flushes_residual_tail,
         test_read_artifact_truncated_uses_byte_counts,
         test_progress_reads_buildlogs_via_context_manager,
         test_cache_parse_build_mode_guards_unreadable_list,

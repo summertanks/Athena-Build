@@ -322,9 +322,13 @@ class _DepDriftMixin:
                 for _dep in getattr(_pkg_obj, _field):
                     _ok, _why = _resolves(_dep)
                     if not _ok:
+                        # Mirror the alt-dep path (line below): an unversioned
+                        # dep has empty _dep[2]/_dep[1], so emit the name alone
+                        # rather than the empty 'name ( )' constraint.
+                        _vstr = (f"{_dep[0]} ({_dep[2]} {_dep[1]})"
+                                 if _dep[2] else _dep[0])
                         _violations.append(
-                            f"{_pkg_name} {_field}: {_dep[0]} "
-                            f"({_dep[2]} {_dep[1]}) — {_why}"
+                            f"{_pkg_name} {_field}: {_vstr} — {_why}"
                         )
             for _field in ('alt_pre_depends', 'alt_depends'):
                 for _group in getattr(_pkg_obj, _field):
