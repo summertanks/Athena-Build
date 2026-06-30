@@ -169,7 +169,6 @@ def _prompt_machine_settings(session) -> bool:
 
     Persists to local.conf + reflects into the live config.  False only on
     explicit cancel."""
-    import os as _os
     config = session.config
     # [Local] Name = the builder identity already established by the role flow
     # (federation prompts `Builder id`; origin runs _ensure_builder_identity).
@@ -180,7 +179,7 @@ def _prompt_machine_settings(session) -> bool:
         _name = ''
     _name = _name or getattr(config, 'system_name', '')
 
-    _default_jobs = min(_os.cpu_count() or 1, 8)
+    _default_jobs = min(os.cpu_count() or 1, 8)
     _jobs_raw = _ask(PROMPT_INPUT, f"Parallel build jobs [{_default_jobs}]")
     if _jobs_raw is None:
         return False
@@ -511,7 +510,6 @@ def _derive_name(host):
 def _copy_key(src, dst):
     """Copy an SSH key file to dst with 0600.  False if src unreadable.
     Thin wrapper over utils.copy_ssh_key (the shared implementation)."""
-    import utils
     return utils.copy_ssh_key(src, dst)
 
 

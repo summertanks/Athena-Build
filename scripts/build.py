@@ -1128,7 +1128,6 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 f"  ERROR: remote build container init failed — {e}")
             logger.error(f"BuildContainer(connect=False) raised: {e}")
             return
-        import local_mirror
         import remote_orchestrate as _ro
         _tag = self.container._image_tag
         _how = {'present':     'present on remote',
