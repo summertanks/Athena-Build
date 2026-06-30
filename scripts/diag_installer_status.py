@@ -108,9 +108,14 @@ def audit_stanza(
         for _i, _c in enumerate(_value):
             _o = ord(_c)
             if _o > 127:
+                # After continuation folding _value carries '\n' + raw
+                # segments, so _i is an offset into the JOINED value, not a
+                # column on the source line — report the folded line number
+                # alongside so the offset is interpretable.
+                _line_no = _value[:_i].count('\n')
                 _issues.append(
                     f"NON-ASCII: field {_field!r} char {_c!r} (0x{_o:x}) "
-                    f"at pos {_i}"
+                    f"at offset {_i} (folded line {_line_no})"
                 )
                 break
             if _o < 32 and _c not in '\n\t':
