@@ -16711,6 +16711,41 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_read_artifact_truncated_uses_byte_counts():
+    """Regression (audit #214): read_artifact's tail 'truncated' flag compared
+    the byte size to a CHARACTER-length sum; a multibyte line made sum(chars) <
+    bytes and falsely reported truncated even when every line was returned."""
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from webapi import readers
+    with tempfile.TemporaryDirectory() as _tmp:
+        # '→' is 3 bytes / 1 char — the exact multibyte trap.
+        with open(os.path.join(_tmp, 'foo.buildlog'), 'w',
+                  encoding='utf-8') as _fh:
+            _fh.write('a→b\nc\n')
+        _doc = readers.read_artifact(_tmp, 'foo', 'buildlog', tail=10)
+        assert _doc['found'] is True
+        assert _doc['lines'] == ['a→b', 'c'], _doc
+        assert _doc['truncated'] is False, (
+            "all lines returned but 'truncated' true — byte/char mismatch")
+
+
+def test_progress_reads_buildlogs_via_context_manager():
+    """Regression (audit #215): progress() must read the buildlog/vbuildlog via
+    a `with open(...)` context manager, not a bare open(...).read() that leaks
+    the handle to GC."""
+    import inspect
+    import re
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from webapi import readers
+    assert not re.search(r'open\([^)]*\)\.read\(\)',
+                         inspect.getsource(readers)), (
+        "readers must not call .read() on a bare open() (leaks the handle); "
+        "use `with open(...) as fh: fh.read()`")
+
+
 def test_cache_parse_build_mode_guards_unreadable_list():
     """Regression (audit #61): _cache_parse_build_mode must catch the OSError
     parse_build_pkg_list raises on an unreadable build_pkg.list and degrade to
@@ -42015,6 +42050,8 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_read_artifact_truncated_uses_byte_counts,
+        test_progress_reads_buildlogs_via_context_manager,
         test_cache_parse_build_mode_guards_unreadable_list,
         test_verify_chroot_get_selections_checks_returncode,
         test_cmd_repo_cleanup_report_lists_all_scanned_components,

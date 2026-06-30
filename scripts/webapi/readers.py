@@ -166,8 +166,12 @@ def read_artifact(buildlog_dir: str, package: str, kind: str,
     _size = os.path.getsize(_path)
     if tail and tail > 0:
         _lines, _size = _tail_lines(_path, tail)
+        # _size is the BYTE length _tail_lines read; compare byte-for-byte
+        # (len(_l.encode())+1) rather than character counts — a multibyte line
+        # would otherwise make sum(chars) < bytes and falsely report truncated.
         return {'found': True, 'size': _size, 'tail': tail,
-                'truncated': _size > sum(len(_l) + 1 for _l in _lines),
+                'truncated': _size > sum(
+                    len(_l.encode('utf-8', 'replace')) + 1 for _l in _lines),
                 'lines': _lines}
     if _size > _FULL_READ_CAP:
         return {'found': True, 'size': _size, 'truncated': True,
@@ -352,8 +356,9 @@ def progress(buildlog_dir: str, total: int = 0,
         if _pkg in _failed:
             continue   # failure fallout, not a delta finding
         try:
-            _txt = open(os.path.join(buildlog_dir, _entry),
-                        errors='replace').read()
+            with open(os.path.join(buildlog_dir, _entry),
+                      encoding='utf-8', errors='replace') as _fh:
+                _txt = _fh.read()
         except OSError:
             continue
         _m = _DELTA_MISS_RE.search(_txt)
@@ -365,7 +370,8 @@ def progress(buildlog_dir: str, total: int = 0,
         _filt: set = set()
         _vb = os.path.join(buildlog_dir, f'{_pkg}.vbuildlog')
         if os.path.isfile(_vb):
-            _fm = _FILTERED_RE.search(open(_vb, errors='replace').read())
+            with open(_vb, encoding='utf-8', errors='replace') as _fh:
+                _fm = _FILTERED_RE.search(_fh.read())
             if _fm:
                 _filt = set(_split_names(_fm.group(1)))
         _unexplained = [_x for _x in _miss if _x not in _filt]
