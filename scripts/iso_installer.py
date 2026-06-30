@@ -869,6 +869,13 @@ def _select_pool_files(
             continue
 
     if deb_whitelist is None:
+        # Apply the supersede-exclusion on the legacy path too — otherwise a
+        # fork-superseded udeb (e.g. apt-setup-udeb) rides along on the ISO
+        # when no whitelist is supplied.
+        _excl = exclude_names or set()
+        if _excl:
+            _all = [(_d, _n) for _d, _n in _all
+                    if _n.split('_', 1)[0] not in _excl]
         return _all, 0
 
     # Binaries a SHIPPED fork supersedes (Conflicts/Replaces) — drop them so an

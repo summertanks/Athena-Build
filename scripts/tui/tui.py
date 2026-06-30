@@ -302,7 +302,12 @@ class Tui:
                 # endwin).  Convert to a graceful TUI shutdown instead: post
                 # Shutdown, let the UI thread restore the terminal, and let
                 # wait() join it.
-                self.exit(int(_se.code) if isinstance(_se.code, int) else 0)
+                # Mirror CPython sys.exit() semantics: None → 0, an int → that
+                # code, anything else (a string/object) → 1 (failure).  The old
+                # `else 0` masked a non-int failure code as success.
+                _code = _se.code
+                self.exit(_code if isinstance(_code, int)
+                          else (0 if _code is None else 1))
                 return
             except Exception as e:
                 self.dispatcher.post(PrintEvent(f'  Error: {e}'))

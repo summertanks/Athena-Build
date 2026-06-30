@@ -79,6 +79,14 @@ def append_claim(
     The caller passes a claim with `seq` already populated — typically
     `max_seq(...) + 1`.  We refuse to write if the claim's builder
     field doesn't match the file we'd write to (caller bug).
+
+    Concurrency contract: seq is allocated by the CALLER (max_seq + 1) BEFORE
+    this call, not under the append lock here.  This is safe only under the
+    module's single-writer-per-builder model (one process appends a given
+    builder's jsonl at a time — see the module docstring).  Two concurrent
+    same-builder appenders would read the same max_seq and mint a DUPLICATE
+    seq; that is out of scope by design (cross-host writers use disjoint
+    files, and a host serialises its own builder's publishes).
     """
     if claim.get('builder') != builder_id:
         raise ValueError(

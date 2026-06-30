@@ -300,9 +300,15 @@ class SnapshotCommandsMixin(SessionState):
                 f"  {_direction}: {_cur} → {_ans}", tui.COLOR_WARNING)
         utils.write_snapshot_state(self.config, current=_ans)
         utils.append_snapshot_history(self.config, _ans)
+        # Sync the build.conf [Snapshot] Timestamp mirror NOW (like the
+        # non-force `snapshot select` path) so the visible config doesn't lie
+        # about the active pin until the next startup's lazy reconcile.
+        _synced = utils.reconcile_snapshot_pin(self.config)
         console.print(
             f"snapshot select force: current pin set to {_ans} "
-            f"(config/snapshot.state; appended to config/snapshot.history)")
+            f"(config/snapshot.state; appended to config/snapshot.history"
+            + ("; build.conf [Snapshot] Timestamp synced" if _synced else "")
+            + ")")
         self.flags.cache_ready = False
         self.flags.dep_check_ready = False
         console.print(

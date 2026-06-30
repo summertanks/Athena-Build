@@ -94,7 +94,9 @@ class ProgressBar:
             self._state = self.RUNNING
 
     def set_max(self, value: int) -> None:
-        self._max = max(1, value)
+        # Never below the current progress: lowering max under _value would
+        # make filled exceed the bar width and overflow the render.
+        self._max = max(1, value, self._value)
         # step() auto-STOPs at the old max.  When the REAL max
         # arrives later (download_file grow-path, mirror-publish lazily-sized
         # bar seeded at maxvalue=1), un-freeze so the bar keeps animating

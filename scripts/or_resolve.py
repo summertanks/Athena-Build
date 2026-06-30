@@ -30,7 +30,9 @@ Algorithm (closure as a pure function of the seed SET):
   The canonical tie-break (smallest group tuple) is what removes the
   order-dependence: which unsatisfied group is resolved first is a function
   of the group contents, never of the input ordering.  Iterating A/B to a
-  fixpoint yields the minimal closure for the set.
+  fixpoint yields a DETERMINISTIC, order-independent closure for the set
+  (not necessarily the globally minimal one — the canonical OR-group pick may
+  add a satisfiable-but-not-strictly-needed alternative).
 """
 from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
@@ -78,6 +80,11 @@ def resolve_closure(
     Returns the set of selected real package names — identical for any
     ordering of ``seeds`` (this is the property the live resolver lacks).
     """
+    # Materialize once: `seeds` is an Iterable and is consumed BOTH by
+    # _infer_real below AND the _pending comprehension; a one-shot generator
+    # would be exhausted by the first pass, yielding an empty closure on the
+    # default (real_pkgs=None) path.
+    seeds = list(seeds)
     _provides = provides or {}
     _prov_index = _provider_index(_provides)
     _real = real_pkgs if real_pkgs is not None else _infer_real(seeds, deps, _provides)

@@ -710,7 +710,13 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             try:
                 if os.path.exists(_patch_path):
                     _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
-                    _src.patch_list = sorted(_patch_files, key=lambda x: x[:5])
+                    # Sort by the FULL filename (not x[:5]) so this matches
+                    # buildcontainer's _live_patch_list sort exactly — the
+                    # order feeds an order-sensitive patch_set_hash, so a [:5]
+                    # tie between two patches sharing a 5-char prefix (a normal
+                    # numbered-series pattern) would flap the hash run-to-run
+                    # and force needless rebuilds.
+                    _src.patch_list = sorted(_patch_files)
                     logger.info(f"[patch] {_pkg} {_ver}: {_patch_files}")
 
                     # soft DEP-3 header check on each discovered patch. Missing fields → log-tab warning only;
@@ -1675,6 +1681,13 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             local_mirror=_lm)
         if not _ok:
             console.print(f"  {_detail}", tui.COLOR_ERROR)
+            # add_remote failed — remove the key we copied at step 3, mirroring
+            # cmd_container_remote_delete's cleanup, so a retry/abort doesn't
+            # leave stale credential material in config/.
+            try:
+                os.remove(_keydst)
+            except OSError:
+                pass
             return
         # Fresh per-remote API token for the build agent (REMOTE-API): shipped
         # to the remote + sent back as X-Athena-Token over the SSH tunnel.

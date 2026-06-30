@@ -813,8 +813,8 @@ def transposed_version(upstream_version: str, prefix: str, release: int,
 
         transposed_version('2.36-9+deb12u14', 'asg', 1)       → '2.36-9+asg1u14'
         transposed_version('5.36.0-7+deb12u3', 'asg', 1, 1)   → '5.36.0-7+asg1u3+p1'
-        transposed_version('5.2.15-2', 'asg', 1, 1)           → '5.2.15-2+p1'
-        transposed_version('1.0-2', 'asg', 1, force_bn=1)     → '1.0-2+b1'
+        transposed_version('5.2.15-2', 'asg', 1, 1)           → '5.2.15-2+asg1u0+p1'
+        transposed_version('1.0-2', 'asg', 1, force_bn=1)     → '1.0-2+asg1u0+b1'
     """
     return _append_patch_force(
         transpose(upstream_version, prefix, release),

@@ -33,9 +33,15 @@ def ensure_api_key(path: str) -> str:
     try:
         _fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        _retry = load_api_key(path)
-        if _retry:
-            return _retry
+        # The winner created the file with O_EXCL but writes the key AFTER, so
+        # a single re-read can race in before the key lands.  Poll briefly for
+        # a non-empty key before giving up.
+        import time
+        for _ in range(50):                       # ~0.5s total
+            _retry = load_api_key(path)
+            if _retry:
+                return _retry
+            time.sleep(0.01)
         raise
     with os.fdopen(_fd, 'w') as _fh:
         _fh.write(_key + '\n')

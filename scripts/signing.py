@@ -159,7 +159,9 @@ def format_gpg_time(s: str, default: str = '') -> str:
         return datetime.fromtimestamp(int(s), tz=timezone.utc).strftime(
             '%Y-%m-%d %H:%M UTC',
         )
-    except (ValueError, OSError):
+    except (ValueError, OSError, OverflowError):
+        # OverflowError: a huge epoch (int(s) out of the platform time_t
+        # range) raises it, not ValueError/OSError — degrade to the raw string.
         return s
 
 

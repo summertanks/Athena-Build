@@ -16714,6 +16714,249 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_progress_rate_counts_only_completed_records():
+    """Regression (audit #213): the throughput rate window must count only
+    COMPLETED records — in-flight / failed mtimes inflated
+    completed_in_window and rate_per_hour."""
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    from webapi import readers
+    with tempfile.TemporaryDirectory() as _tmp:
+        for _pkg, _ph in (('a', 'done'), ('b', 'entry')):   # entry=in-flight
+            utils.write_build_record(_tmp, utils.new_build_record(
+                package=_pkg, intended_version='1', patch_set_hash=''))
+            utils.update_build_record(_tmp, _pkg, phase=_ph)
+        _doc = readers.progress(_tmp, window_s=3600)
+        assert _doc['completed_in_window'] == 1, _doc       # only 'a' (done)
+
+
+def test_tier3_coord_webapi_source_pins():
+    """Pins for Tier-3 fixes #72/#88/#205 where the behavioural path (a TUI
+    handler / gpg sign / an SSE generator) is disproportionate to drive."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.head as _h
+    import webapi as _w
+    from build import BuildSession
+    # #88: stage to temp + atomic replace (prior manifest survives a failure)
+    _hsrc = inspect.getsource(_h)
+    assert ('os.replace(_path_tmp, _path)'.replace('os.', '_os.') in _hsrc
+            and '_path_tmp' in _hsrc), '#88'
+    # #205: a final drain inside the terminal block before the end event
+    assert inspect.getsource(_w).count('while _sent < len(_out):') >= 2, '#205'
+    # #72: the force snapshot-select path also reconciles the build.conf pin
+    assert 'reconcile_snapshot_pin' in inspect.getsource(
+        BuildSession._snapshot_select_force), '#72'
+
+
+def test_local_mirror_release_arch_derived_from_debs():
+    """Regression (audit #139): the local mirror Release Architectures line must
+    reflect the .debs actually present (a non-amd64 host), not a hardcoded
+    amd64."""
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import local_mirror
+    with tempfile.TemporaryDirectory() as _td:
+        open(os.path.join(_td, 'foo_1.0_arm64.deb'), 'w').close()
+        open(os.path.join(_td, 'bar_1.0_all.deb'), 'w').close()
+        local_mirror._write_release(_td)
+        with open(os.path.join(_td, 'Release')) as _fh:
+            _r = _fh.read()
+    assert 'Architectures: arm64 all' in _r, _r
+
+
+def test_tier3_cleanup_source_pins():
+    """Pins for Tier-3 fixes #26/#36/#177 (best-effort cleanup / doc accuracy /
+    empty-file guard) where a behavioural harness is disproportionate."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import buildlog
+    import select_packages
+    # #26: copied SSH key removed on the add_remote failure path
+    assert 'os.remove(_keydst)' in inspect.getsource(build), '#26'
+    # #36: the over-broad "MUST NOT raise" claim is softened to be accurate
+    assert 'MUST NOT raise into the build path' not in inspect.getsource(
+        buildlog), '#36'
+    # #177: don't create an empty pool.list
+    assert 'if _pool_sel or os.path.isfile(self._poolpath):' in inspect.getsource(
+        select_packages), '#177'
+
+
+def test_progress_bar_set_max_clamps_to_current_value():
+    """Regression (audit #196): set_max must not drop _max below the current
+    progress (_value) — that would make `filled` exceed the bar width and
+    overflow the render."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.widgets import ProgressBar
+    _pb = ProgressBar('test', maxvalue=100)
+    _pb._value = 80
+    _pb.set_max(10)                  # below current progress
+    assert _pb._max >= 80, _pb._max
+
+
+def test_tier3_tui_auth_source_pins():
+    """Pins for Tier-3 fixes #194 (SystemExit code) and #207 (auth retry poll)
+    where the behavioural path (the dispatch loop / a write race) is
+    disproportionate to exercise directly."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui.tui as _t
+    from webapi import auth as _a
+    # #194: a non-int, non-None exit code maps to 1 (failure), not 0.
+    assert '0 if _code is None else 1' in inspect.getsource(_t), '#194'
+    # #207: bounded retry poll for the winner's key, not a single re-read.
+    assert 'for _ in range(50)' in inspect.getsource(_a), '#207'
+
+
+def test_diag_audit_stanza_empty_value_only_required_fields():
+    """Regression (audit #116): EMPTY-VALUE must flag only fields that REQUIRE a
+    value (Package/Version/Description), not every empty field — an optional
+    field a stanza legitimately leaves blank shouldn't be a finding."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import diag_installer_status as _d
+    # empty OPTIONAL field → no EMPTY-VALUE finding
+    _iss = _d.audit_stanza(
+        {'Package': 'foo', 'Version': '1', 'Description': 'x', 'Homepage': ''},
+        1, ['Package: foo'])
+    assert not any('EMPTY-VALUE' in _i for _i in _iss), _iss
+    # empty REQUIRED field → flagged
+    _iss2 = _d.audit_stanza(
+        {'Package': '', 'Version': '1', 'Description': 'x'}, 1, ['Package:'])
+    assert any('EMPTY-VALUE' in _i and 'Package' in _i for _i in _iss2), _iss2
+
+
+def test_tier3_doc_source_pins():
+    """Doc-accuracy pins for Tier-3 fixes #40/#130/#149 (pure docstring/comment
+    corrections — no behaviour change to assert)."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump
+    import or_resolve
+    import installer_chroot
+    assert "'5.2.15-2+asg1u0+p1'" in inspect.getsource(bump), '#40'
+    assert 'DETERMINISTIC, order-independent closure' in inspect.getsource(
+        or_resolve), '#149'
+    assert 'find_matching_artifact' in inspect.getsource(installer_chroot), \
+        '#130'
+
+
+def test_tier3_misc_source_pins():
+    """Regression pins for a cluster of low-reachability Tier-3 fixes (audit
+    #21/#55/#75/#78/#95/#133/#159) where a behavioral harness is disproportion-
+    ate; each asserts the specific corrected code is present."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import arch_filter
+    import remote_agent
+    import iso_installer
+    import coord.publish as _pub
+    import commands.cmd_audit as _ca
+    import commands.cmd_source as _cs
+    import commands.cmd_supply_chain as _sc
+    # #21: per-arch failure degrades only that arch, not the whole triplet map
+    assert 'except subprocess.CalledProcessError' in inspect.getsource(
+        arch_filter), '#21'
+    # #159: next-offset is frm + bytes read, not the stale size
+    assert 'frm + len(_data)' in inspect.getsource(remote_agent), '#159'
+    # #133: exclude_names applied on the legacy (deb_whitelist is None) path
+    _isrc = inspect.getsource(iso_installer)
+    assert ('if deb_whitelist is None:' in _isrc
+            and '_excl = exclude_names or set()' in _isrc), '#133'
+    # #95: drift requires the binary to actually be present in the pool
+    assert '_latest is not None and _fn != _latest' in inspect.getsource(
+        _pub), '#95'
+    # #55: stale-files row colour matches the gate (counts malformed)
+    assert 'ok=(_n_stale == 0 and not _malformed)' in inspect.getsource(
+        _ca), '#55'
+    # #75: the .disabled marker hint is an f-string (real pkg name)
+    assert 'f\'run `source fork {pkg} enabled` to \'' in inspect.getsource(
+        _cs), '#75'
+    # #78: the component-count set comprehension uses the `or {}` idiom
+    assert "(_m.get('artifact', {}) or {}).get('name', '')" in inspect.getsource(
+        _sc), '#78'
+
+
+def test_resolve_closure_accepts_generator_seeds():
+    """Regression (audit #148): resolve_closure consumes `seeds` twice
+    (_infer_real + the _pending comprehension), so a one-shot generator was
+    exhausted by the first pass and yielded an empty closure on the default
+    (real_pkgs=None) path. Materialize seeds once."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import or_resolve
+    _out = or_resolve.resolve_closure((_s for _s in ['a']), {'a': []})
+    assert _out == {'a'}, _out
+
+
+def test_build_patch_list_sorts_by_full_filename():
+    """Regression (audit #23): build.py's patch_list must sort by the full
+    filename (like buildcontainer), not x[:5] — a 5-char-prefix tie feeds an
+    order-sensitive hash and flaps it, forcing needless rebuilds."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    assert 'key=lambda x: x[:5]' not in inspect.getsource(build), (
+        "patch_list must sort by full filename, not a 5-char prefix")
+
+
+def test_format_gpg_time_survives_overflow_epoch():
+    """Regression (audit #181): a huge epoch (int out of time_t range) raises
+    OverflowError, not ValueError/OSError — format_gpg_time must degrade to the
+    raw string, not propagate."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from signing import format_gpg_time
+    _big = '9' * 30
+    assert format_gpg_time(_big) == _big          # must not raise
+
+
+def test_tasksel_sanitize_drops_control_chars():
+    """Regression (audit #184): _sanitize must banish non-printable ASCII
+    (tab/newline/NUL/control, ord < 32), not just ord > 126, before cdebconf
+    renders it."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tasksel_desc
+    _out = tasksel_desc._sanitize('a\tb\x07c\nd')
+    assert '\t' not in _out and '\x07' not in _out and '\n' not in _out, _out
+    assert _out == 'a b c d', _out
+
+
+def test_diag_installer_status_reads_latin1():
+    """Regression (audit #114): the status file must be read latin-1 (1:1
+    byte->codepoint) so the non-ASCII scan reports the true byte value, not
+    U+FFFD from a utf-8/errors='replace' read."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import diag_installer_status
+    assert "encoding='latin-1'" in inspect.getsource(diag_installer_status), (
+        "status file read must decode latin-1 for true byte values")
+
+
+def test_onboarding_jobs_warns_on_clamp():
+    """Regression (audit #144): the onboarding jobs prompt must surface a clamp
+    / non-int like `set jobs`, not silently adjust."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    assert 'jobs clamped to' in inspect.getsource(onboarding), (
+        "out-of-range jobs must be surfaced, not silently clamped")
+
+
 def test_publish_obsolescence_view_includes_deprecations():
     """Regression (audit #96): step 6c's supersession-obsolescence view must
     include the 6b deprecation claims, so a file just deprecated (ownership
@@ -25061,7 +25304,10 @@ def test_api01_progress_aggregate():
         assert _doc['records'] == 3 and _doc['remaining'] == 7
         assert _doc['phases'] == {'done': 1, 'failed': 1, 'entry': 1}
         assert _doc['failed'] == ['fail1']
-        assert _doc['rate_per_hour'] == 3.0          # 3 records in 1h window
+        # audit #213: rate counts only COMPLETED records (success), not the
+        # failed or in-flight ones — only done1 here.
+        assert _doc['completed_in_window'] == 1
+        assert _doc['rate_per_hour'] == 1.0
         assert _doc['eta_hours'] is not None
         assert _doc['in_flight'][0]['package'] == 'fly1'
         assert _doc['in_flight'][0]['log_bytes'] == len('building...\n')
@@ -28733,12 +28979,17 @@ def test_snapshot_select_force_accepts_backtrack():
             def get_response(self):
                 return next(_answers)
         _sp, _sc = cmd_snapshot.Prompt, build.console.print
+        _orig_recon = utils.reconcile_snapshot_pin
         cmd_snapshot.Prompt = _FakePrompt
         build.console.print = lambda *a, **k: None
+        # audit #72: the force path now mirrors the build.conf pin; the minimal
+        # _Cfg here doesn't carry that state, so stub the reconcile.
+        utils.reconcile_snapshot_pin = lambda cfg: None
         try:
             _sess.cmd_snapshot('select', 'force')
         finally:
             cmd_snapshot.Prompt, build.console.print = _sp, _sc
+            utils.reconcile_snapshot_pin = _orig_recon
         _st = utils.read_snapshot_state(_sess.config)
         assert _st['current'] == '20260514T083402Z', _st
         _h = utils.read_snapshot_history(_sess.config)
@@ -42339,6 +42590,21 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_progress_rate_counts_only_completed_records,
+        test_tier3_coord_webapi_source_pins,
+        test_local_mirror_release_arch_derived_from_debs,
+        test_tier3_cleanup_source_pins,
+        test_progress_bar_set_max_clamps_to_current_value,
+        test_tier3_tui_auth_source_pins,
+        test_diag_audit_stanza_empty_value_only_required_fields,
+        test_tier3_doc_source_pins,
+        test_tier3_misc_source_pins,
+        test_resolve_closure_accepts_generator_seeds,
+        test_build_patch_list_sorts_by_full_filename,
+        test_format_gpg_time_survives_overflow_epoch,
+        test_tasksel_sanitize_drops_control_chars,
+        test_diag_installer_status_reads_latin1,
+        test_onboarding_jobs_warns_on_clamp,
         test_publish_obsolescence_view_includes_deprecations,
         test_read_selection_state_distinguishes_transient_io_error,
         test_cli_quit_detection_keys_on_first_token,

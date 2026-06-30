@@ -797,7 +797,9 @@ class AuditCommandsMixin(SessionState):
             f"{_n_stale} stale ({_bytes / 1024 / 1024:.1f} MB) — "
             f"{len(_orphan)} orphan-source, {len(_drift)} version-drift"
             f"{_frn}{_mal}",
-            ok=(_n_stale == 0))
+            # Match the early-return gate above (which counts _malformed): a
+            # malformed artifact must color the row amber, not green.
+            ok=(_n_stale == 0 and not _malformed))
         if _n_stale:
             # Short preview — one line per source for orphans (collapses
             # the task-* family case), individual lines for drift.  Full

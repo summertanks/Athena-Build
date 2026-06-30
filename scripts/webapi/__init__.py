@@ -219,6 +219,13 @@ def create_app(*, buildlog_dir: str, flags_path: str,
                         yield f"data: {_out[_sent]}\n\n"
                         _sent += 1
                     if _job.state in ('done', 'error'):
+                        # Final drain: the worker may have appended the last
+                        # output line(s) AND flipped to terminal between the
+                        # drain above and this check — flush them before `end`.
+                        _out = _job.output
+                        while _sent < len(_out):
+                            yield f"data: {_out[_sent]}\n\n"
+                            _sent += 1
                         yield f"event: end\ndata: {_job.state}\n\n"
                         return
                     _time.sleep(0.3)

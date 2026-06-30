@@ -25,7 +25,9 @@ def _sanitize(text: str) -> str:
     whitespace — the shape cdebconf renders reliably."""
     _out: List[str] = []
     for _ch in text:
-        if ord(_ch) > 126 or _ch in _BANNED:
+        # Banish non-printable ASCII too (ord < 32: tab/newline/NUL/control) —
+        # not just > 126 — so a stray control char can't reach cdebconf.
+        if ord(_ch) < 32 or ord(_ch) > 126 or _ch in _BANNED:
             _out.append(' ')
         else:
             _out.append(_ch)

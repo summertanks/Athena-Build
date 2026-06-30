@@ -121,7 +121,10 @@ def read_log(path: str, frm: int) -> 'Tuple[bytes, int, int]':
             _data = _fh.read()
     except OSError:
         return (b'', frm, _size)
-    return (_data, _size, _size)
+    # next-offset = frm + bytes actually read, NOT the stale _size: the file
+    # may have grown between getsize() and read(), so _data can exceed
+    # _size-frm; frm+len(_data) is lossless and overlap-free.
+    return (_data, frm + len(_data), _size)
 
 
 def _container_cpu(container_name: 'Optional[str]') -> 'Optional[float]':

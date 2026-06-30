@@ -130,11 +130,15 @@ def audit_stanza(
             break
     # Unterminated field: a field header (`Name:`) with NO value AND no
     # continuation line following — libdebian-installer trips on this.
+    # Restrict to fields that genuinely REQUIRE a value — flagging every empty
+    # field is a heuristic that false-positives on optional fields a stanza may
+    # legitimately leave blank.
+    _value_required = ('Package', 'Version', 'Description')
     for _f, _v in fields.items():
         if _f == '__MALFORMED__':
             continue
-        if _v == '':
-            _issues.append(f"EMPTY-VALUE: field {_f!r} has empty value")
+        if _v == '' and _f in _value_required:
+            _issues.append(f"EMPTY-VALUE: required field {_f!r} has empty value")
     return _issues
 
 
@@ -143,12 +147,16 @@ def main(path: str) -> int:
         print(f"ERROR: {path} not found")
         return 2
     # File may be root-owned; try plain read first, fall back to sudo.
+    # Decode latin-1 (1:1 byte→codepoint) so the non-ASCII scan reports the
+    # TRUE byte value via ord(_c); a utf-8/errors='replace' read would map a
+    # high byte to U+FFFD and misreport it.
     try:
-        with open(path, 'r', errors='replace') as fh:
+        with open(path, 'r', encoding='latin-1') as fh:
             _content = fh.read()
     except PermissionError:
         import subprocess
-        _r = subprocess.run(['sudo', 'cat', path], capture_output=True, text=True)
+        _r = subprocess.run(['sudo', 'cat', path], capture_output=True,
+                            text=True, encoding='latin-1')
         if _r.returncode != 0:
             print(f"ERROR: cannot read {path}: {_r.stderr}")
             return 2

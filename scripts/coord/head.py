@@ -62,44 +62,55 @@ def write_coord_head(
     """
     _path = coord_head_path(coord_dir)
     _sig = coord_head_sig_path(coord_dir)
+    # Stage to temp files and only atomically swap BOTH in after signing
+    # succeeds — so a write/sign failure leaves the PRIOR signed manifest+sig
+    # intact instead of destroying it and leaving no authority.
+    _path_tmp = _path + '.tmp'
+    _sig_tmp = _sig + '.tmp'
+
+    def _cleanup_tmp() -> None:
+        for _t in (_path_tmp, _sig_tmp):
+            try:
+                _os.unlink(_t)
+            except OSError:
+                pass
+
     try:
         _os.makedirs(coord_dir, mode=0o755, exist_ok=True)
         _payload = _json.dumps(
             head, sort_keys=True, ensure_ascii=True, indent=2,
         ).encode('utf-8')
-        with open(_path, 'wb') as _fh:
+        with open(_path_tmp, 'wb') as _fh:
             _fh.write(_payload)
     except OSError as _e:
         logger.error(f"coord.head write: {_e}")
+        _cleanup_tmp()
         return False
     if not signing_homedir or not _os.path.isdir(signing_homedir):
         logger.error(
             f"coord.head: tier-1 signing homedir missing or unreadable: "
             f"{signing_homedir!r} — refusing to leave unsigned manifest")
-        try:
-            _os.unlink(_path)
-        except OSError:
-            pass
+        _cleanup_tmp()
         return False
-    if _os.path.exists(_sig):
-        try:
-            _os.unlink(_sig)
-        except OSError as _e:
-            logger.error(f"coord.head: rm prior sig {_sig}: {_e}")
-            return False
     _r = _subprocess.run(
         ['gpg', '--homedir', signing_homedir, '--batch', '--yes',
-         '--detach-sign', '--armor', '-o', _sig, _path],
+         '--detach-sign', '--armor', '-o', _sig_tmp, _path_tmp],
         capture_output=True, text=True,
     )
     if _r.returncode != 0:
         logger.error(
             f"coord.head: gpg --detach-sign failed (rc={_r.returncode}): "
-            f"{_r.stderr.strip()[:200]} — removing unsigned manifest")
-        try:
-            _os.unlink(_path)
-        except OSError:
-            pass
+            f"{_r.stderr.strip()[:200]} — leaving prior manifest intact")
+        _cleanup_tmp()
+        return False
+    # The detached signature is over _path_tmp's bytes; os.replace preserves
+    # them, so the .sig still verifies against the final coord-head.json.
+    try:
+        _os.replace(_path_tmp, _path)
+        _os.replace(_sig_tmp, _sig)
+    except OSError as _e:
+        logger.error(f"coord.head: atomic replace failed: {_e}")
+        _cleanup_tmp()
         return False
     return True
 

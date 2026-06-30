@@ -154,8 +154,15 @@ def generate_pending_claims(
         # in the pool too) — leaves the indexed-latest file UNCLAIMED → it 404s.
         # Detect by latest-mismatch, not mere pool-absence, so a superseded dup
         # still sitting in the pool doesn't mask the drift.
-        _drifted = bool(pool is not None and _outputs and any(
-            _fn != _pool_latest.get(_fn.rsplit('_', 2)[0]) for _fn in _outputs))
+        def _is_drift(_fn: str) -> bool:
+            # Drift = an output that is NOT the pool's latest for its binary.
+            # A binary fully ABSENT from the pool (_pool_latest.get → None) is
+            # not drift (nothing indexed to leave unclaimed); require presence
+            # so a not-yet-pooled declared output doesn't false-flag.
+            _latest = _pool_latest.get(_fn.rsplit('_', 2)[0])
+            return _latest is not None and _fn != _latest
+        _drifted = bool(pool is not None and _outputs
+                        and any(_is_drift(_fn) for _fn in _outputs))
         # A package PULLED from a peer (mirror pull stamps `pulled_from`) is
         # normally never re-claimed (the reverse-sync footgun) — UNLESS a local
         # rebuild has superseded the adoption (drift), in which case we own and
