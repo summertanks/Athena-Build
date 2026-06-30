@@ -26896,6 +26896,75 @@ def test_virtual_build_from_cache_collapses_hashtable_shape():
     assert _ctrl['Depends'] == 'libc6'
 
 
+def test_virtual_validate_canon_map_uses_filtered_universe():
+    """Regression (audit #83): validate's _canon_map must be built from the
+    from_cache-FILTERED _universe (standalone Package==name producer), NOT the
+    raw package/udeb hashtables.  The raw walk took _rec[0] + the apt-highest
+    version, which for a Provides-aliased name (telnet) grabs the epoch-bearing
+    alias inetutils-telnet (2:...) over the standalone and misattributes the
+    binary's source — diverging from synth, which uses the same filtered
+    universe."""
+    import inspect
+    import re
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    import virtual_build as _vb
+    import apt_pkg as _ap
+    _ap.init_system()
+
+    # (a) source pin: the canon block must iterate _universe, not the raw
+    # hashtables (walking those re-introduces the Provides-alias bug).
+    _src = inspect.getsource(BuildSession.cmd_virtual_validate)
+    _m = re.search(r'_canon_map[^\n]*=\s*\{\}.*?(?=_tunnel_srcs)',
+                   _src, re.DOTALL)
+    assert _m, "canon-map construction block not found"
+    _block = _m.group(0)
+    assert 'for _bn, _vers in _universe' in _block, (
+        "canon map must iterate the from_cache-filtered _universe")
+    assert ('package_hashtable' not in _block
+            and 'udeb_hashtable' not in _block), (
+        "canon map must NOT walk the raw hashtables (Provides-alias "
+        "misattribution)")
+
+    # (b) behavioral: from_cache drops the Provides-aliased version, so a canon
+    # map built from _universe attributes telnet to the STANDALONE source.
+    class _Pkg(dict):
+        def __init__(self, **_f):
+            super().__init__()
+            self.update(_f)
+            self.package = _f['Package']
+            self.version = _f['Version']
+
+    class _Cache:
+        package_hashtable = {
+            'telnet': {
+                # standalone transitional dummy (Package == telnet)
+                '0.17+2.4-2': [_Pkg(Package='telnet', Version='0.17+2.4-2',
+                                    Architecture='all',
+                                    Source='netkit-telnet')],
+                # a DIFFERENT binary that Provides: telnet; epoch sorts ABOVE
+                '2:2.4-2': [_Pkg(Package='inetutils-telnet', Version='2:2.4-2',
+                                 Architecture='amd64', Provides='telnet',
+                                 Source='inetutils')],
+            },
+        }
+        udeb_hashtable: dict = {}
+
+    _universe = _vb.from_cache(_Cache())
+    _canon: dict = {}
+    for _bn, _vers in _universe.items():
+        _best_v = _best_r = None
+        for _v, _rec in _vers.items():
+            if (_best_v is None
+                    or _ap.version_compare(str(_v), str(_best_v)) > 0):
+                _best_v, _best_r = _v, _rec
+        if _best_r is not None:
+            _canon[_bn] = (_best_r.get('Source') or _bn).split(' ', 1)[0]
+    assert _canon.get('telnet') == 'netkit-telnet', (
+        f"canon misattributed via Provides alias: {_canon}")
+
+
 def test_virtual_build_build_profile_filter_skips_nodoc_when_active():
     """`*-doc` binaries with `profile=!nodoc` must be filtered out of
     synthesis when `nodoc` is in the active profile set.  Largest
@@ -41413,6 +41482,7 @@ def main() -> int:
         test_virtual_publish_dry_run_tunneled_target_emits_transfer_and_hash_conflict,
         test_virtual_publish_dry_run_same_sha_no_hash_conflict,
         test_virtual_build_from_cache_collapses_hashtable_shape,
+        test_virtual_validate_canon_map_uses_filtered_universe,
         test_virtual_build_from_cache_merges_udeb_hashtable,
         test_virtual_build_build_profile_filter_skips_nodoc_when_active,
         test_virtual_build_build_profile_filter_positive_profile_required,

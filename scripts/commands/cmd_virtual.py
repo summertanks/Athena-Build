@@ -88,20 +88,26 @@ class VirtualCommandsMixin(SessionState):
         # whichever source declares them in `Binary:` — fixes the
         # linux / linux-signed-amd64 installer-udeb attribution split.
         import apt_pkg as _ap
+        # Build from the from_cache-FILTERED _universe (standalone Package==name
+        # producer), NOT the raw package/udeb hashtables.  The raw walk took
+        # _rec[0] and the apt-highest version — for a Provides-aliased name like
+        # `telnet` that grabs the epoch-bearing alias inetutils-telnet (2:...)
+        # over the standalone telnet (0.17...) and misattributes the binary to
+        # the alias's Source.  Synth (synthesize_source_binaries) derives canon
+        # from this SAME filtered universe, so validate must too or its canon
+        # diverges from synth's.  _universe values are {ver: record} (single
+        # record per the from_cache filter), so no _rec[0] indexing.
         _canon_map: 'dict[str, str]' = {}
-        for _table in (getattr(self.cache, 'package_hashtable', {}),
-                       getattr(self.cache, 'udeb_hashtable', {})):
-            for _bn, _vers in _table.items():
-                _best_v = _best_r = None
-                for _v, _rec in (_vers.items()
-                                 if hasattr(_vers, 'items') else []):
-                    _r = _rec[0] if isinstance(_rec, list) else _rec
-                    if (_best_v is None
-                            or _ap.version_compare(str(_v), str(_best_v)) > 0):
-                        _best_v, _best_r = _v, _r
-                if _best_r is not None:
-                    _canon_map[_bn] = (
-                        (_best_r.get('Source') or _bn).split(' ', 1)[0])
+        for _bn, _vers in _universe.items():
+            _best_v = _best_r = None
+            for _v, _rec in (_vers.items()
+                             if hasattr(_vers, 'items') else []):
+                if (_best_v is None
+                        or _ap.version_compare(str(_v), str(_best_v)) > 0):
+                    _best_v, _best_r = _v, _rec
+            if _best_r is not None:
+                _canon_map[_bn] = (
+                    (_best_r.get('Source') or _bn).split(' ', 1)[0])
         _tunnel_srcs = frozenset(
             getattr(self.config, 'tunnel_packages', set()) or set())
 
