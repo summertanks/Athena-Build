@@ -93,7 +93,19 @@ def append_claim(
     try:
         fcntl.flock(_fd, fcntl.LOCK_EX)
         try:
-            os.write(_fd, _line)
+            # Write-all: os.write may write fewer bytes than requested (a short
+            # write on disk-full / signal).  The append-only ledger's
+            # "one complete JSONL line per write" invariant requires the WHOLE
+            # line land; loop until it does and raise on a stuck write so
+            # disk-full surfaces instead of silently corrupting the ledger.
+            _written = 0
+            while _written < len(_line):
+                _n = os.write(_fd, _line[_written:])
+                if _n <= 0:
+                    raise OSError(
+                        f"short write to {_path}: "
+                        f"{_written}/{len(_line)} bytes")
+                _written += _n
             os.fsync(_fd)
         finally:
             fcntl.flock(_fd, fcntl.LOCK_UN)
