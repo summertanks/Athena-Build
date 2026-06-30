@@ -8,6 +8,17 @@ severities, which differ from the raw audit where verification softened a claim.
 
 **Verdict tally (199 single-pass findings):** 141 confirmed · 48 partial · 10 refuted; 15 closed as not-a-defect (refuted or severity→none); 20 medium→low downgrades; 0 upgrades.
 
+**Remediation status (checkboxes below reflect GitHub issue state):**
+- **All confirmed correctness bugs fixed** — Tier 0 (4), Tier 0b (6), Tier 1 (8),
+  Tier 2 (32), Tier 3 (29) = **79 fixed, merged to `master`, and closed**, plus the
+  Tier-4 safe-cleanup subset (12). +58 regression tests; triad green at every merge.
+- **#6 + coverage gaps #15–#17** are fixed on `feat/update-mode-transpose` (ticked
+  here; the issues close when that branch merges, since their code isn't on master).
+- **Open / deferred:** the remaining Tier-4 refactors & judgment calls (~63), the
+  T5 test gaps, and **#80 / #92 / #98** (deferred — real but in delicate
+  federation/tunnel code with no integration harness here). **#160** was closed as
+  not-planned (verifier refuted the fix).
+
 > Order of work: **Tier 0 before the next build cycle.** Tiers 1–2 are real correctness
 > fixes; Tier 3 is real-but-low-reachability (do opportunistically); Tier 4 is cleanup;
 > Tier 5 is test debt. Closed/refuted findings are listed in the appendix for the record.
@@ -16,207 +27,207 @@ severities, which differ from the raw audit where verification softened a claim.
 
 Confirmed real **and** reachable, and on the build/publish/onboarding path.
 
-- [ ] **#18** `scripts/apt_repo.py:307-311` — generate_repo_indexes udeb scan omits allow_empty=True (sibling generate_apt_repo sets it) — empty debian-installer/ dir aborts the whole publish
+- [x] **#18** `scripts/apt_repo.py:307-311` — generate_repo_indexes udeb scan omits allow_empty=True (sibling generate_apt_repo sets it) — empty debian-installer/ dir aborts the whole publish
   - _Fix:_ Pass allow_empty=True to the udeb _scan_packages_to call (matching generate_apt_repo line 133), or pre-count .udeb files and skip the subdir when zero, mirroring the _deb_count guard used for the binary component.
-- [ ] **#7** `scripts/buildcontainer.py` — Segregate rollback moves an already-published .deb out of the repo (append-only violation, data loss)
+- [x] **#7** `scripts/buildcontainer.py` — Segregate rollback moves an already-published .deb out of the repo (append-only violation, data loss)
   - _Fix:_ Track kept-existing duplicates separately from genuinely-moved files (e.g. append `_dst` to a `_kept_existing` list, not `_moved_paths`, in the collision branch), and have the rollback loop reverse ONLY genuinely-moved entries. The kept-exi
-- [ ] **#99** `scripts/coord/reconcile.py:542-550` — publish_halt_reason fails OPEN on an unreadable HALT sentinel
+- [x] **#99** `scripts/coord/reconcile.py:542-550` — publish_halt_reason fails OPEN on an unreadable HALT sentinel
   - _Fix:_ On a non-FileNotFoundError OSError, return a non-None sentinel string (e.g. 'PUBLISH_HALT present but unreadable: <err>') so the caller refuses; only a genuine FileNotFoundError should map to None.
-- [ ] **#8** `scripts/signing.py` — verify_key filters by config.signing_key_uid, not the key actually present — breaks federation peer onboarding when origin UID != peer default
+- [x] **#8** `scripts/signing.py` — verify_key filters by config.signing_key_uid, not the key actually present — breaks federation peer onboarding when origin UID != peer default
   - _Fix:_ In verify_key, resolve the on-disk UID first (uid = actual_signing_uid(config) or config.signing_key_uid) and use that for both the existence check and `--local-user`; or gate on get_key_info via the unfiltered key. Alternatively fix the ca
 
 **Adversarially demoted from the audit's headline blockers** (do NOT prioritise — verification
 found them not reachable on a live path):
 
-- [ ] **#148** `scripts/or_resolve.py:83-104` — seeds iterated twice — a generator yields an empty closure on the default (real_pkgs=None) path _(partial: real but not reachable)_
+- [x] **#148** `scripts/or_resolve.py:83-104` — seeds iterated twice — a generator yields an empty closure on the default (real_pkgs=None) path _(partial: real but not reachable)_
   - _Fix:_ Materialize once at the top of resolve_closure: `_seeds = list(seeds)` and use `_seeds` for both _infer_real and the _pending comprehension (or narrow the annotation to Sequence[str]).
-- [ ] **#23** `scripts/build.py:713` — patch_list sort key (x[:5]) diverges from buildcontainer's full-name sort feeding an order-sensitive hash _(partial: real but not reachable)_
+- [x] **#23** `scripts/build.py:713` — patch_list sort key (x[:5]) diverges from buildcontainer's full-name sort feeding an order-sensitive hash _(partial: real but not reachable)_
   - _Fix:_ Sort by the full filename: `_src.patch_list = sorted(_patch_files)` (drop the key=lambda x: x[:5]) so build.py and buildcontainer.py:1052 produce identical ordering and matching hashes. Full-name sort still preserves the numeric-prefix orde
 - [ ] **#98** `scripts/coord/reconcile.py:130-203` — audit_local hash-verifies only ONE binary per multi-binary source (lossy projection) _(partial: real but not reachable)_
   - _Fix:_ Drive C-1/C-2/C-3 from a filename-keyed live view (e.g. store.iter_live_claims_by_filename or project_owners filtered to builder_id) instead of project_live_claims, so every binary filename is hash-verified and accounted for.
 
 ## Tier 0b — Verified high/critical (the rest of the adversarially-verified set)
 
-- [ ] **#6** `scripts/bump.py` — _needs_bump_build shim-signed parity: predictor reconstructs from source suffix not binary's own version (dormant)
-- [ ] **#9** `scripts/bump_version.py` — --freeze-stamp commit fails: _buildstamp.py is gitignored, git add aborts
+- [x] **#6** `scripts/bump.py` — _needs_bump_build shim-signed parity: predictor reconstructs from source suffix not binary's own version (dormant)
+- [x] **#9** `scripts/bump_version.py` — --freeze-stamp commit fails: _buildstamp.py is gitignored, git add aborts
   - _Fix:_ Drop _BUILDSTAMP_PY from the commit set: `_files = [_PYPROJECT, _VERSION_PY]` unconditionally. The freeze-stamp file is meant to stay untracked; rewriting it on disk (done at line 170) is sufficient.
-- [ ] **#14** `scripts/commands/cohorts.py` — _tunnel_filenames_for_source picks source_hashtable[0] (parse order), not the resolved/highest-version source
+- [x] **#14** `scripts/commands/cohorts.py` — _tunnel_filenames_for_source picks source_hashtable[0] (parse order), not the resolved/highest-version source
   - _Fix:_ Prefer the already-resolved source: look up `self.dep_tree.selected_srcs` / `self.udeb_dep_tree.selected_srcs` for src_name first; failing that use `max(_cands, key=lambda s: s.version)` (mirroring cmd_source.py:1457 and cmd_virtual's _look
-- [ ] **#10** `scripts/dependencytree.py` — OR-grouped Pre-Depends (alt_pre_depends) are never resolved or validated
+- [x] **#10** `scripts/dependencytree.py` — OR-grouped Pre-Depends (alt_pre_depends) are never resolved or validated
   - _Fix:_ Treat alt_pre_depends like alt_depends: in parse_dependency feed `_selected_pkg.alt_depends + _selected_pkg.alt_pre_depends` through the alternative-selection loop (line 588/590), and in validate_selection iterate `alt_depends + alt_pre_dep
-- [ ] **#11** `scripts/fork_mirror.py` — Empty/malformed changelog raises IndexError that escapes the narrow except and aborts the entire cache build
+- [x] **#11** `scripts/fork_mirror.py` — Empty/malformed changelog raises IndexError that escapes the narrow except and aborts the entire cache build
   - _Fix:_ Broaden the except at both call sites (and/or inside _read_pkg_version) to also catch IndexError and debian.changelog.ChangelogParseError — or mirror _compute_dep_hash's `except (OSError, Exception)` — and `continue`, so a broken fork is lo
-- [ ] **#12** `scripts/identity_scan.py` — IndexError when 'apt-install' appears only in an inline comment
+- [x] **#12** `scripts/identity_scan.py` — IndexError when 'apt-install' appears only in an inline comment
   - _Fix:_ After computing `head`, guard: `if 'apt-install' not in head: return None` before the split (the comment-stripped command is what matters), or wrap the split and return None on absence.
-- [ ] **#13** `scripts/webapi/readers.py` — mirror_state() reads legacy mirror.<name>.state files, ignoring the authoritative signed mirror.conf
+- [x] **#13** `scripts/webapi/readers.py` — mirror_state() reads legacy mirror.<name>.state files, ignoring the authoritative signed mirror.conf
   - _Fix:_ Replace the .state globbing with mirror.py's authoritative loader (load_mirror_conf / the registered-map accessor), returning the verified mirrors dict from mirror.conf and surfacing its verify status; drop the direct .state reads.
 
 ## Tier 1 — Confirmed correctness, medium severity
 
-- [ ] **#27** `scripts/build_closure.py:94, 198` — Closure expansion order is set-iteration dependent → non-deterministic OR-group resolution
+- [x] **#27** `scripts/build_closure.py:94, 198` — Closure expansion order is set-iteration dependent → non-deterministic OR-group resolution
   - _Fix:_ Process the frontier deterministically: seed with `sorted(_inset)` and either use a deque FIFO or sort newly-added picks before extending; pure-virtual single-name picks are already deterministic via `sorted(_providers)[0]`, so sorting the 
-- [ ] **#34** `scripts/buildlog.py:138` — write() opens output without encoding='utf-8'; non-ASCII content lost under C/ASCII locale
+- [x] **#34** `scripts/buildlog.py:138` — write() opens output without encoding='utf-8'; non-ASCII content lost under C/ASCII locale
   - _Fix:_ open(_tmp, 'w', encoding='utf-8') (matching utils.py). Optionally errors='replace' for extra safety.
-- [ ] **#43** `scripts/cache.py:651-658, 985-991` — UnicodeDecodeError from index parse escapes the OSError-only guard
+- [x] **#43** `scripts/cache.py:651-658, 985-991` — UnicodeDecodeError from index parse escapes the OSError-only guard
   - _Fix:_ Either pin readfile to `encoding='utf-8'` (Debian indices are UTF-8) with `errors='replace'` as a fallback, and/or broaden the two `except OSError` clauses here to `except (OSError, ValueError)` so a decode failure becomes a graceful error_
-- [ ] **#48** `scripts/chroot.py:1505-1569` — systemd-firstboot --setup-machine-id bakes a FIXED /etc/machine-id, overriding the documented empty-first-boot design
+- [x] **#48** `scripts/chroot.py:1505-1569` — systemd-firstboot --setup-machine-id bakes a FIXED /etc/machine-id, overriding the documented empty-first-boot design
   - _Fix:_ Drop `--setup-machine-id` from the systemd-firstboot invocation (the empty /etc/machine-id at line 1505 already gives correct first-boot generation), or re-truncate /etc/machine-id to empty immediately after the firstboot call so each insta
-- [ ] **#64** `scripts/commands/cmd_mirror.py:2202` — mirror reclaim omits --no-iso, so the ISO release-media gate refuses it
+- [x] **#64** `scripts/commands/cmd_mirror.py:2202` — mirror reclaim omits --no-iso, so the ISO release-media gate refuses it
   - _Fix:_ Call `self.cmd_mirror_publish(_n, '--no-iso', reclaim_intents=_sel)` at line 2202 so a reclaim publishes the repo/claims without requiring current-snapshot install media.
-- [ ] **#83** `scripts/commands/cmd_virtual.py:90-104` — validate's _canon_map diverges from synth's filtered universe (Provides-alias misattribution)
+- [x] **#83** `scripts/commands/cmd_virtual.py:90-104` — validate's _canon_map diverges from synth's filtered universe (Provides-alias misattribution)
   - _Fix:_ Build _canon_map from the already-filtered _universe (for each binary pick the apt-highest version key in _universe[bn] and read its 'Source', falling back to bn) instead of re-walking the raw hashtables and taking _rec[0]; this reuses from
-- [ ] **#86** `scripts/coord/config_manifest.py:136-142` — Partial list application leaves pkg.list overwritten but reported as NOT applied
+- [x] **#86** `scripts/coord/config_manifest.py:136-142` — Partial list application leaves pkg.list overwritten but reported as NOT applied
   - _Fix:_ Make application all-or-nothing: write each list to a temp file in the same dir, fsync, and os.replace() them only after all four succeed (atomic rename); or stage into a list of (path,text) and write under a try that restores prior content
-- [ ] **#104** `scripts/coord/store.py:373-391` — project_owners ranks cross-builder claims by builder-local seq, so a higher-seq DEPRECATION can outrank a live PUBLISHED takeover
+- [x] **#104** `scripts/coord/store.py:373-391` — project_owners ranks cross-builder claims by builder-local seq, so a higher-seq DEPRECATION can outrank a live PUBLISHED takeover
   - _Fix:_ Make the winner key prefer a live PUBLISHED claim over a DEPRECATION/OBSOLETE marker for the same filename before falling back to seq (e.g. key = (state_rank, -seq, builder) where published outranks marker states), or break cross-builder ti
 
 ## Tier 2 — Confirmed correctness, low severity
 
-- [ ] **#37** `scripts/buildsystem.py:104` — Password-failure error reads stdout, but sudo writes diagnostics to stderr
+- [x] **#37** `scripts/buildsystem.py:104` — Password-failure error reads stdout, but sudo writes diagnostics to stderr
   - _Fix:_ Use `_proc.stderr.strip()` (optionally `or _proc.stdout.strip()`) in both the __init__ (line 104) and for_iso (line 188) validation error messages, matching the wipe handler at line 134.
-- [ ] **#47** `scripts/cache.py:925-933` — Provides-injected versions can inflate fork version and defeat the collision gate
+- [x] **#47** `scripts/cache.py:925-933` — Provides-injected versions can inflate fork version and defeat the collision gate
   - _Fix:_ When computing the fork's version for the gate, restrict to records whose real `_pkg.package == _name` (e.g. iterate the Package objects in the version lists and filter by `.package`) rather than trusting every key, which may be a Provides 
-- [ ] **#53** `scripts/cli.py:355, 380` — quit/exit detection drifts between _dispatch_one (first token) and the loop break-checks (full line)
+- [x] **#53** `scripts/cli.py:355, 380` — quit/exit detection drifts between _dispatch_one (first token) and the loop break-checks (full line)
   - _Fix:_ Make _dispatch_one the single source of truth for the quit/exit decision — e.g. return a small sentinel/enum (RAN/EMPTY/QUIT/FAILED) instead of a bool, or have callers test `line.split()[:1] == ['quit']`-style first-token match consistent w
-- [ ] **#59** `scripts/commands/cmd_build.py:1045-1052` — _verify_chroot check 2 ignores subprocess returncode → false PASS on a failed dpkg call
+- [x] **#59** `scripts/commands/cmd_build.py:1045-1052` — _verify_chroot check 2 ignores subprocess returncode → false PASS on a failed dpkg call
   - _Fix:_ Fold the returncode into the ok condition: `_check('All packages fully installed', _r.returncode == 0 and not _incomplete, ...)` and surface a distinct detail (e.g. dpkg stderr) when returncode != 0. Add a test asserting check 2 FAILs when 
-- [ ] **#61** `scripts/commands/cmd_cache.py:247` — Build-mode parse leaks OSError + leaves spinner running (dist path guards it)
+- [x] **#61** `scripts/commands/cmd_cache.py:247` — Build-mode parse leaks OSError + leaves spinner running (dist path guards it)
   - _Fix:_ Wrap the parse_build_pkg_list call (line 247) in try/except OSError mirroring lines 485-492: on error print a console error, log it, call _spiner.done() (or move the whole build-mode branch under the spinner's cleanup), set dep_check_ready 
-- [ ] **#68** `scripts/commands/cmd_repo.py:866` — Cleanup report understates scanned components (omits main-udeb)
+- [x] **#68** `scripts/commands/cmd_repo.py:866` — Cleanup report understates scanned components (omits main-udeb)
   - _Fix:_ Include `main-udeb` in the component list string (e.g. `{main,main-udeb,doc,dbgsym,tests}`), ideally derived from `utils._STALE_SCAN_SUBDIRS` so it can't drift again.
 - [ ] **#69** `scripts/commands/cmd_run.py:314` — cmd_set truncates multi-token values; `set signing-uid 'Name <email>'` is non-functional
   - _Fix:_ In cmd_set, build the value from the remaining tokens: `_value = ' '.join(args[1:])` (and strip surrounding quotes), so space-containing values like signing-uid reach the handler intact.
-- [ ] **#71** `scripts/commands/cmd_run.py:185` — Machine-local setters mutate self.config before an unguarded write_local_conf, unlike _set_mode
+- [x] **#71** `scripts/commands/cmd_run.py:185` — Machine-local setters mutate self.config before an unguarded write_local_conf, unlike _set_mode
   - _Fix:_ Mirror _set_mode: wrap each write_local_conf in try/except OSError and emit a 'could not persist to local.conf' warning rather than letting it bubble to the generic dispatcher handler.
-- [ ] **#76** `scripts/commands/cmd_source.py:1007` — Audit suggests a non-runnable `source build (pool)` remediation command
+- [x] **#76** `scripts/commands/cmd_source.py:1007` — Audit suggests a non-runnable `source build (pool)` remediation command
   - _Fix:_ Map 'pool' to the actual command that builds pool extras (e.g. `source build all`) or annotate explicitly that pool sources are only built via `source build all`.
-- [ ] **#96** `scripts/coord/publish.py:1366-1402` — Step 6c obsolescence can re-assert ownership over a file Step 6b just deprecated
+- [x] **#96** `scripts/coord/publish.py:1366-1402` — Step 6c obsolescence can re-assert ownership over a file Step 6b just deprecated
   - _Fix:_ Exclude filenames deprecated in this same publish from the 6c obsolescence input (or merge the 6b deprecation claims into `_view` so they win the fold), so a released file is not re-owned as an obsolete prune-candidate.
-- [ ] **#106** `scripts/coord/store.py:96` — append_claim ignores os.write return value, defeating the 'complete line in one write()' atomicity invariant on a short write
+- [x] **#106** `scripts/coord/store.py:96` — append_claim ignores os.write return value, defeating the 'complete line in one write()' atomicity invariant on a short write
   - _Fix:_ Loop os.write until len(_line) bytes are written (write-all helper), or write to a temp file and os.rename for true atomicity; raise on short write so disk-full surfaces instead of producing a torn line.
-- [ ] **#108** `scripts/coord/transport.py:119-134` — _run_rsync_streaming drops the final un-newline-terminated line from the failure tail
+- [x] **#108** `scripts/coord/transport.py:119-134` — _run_rsync_streaming drops the final un-newline-terminated line from the failure tail
   - _Fix:_ After `_proc.wait()`, if `_buf.strip()` is non-empty and its first token is not a digit, append `_buf.strip().decode('utf-8','replace')` to `_tail` before building the detail string.
-- [ ] **#111** `scripts/dep_drift.py:326-327` — Hard-dep violation message renders empty constraint as '( )'
+- [x] **#111** `scripts/dep_drift.py:326-327` — Hard-dep violation message renders empty constraint as '( )'
   - _Fix:_ Mirror the line-333 conditional: emit `{_dep[0]}` alone when `_dep[2]` is empty, else `{_dep[0]} ({_dep[2]} {_dep[1]})`.
-- [ ] **#117** `scripts/diag_installer_status.py:108-114` — Char position reported is into the joined value, not the source line
+- [x] **#117** `scripts/diag_installer_status.py:108-114` — Char position reported is into the joined value, not the source line
   - _Fix:_ Track position per raw line, or report the line number alongside the offset.
-- [ ] **#120** `scripts/disk_image.py:586-605` — Sparse _raw intermediate is never removed on failure paths
+- [x] **#120** `scripts/disk_image.py:586-605` — Sparse _raw intermediate is never removed on failure paths
   - _Fix:_ In the finally block, attempt `os.unlink(_raw)` (guarded by os.path.exists / OSError) when the function did not reach a successful convert, or document that the raw is intentionally retained for post-mortem.
-- [ ] **#121** `scripts/disk_image.py:569-578` — e2fsck exit code 3 (errors-corrected + reboot-bit) falls through both branches silently
+- [x] **#121** `scripts/disk_image.py:569-578` — e2fsck exit code 3 (errors-corrected + reboot-bit) falls through both branches silently
   - _Fix:_ Treat the low bits explicitly: `if _fsck.returncode & 0b11 and _fsck.returncode < 4` (or `in (1,2,3)`) for the cleaned case before the `>= 4` serious check.
-- [ ] **#126** `scripts/fork_mirror.py:942` — _write_release hardcodes 'Architectures: amd64 all' regardless of buildconfig.arch
+- [x] **#126** `scripts/fork_mirror.py:942` — _write_release hardcodes 'Architectures: amd64 all' regardless of buildconfig.arch
   - _Fix:_ Pass build_arch into _write_release and emit f'Architectures: {build_arch} all'.
 - [ ] **#127** `scripts/identity_scan.py:270-283` — Redirect/pipe attached to a token without a space is treated as a package name
   - _Fix:_ Strip leading redirect operators from each token (e.g. break when `_t` starts with any of < > | & after stripping leading digits), or split tokens on embedded redirect chars before the per-token classification.
-- [ ] **#143** `scripts/mirror.py:729-735` — Read-only/status helpers trigger a file WRITE via the legacy-migration path
+- [x] **#143** `scripts/mirror.py:729-735` — Read-only/status helpers trigger a file WRITE via the legacy-migration path
   - _Fix:_ Either document the one-time migration write explicitly at each read-named caller, or split migration into an explicit step invoked only from a write/setup path so status/read helpers never write.
-- [ ] **#145** `scripts/onboarding.py:363` — set_registration return value ignored in federation flow
+- [x] **#145** `scripts/onboarding.py:363` — set_registration return value ignored in federation flow
   - _Fix:_ Capture the return and, if False, console.print an error and `return False` so the wizard stays un-configured and re-runnable, consistent with the other guarded steps.
-- [ ] **#165** `scripts/remote_localmirror.py:202` — total_size:null crashes here but is guarded one line above
+- [x] **#165** `scripts/remote_localmirror.py:202` — total_size:null crashes here but is guarded one line above
   - _Fix:_ Make line 202 match line 187: `_cum_total = int(plan.get('total_size', 0) or 0) or 1`.
-- [ ] **#168** `scripts/remote_orchestrate.py:354-360` — _open_tunnel omits StrictHostKeyChecking=accept-new, diverging from _ssh_base contract
+- [x] **#168** `scripts/remote_orchestrate.py:354-360` — _open_tunnel omits StrictHostKeyChecking=accept-new, diverging from _ssh_base contract
   - _Fix:_ Add '-o','StrictHostKeyChecking=accept-new' to the _open_tunnel argv (or build it from a shared helper) so all ssh sites are consistent with the _ssh_base docstring.
-- [ ] **#171** `scripts/repo_audit.py:168-210` — scan_repo_state docstring + ValueError message omit the valid 'main-udeb' label it explicitly supports
+- [x] **#171** `scripts/repo_audit.py:168-210` — scan_repo_state docstring + ValueError message omit the valid 'main-udeb' label it explicitly supports
   - _Fix:_ Update the docstring label list and the ValueError text to include 'main-udeb' (ideally derive the message from utils.deb_dir_for's accepted keys to avoid future drift).
-- [ ] **#172** `scripts/repo_audit.py:1040-1042` — audit_dep_closure docstring claims weak list holds 4-tuples; it emits 3-tuples
+- [x] **#172** `scripts/repo_audit.py:1040-1042` — audit_dep_closure docstring claims weak list holds 4-tuples; it emits 3-tuples
   - _Fix:_ Reword the docstring to state unresolved is (pkg, field, relation_str, why) 4-tuples and weak is (pkg, field, relation_str) 3-tuples.
-- [ ] **#173** `scripts/sbom.py:16,98` — "empty hash for pristine sources" is false — pristine emits sha256-of-empty constant
+- [x] **#173** `scripts/sbom.py:16,98` — "empty hash for pristine sources" is false — pristine emits sha256-of-empty constant
   - _Fix:_ Either set athena:patch-set-hash to '' when not _patch_files, or fix the docstring/comment to say pristine sources carry the canonical empty-digest sha256 rather than an empty string.
-- [ ] **#176** `scripts/select_packages.py:51-52, 130-131` — POOL_GROUP '(pool)' CAN collide with a real [(pool)] section, contrary to the inline claim
+- [x] **#176** `scripts/select_packages.py:51-52, 130-131` — POOL_GROUP '(pool)' CAN collide with a real [(pool)] section, contrary to the inline claim
   - _Fix:_ Either validate/reject a real group literally named '(pool)' in _load_model (raise or rename), or detect the clash before the line-130 overwrite and warn; at minimum correct the comment to state the collision is possible and unhandled.
-- [ ] **#179** `scripts/selection_lock.py:91-93` — Transient OS read errors are reported as STATUS_MALFORMED (treated as tamper)
+- [x] **#179** `scripts/selection_lock.py:91-93` — Transient OS read errors are reported as STATUS_MALFORMED (treated as tamper)
   - _Fix:_ Distinguish transient I/O from corruption: either re-raise/propagate the OSError (fail loudly without re-baseline guidance) or add a STATUS_IOERROR that callers treat as retryable rather than as untrusted/tamper. At minimum, do not steer th
-- [ ] **#180** `scripts/selection_lock.py:352-356` — classify() returns two dicts that alias the SAME empty set objects for added/removed
+- [x] **#180** `scripts/selection_lock.py:352-356` — classify() returns two dicts that alias the SAME empty set objects for added/removed
   - _Fix:_ Return freshly constructed dicts with independent sets, e.g. `return ACTION_BOOTSTRAP, {'bins': set(), 'srcs': set()}, {'bins': set(), 'srcs': set()}` (or a `_fresh_empty()` helper), instead of two shallow copies of one shared template.
-- [ ] **#186** `scripts/tui/dispatcher.py:238-243` — console_mark() can raise CancelledError on shutdown instead of returning 0
+- [x] **#186** `scripts/tui/dispatcher.py:238-243` — console_mark() can raise CancelledError on shutdown instead of returning 0
   - _Fix:_ Catch CancelledError alongside _FutureTimeout in the console_mark() loop and return 0 (and similarly decide/ document the request_prompt() cancel path).
 - [ ] **#189** `scripts/tui/facade.py:164-168` — PROMPT_OPTIONS under stdin EOF returns an unvalidated (empty) answer, crashing consumers that index by it
   - _Fix:_ On the EOF branch, treat PROMPT_OPTIONS like a hard abort: either raise a clean controlled error (e.g. Exit/abort) or return a sentinel the consumers check, rather than returning an out-of-range string that callers feed to int()/list-index.
-- [ ] **#191** `scripts/tui/render.py:283-293` — Console widgets float under content instead of anchoring to bottom rows when buffer is short
+- [x] **#191** `scripts/tui/render.py:283-293` — Console widgets float under content instead of anchoring to bottom rows when buffer is short
   - _Fix:_ If widgets must occupy the bottom band, pad `row` up to max_y - widget_rows before drawing widget_strs (e.g. row = max(row, max_y - widget_rows)), or draw widgets at explicit rows max_y-widget_rows+i.
-- [ ] **#208** `scripts/webapi/auth.py:18` — Comment '32 bytes → 64 hex chars' is wrong for token_urlsafe
+- [x] **#208** `scripts/webapi/auth.py:18` — Comment '32 bytes → 64 hex chars' is wrong for token_urlsafe
   - _Fix:_ Reword to '32 bytes → ~43 url-safe base64 chars' to match token_urlsafe.
-- [ ] **#210** `scripts/webapi/jobs.py:72,85-87` — _jobs dict grows unbounded for the life of the API session
+- [x] **#210** `scripts/webapi/jobs.py:72,85-87` — _jobs dict grows unbounded for the life of the API session
   - _Fix:_ Cap retained completed jobs (e.g. ring buffer / prune done|error jobs older than N or beyond a max count) under _jobs_lock after each job finishes.
-- [ ] **#214** `scripts/webapi/readers.py:170` — read_artifact tail 'truncated' compares byte size to character-length sum
+- [x] **#214** `scripts/webapi/readers.py:170` — read_artifact tail 'truncated' compares byte size to character-length sum
   - _Fix:_ Track whether _tail_lines actually hit file start (pos>0 when the loop exited) and report truncated from that, or compare byte counts consistently (sum of len(_l.encode())+1).
-- [ ] **#215** `scripts/webapi/readers.py:348-349, 361` — buildlog/vbuildlog opened without a context manager in progress()
+- [x] **#215** `scripts/webapi/readers.py:348-349, 361` — buildlog/vbuildlog opened without a context manager in progress()
   - _Fix:_ Wrap both reads in `with open(...) as _fh: _txt = _fh.read()` to match the rest of the module.
 
 ## Tier 3 — Real but low-reachability / overstated (partial verdicts)
 
-- [ ] **#21** `scripts/arch_filter.py:110-134` — check=True makes one bad arch abort the whole map, silently disabling the filter for the process _(partial: real but not reachable)_
+- [x] **#21** `scripts/arch_filter.py:110-134` — check=True makes one bad arch abort the whole map, silently disabling the filter for the process _(partial: real but not reachable)_
   - _Fix:_ Wrap only the inner per-arch `dpkg-architecture -a` call in its own try/except and `continue` on failure, so a single arch error degrades that arch, not the entire filter.
-- [ ] **#23** `scripts/build.py:713` — patch_list sort key (x[:5]) diverges from buildcontainer's full-name sort feeding an order-sensitive hash _(partial: real but not reachable)_
+- [x] **#23** `scripts/build.py:713` — patch_list sort key (x[:5]) diverges from buildcontainer's full-name sort feeding an order-sensitive hash _(partial: real but not reachable)_
   - _Fix:_ Sort by the full filename: `_src.patch_list = sorted(_patch_files)` (drop the key=lambda x: x[:5]) so build.py and buildcontainer.py:1052 produce identical ordering and matching hashes. Full-name sort still preserves the numeric-prefix orde
-- [ ] **#26** `scripts/build.py:1600-1678` — cmd_container_remote_add leaks the copied SSH key when add_remote fails _(partial: real but not reachable)_
+- [x] **#26** `scripts/build.py:1600-1678` — cmd_container_remote_add leaks the copied SSH key when add_remote fails _(partial: real but not reachable)_
   - _Fix:_ On the add_remote failure path, best-effort os.remove(_keydst) (mirroring delete's cleanup) before returning.
-- [ ] **#36** `scripts/buildlog.py:89-124` — Accumulation methods format values outside the try/except, contradicting the 'never propagates' invariant _(partial: real but not reachable)_
+- [x] **#36** `scripts/buildlog.py:89-124` — Accumulation methods format values outside the try/except, contradicting the 'never propagates' invariant _(partial: real but not reachable)_
   - _Fix:_ Either wrap the format calls in the same best-effort try (e.g. format inside _append-protected helpers) or soften the docstring claim to 'best-effort given normally-stringable values'.
-- [ ] **#40** `scripts/bump.py:785` — transposed_version docstring example contradicts actual code + its own test _(partial: real but overstated)_
+- [x] **#40** `scripts/bump.py:785` — transposed_version docstring example contradicts actual code + its own test _(partial: real but overstated)_
   - _Fix:_ Change the line-785 example to `transposed_version('1.0-2', 'asg', 1, force_bn=1) → '1.0-2+asg1u0+b1'` to match _append_patch_force and the existing tests.
-- [ ] **#55** `scripts/commands/cmd_audit.py:785-800` — Stale-files row colors green (ok=True) when only malformed (corrupt) .debs are present _(partial: real but overstated)_
+- [x] **#55** `scripts/commands/cmd_audit.py:785-800` — Stale-files row colors green (ok=True) when only malformed (corrupt) .debs are present _(partial: real but overstated)_
   - _Fix:_ Make the row consistent with the gate: `ok=(_n_stale == 0 and not _malformed)`, so malformed artifacts color the row amber the way the preflight gate counts them.
-- [ ] **#72** `scripts/commands/cmd_snapshot.py:269-310` — `_snapshot_select_force` omits the eager build.conf reconcile its forward-only sibling does, leaving the visible config stale _(partial: real but overstated)_
+- [x] **#72** `scripts/commands/cmd_snapshot.py:269-310` — `_snapshot_select_force` omits the eager build.conf reconcile its forward-only sibling does, leaving the visible config stale _(partial: real but overstated)_
   - _Fix:_ After `append_snapshot_history` in `_snapshot_select_force`, call `_synced = utils.reconcile_snapshot_pin(self.config)` and surface it in the confirmation line, mirroring `_set_snapshot_pin` (so backtracks keep build.conf honest immediately
-- [ ] **#75** `scripts/commands/cmd_source.py:1413-1417` — `.disabled` marker text leaves literal `{pkg}` unexpanded (missing f-prefix) _(partial: real but overstated)_
+- [x] **#75** `scripts/commands/cmd_source.py:1413-1417` — `.disabled` marker text leaves literal `{pkg}` unexpanded (missing f-prefix) _(partial: real but overstated)_
   - _Fix:_ Add the `f` prefix to the line 1416 fragment: `f'run `source fork {pkg} enabled` to '` (or make the whole write a single f-string / .format).
-- [ ] **#78** `scripts/commands/cmd_supply_chain.py:242` — artifact lookup omits the `or {}` fallback used everywhere else → AttributeError on null artifact _(partial: real but not reachable)_
+- [x] **#78** `scripts/commands/cmd_supply_chain.py:242` — artifact lookup omits the `or {}` fallback used everywhere else → AttributeError on null artifact _(partial: real but not reachable)_
   - _Fix:_ Change line 242 to `len({(_m.get('artifact', {}) or {}).get('name', '') for _m in _matches})` to match the `or {}` idiom at lines 237/260/261.
 - [ ] **#80** `scripts/commands/cmd_tunnel.py:299-308, 354, 367, 449-452` — Non-integer [Build] VERSION fallback ships +deb-named debs but records pristine built_version (inconsistent record + misleading message) _(partial: real but overstated)_
   - _Fix:_ In the `_release is None` branch, record built_version equal to the actual (un-transposed) upstream version and skip the '→ pristine' arrow, or hard-fail the tunnel when VERSION is not an integer rather than silently shipping upstream-named
-- [ ] **#88** `scripts/coord/head.py:70-103` — write_coord_head is non-atomic: a transient gpg failure destroys the previously-valid signed head _(partial: real but overstated)_
+- [x] **#88** `scripts/coord/head.py:70-103` — write_coord_head is non-atomic: a transient gpg failure destroys the previously-valid signed head _(partial: real but overstated)_
   - _Fix:_ Write JSON to a temp file in coord_dir, sign the temp, then os.replace() both the .json and .sig into place only after the signature succeeds — so a sign failure leaves the prior good head untouched.
 - [ ] **#92** `scripts/coord/policy.py:32` — ORPHAN_WARN_AFTER_DAYS documents a 14-day INFO grace period that is never implemented; orphans always WARN immediately _(partial: real but overstated)_
   - _Fix:_ Either (a) implement the threshold in reconcile.py C-1: stat the claim/record mtime, emit INFO when age < ORPHAN_WARN_AFTER_DAYS*86400 and WARN otherwise, or (b) if immediate WARN is intended, delete the constant and rewrite the policy.py c
-- [ ] **#95** `scripts/coord/publish.py:157-158` — Drift detection treats whole-binary pool absence as drift, bypassing the pulled_from no-reclaim guard _(partial: real but overstated)_
+- [x] **#95** `scripts/coord/publish.py:157-158` — Drift detection treats whole-binary pool absence as drift, bypassing the pulled_from no-reclaim guard _(partial: real but overstated)_
   - _Fix:_ Require actual presence before declaring drift: `_latest = _pool_latest.get(bn); _latest is not None and _fn != _latest`. A fully-absent declared binary then no longer flips drift (owned sources still drop it via the push-fail path), and a 
 - [ ] **#98** `scripts/coord/reconcile.py:130-203` — audit_local hash-verifies only ONE binary per multi-binary source (lossy projection) _(partial: real but not reachable)_
   - _Fix:_ Drive C-1/C-2/C-3 from a filename-keyed live view (e.g. store.iter_live_claims_by_filename or project_owners filtered to builder_id) instead of project_live_claims, so every binary filename is hash-verified and accounted for.
-- [ ] **#107** `scripts/coord/store.py:43-103` — No atomic seq allocation: concurrent same-builder appends can duplicate seq _(partial: real but not reachable)_
+- [x] **#107** `scripts/coord/store.py:43-103` — No atomic seq allocation: concurrent same-builder appends can duplicate seq _(partial: real but not reachable)_
   - _Fix:_ Allocate seq under the same flock inside append_claim (re-read max_seq while holding LOCK_EX and stamp claim['seq']), or document that concurrent same-builder publish is unsupported and enforce a single-publisher lock at the command layer.
-- [ ] **#114** `scripts/diag_installer_status.py:142` — errors='replace' defeats the script's own non-ASCII byte detection _(partial: real but overstated)_
+- [x] **#114** `scripts/diag_installer_status.py:142` — errors='replace' defeats the script's own non-ASCII byte detection _(partial: real but overstated)_
   - _Fix:_ Read in binary ('rb') and decode latin-1 (1:1 byte->codepoint) so ord(_c) is the true byte value; or report the original byte offset/value explicitly.
-- [ ] **#116** `scripts/diag_installer_status.py:128-132` — EMPTY-VALUE heuristic flags legitimately empty dpkg fields _(partial: real but overstated)_
+- [x] **#116** `scripts/diag_installer_status.py:128-132` — EMPTY-VALUE heuristic flags legitimately empty dpkg fields _(partial: real but overstated)_
   - _Fix:_ Document as heuristic in output, or restrict EMPTY-VALUE to fields known to require values (Package, Version, Description synopsis).
-- [ ] **#130** `scripts/installer_chroot.py:259-260` — _resolve_udeb_files docstring cites strip_build_version but code uses normalize_repo_filename + find_matching_artifact _(partial: real but not reachable)_
+- [x] **#130** `scripts/installer_chroot.py:259-260` — _resolve_udeb_files docstring cites strip_build_version but code uses normalize_repo_filename + find_matching_artifact _(partial: real but not reachable)_
   - _Fix:_ Update the docstring to reference normalize_repo_filename (+bN/+debNuN strip) and find_matching_artifact (pristine-or-+asg-stamp match).
-- [ ] **#133** `scripts/iso_installer.py:871-872` — deb_whitelist=None silently bypasses exclude_names (superseded-fork exclusion) _(partial: real but not reachable)_
+- [x] **#133** `scripts/iso_installer.py:871-872` — deb_whitelist=None silently bypasses exclude_names (superseded-fork exclusion) _(partial: real but not reachable)_
   - _Fix:_ Apply the exclude_names filter to the legacy path too: in the `deb_whitelist is None` branch, drop entries whose parsed package name is in exclude_names before returning, rather than short-circuiting past the exclusion logic.
-- [ ] **#139** `scripts/local_mirror.py:280` — Release hardcodes `Architectures: amd64 all` _(partial: real but not reachable)_
+- [x] **#139** `scripts/local_mirror.py:280` — Release hardcodes `Architectures: amd64 all` _(partial: real but not reachable)_
   - _Fix:_ Derive the arch line from the host/dpkg arch (or scan the present .deb Architecture fields) instead of hardcoding amd64.
-- [ ] **#144** `scripts/onboarding.py:184-191` — Jobs input silently clamped/defaulted, diverging from `set jobs` which rejects _(partial: real but overstated)_
+- [x] **#144** `scripts/onboarding.py:184-191` — Jobs input silently clamped/defaulted, diverging from `set jobs` which rejects _(partial: real but overstated)_
   - _Fix:_ Mirror _set_jobs: on non-int or out-of-range, print a one-line warning (e.g. ' jobs clamped to 8 (docker-py pool limit)') before persisting, so the wizard and `set jobs` behave consistently.
-- [ ] **#148** `scripts/or_resolve.py:83-104` — seeds iterated twice — a generator yields an empty closure on the default (real_pkgs=None) path _(partial: real but not reachable)_
+- [x] **#148** `scripts/or_resolve.py:83-104` — seeds iterated twice — a generator yields an empty closure on the default (real_pkgs=None) path _(partial: real but not reachable)_
   - _Fix:_ Materialize once at the top of resolve_closure: `_seeds = list(seeds)` and use `_seeds` for both _infer_real and the _pending comprehension (or narrow the annotation to Sequence[str]).
-- [ ] **#149** `scripts/or_resolve.py:33, 121-134` — Docstring claims 'minimal closure' but the per-group min() tie-break is not minimal _(partial: real but overstated)_
+- [x] **#149** `scripts/or_resolve.py:33, 121-134` — Docstring claims 'minimal closure' but the per-group min() tie-break is not minimal _(partial: real but overstated)_
   - _Fix:_ Reword the docstring to claim 'a deterministic, order-independent closure' rather than 'the minimal closure', or change Pass B to prefer an alternative that satisfies the most outstanding groups before falling back to first-declared.
-- [ ] **#159** `scripts/remote_agent.py:106-124` — read_log next-offset uses pre-read getsize, not frm+len(data) → duplicate log bytes on concurrent growth _(partial: real but overstated)_
+- [x] **#159** `scripts/remote_agent.py:106-124` — read_log next-offset uses pre-read getsize, not frm+len(data) → duplicate log bytes on concurrent growth _(partial: real but overstated)_
   - _Fix:_ Return `(_data, frm + len(_data), _size)` (or set `_size = frm + len(_data)` after the read). This is lossless and overlap-free regardless of concurrent growth, and still satisfies test_remote_agent_helpers_name_and_log_offsets (frm+len==12
-- [ ] **#160** `scripts/remote_agent.py:289-290 / 368-374` — scripts/remote_agent.py:289-290 / 368-374 — Empty token fails OPEN — token-file read error yields an unauthenticated agent _(partial: real but overstated)_
+- [x] **#160** `scripts/remote_agent.py:289-290 / 368-374` — scripts/remote_agent.py:289-290 / 368-374 — Empty token fails OPEN — token-file read error yields an unauthenticated agent _(partial: real but overstated)_
   - _Fix:_ Fail closed: if the resolved token is empty, either refuse to start the server (sys.exit non-zero) or make `_auth_ok` return False whenever `self._srv().token == ''`.
-- [ ] **#177** `scripts/select_packages.py:501-504` — _save writes pool.list unconditionally, creating a spurious empty file that discard cannot roll back _(partial: real but not reachable)_
+- [x] **#177** `scripts/select_packages.py:501-504` — _save writes pool.list unconditionally, creating a spurious empty file that discard cannot roll back _(partial: real but not reachable)_
   - _Fix:_ Skip the pool.list write when the pool tier is empty AND the file does not already exist, or have the discard path in cmd_cache remove files it created; track created-vs-modified in the backup map.
-- [ ] **#181** `scripts/signing.py:158-163` — format_gpg_time leaks OverflowError on out-of-range epoch (only ValueError/OSError caught) _(partial: real but not reachable)_
+- [x] **#181** `scripts/signing.py:158-163` — format_gpg_time leaks OverflowError on out-of-range epoch (only ValueError/OSError caught) _(partial: real but not reachable)_
   - _Fix:_ Add OverflowError to the except tuple: `except (ValueError, OSError, OverflowError): return s`.
-- [ ] **#184** `scripts/tasksel_desc.py:28` — _sanitize keeps non-whitespace ASCII control chars (ord 0-8, 11, 14-31) _(partial: real but not reachable)_
+- [x] **#184** `scripts/tasksel_desc.py:28` — _sanitize keeps non-whitespace ASCII control chars (ord 0-8, 11, 14-31) _(partial: real but not reachable)_
   - _Fix:_ Tighten the keep-condition to printable ASCII, e.g. drop any `_ch` where `ord(_ch) < 32 or ord(_ch) > 126`, before the whitespace-collapse.
-- [ ] **#194** `scripts/tui/tui.py:298-306` — SystemExit with a non-int code is mapped to exit 0 (success), masking failure _(partial: real but not reachable)_
+- [x] **#194** `scripts/tui/tui.py:298-306` — SystemExit with a non-int code is mapped to exit 0 (success), masking failure _(partial: real but not reachable)_
   - _Fix:_ Mirror CPython semantics: treat non-None, non-int code as 1 (failure) rather than 0, e.g. `code = _se.code; self.exit(code if isinstance(code,int) else (0 if code is None else 1))`.
-- [ ] **#196** `scripts/tui/widgets.py:96-103` — set_max lowering below current _value overflows the fixed-width bar _(partial: real but not reachable)_
+- [x] **#196** `scripts/tui/widgets.py:96-103` — set_max lowering below current _value overflows the fixed-width bar _(partial: real but not reachable)_
   - _Fix:_ Clamp in set_max (self._max = max(1, value, self._value)) or clamp filled = min(filled, self._bar_width) in __str__.
-- [ ] **#205** `scripts/webapi/__init__.py:214-224` — SSE stream can drop the final output line(s) due to drain-then-state ordering _(partial: real but overstated)_
+- [x] **#205** `scripts/webapi/__init__.py:214-224` — SSE stream can drop the final output line(s) due to drain-then-state ordering _(partial: real but overstated)_
   - _Fix:_ After detecting a terminal state, perform one final drain before emitting the end event, e.g. inside the `if _job.state in ('done','error')` block re-read `_out = _job.output` and `while _sent < len(_out): yield ...; _sent += 1` before the 
-- [ ] **#207** `scripts/webapi/auth.py:34-38` — Concurrent first-start loser raises instead of getting the winner's key _(partial: real but overstated)_
+- [x] **#207** `scripts/webapi/auth.py:34-38` — Concurrent first-start loser raises instead of getting the winner's key _(partial: real but overstated)_
   - _Fix:_ On FileExistsError, retry load_api_key in a short bounded poll loop (e.g. a few attempts with tiny sleep) until a non-empty key appears before giving up and raising; or write to a temp file and os.rename into place so the file is never obse
-- [ ] **#213** `scripts/webapi/readers.py:303-330` — progress() completion rate/ETA counts every record touched in the window, not just completed builds _(partial: real but overstated)_
+- [x] **#213** `scripts/webapi/readers.py:303-330` — progress() completion rate/ETA counts every record touched in the window, not just completed builds _(partial: real but overstated)_
   - _Fix:_ Restrict the rate window to terminal/success phases (only count mtimes of records whose phase indicates completion, e.g. 'done'/'built'), not all records.
 
 ## Tier 4 — Cleanup (dead-code, redundancy, optimization)
 
 - [ ] **#20** `scripts/arch_filter.py:110-119` — Map build spawns 206 dpkg-architecture subprocesses (~4.4s) on first use, per process
   - _Fix:_ Derive the triplet map by parsing /usr/share/dpkg/tupletable (joined with the already-read cputable) instead of forking dpkg-architecture once per arch; fall back to the subprocess path only if the table file is absent.
-- [ ] **#24** `scripts/build.py:1125` — Redundant re-import of local_mirror inside cmd_init_remote_container
+- [x] **#24** `scripts/build.py:1125` — Redundant re-import of local_mirror inside cmd_init_remote_container
   - _Fix:_ Delete line 1125; the module-level import already binds the name.
 - [ ] **#25** `scripts/build.py:563` — cmd_clean_buildroot bypasses the documented sudo funnel and never scrubs the password
   - _Fix:_ Route cmd_clean_buildroot through _collect_validated_sudo_password (or at minimum scrub _password before return), and update the funnel docstring to reflect the two intentional bypasses.
@@ -224,17 +235,17 @@ found them not reachable on a live path):
   - _Fix:_ Either have local_mirror feed compute_build_closure the already-arch/profile-filtered groups (reuse Source.build_depends output), or extend _pick/_rels to honour rel['arch'] against the target arch and rel['restrictions'] against active pro
 - [ ] **#31** `scripts/build_closure.py:106` — Provides set rebuilt per-relation inside the install-closure hot loop
   - _Fix:_ Convert provides_index values to sets once at the top of compute_build_closure/_install_expand (or accept a pre-set-ified index), then intersect directly without per-iteration set() construction.
-- [ ] **#33** `scripts/buildcontainer.py:142, 174-175` — self.build_path / self.build_profiles / self.build_options stored but never read
+- [x] **#33** `scripts/buildcontainer.py:142, 174-175` — self.build_path / self.build_profiles / self.build_options stored but never read
   - _Fix:_ Drop the three unused instance attributes (or, if kept for API symmetry, add a comment noting they are intentionally unused); self.repo_path is also only referenced in comments but is harmless to keep.
 - [ ] **#38** `scripts/buildsystem.py:83-104` — sudo env-var pickup + prompt + validation duplicated verbatim in __init__ and for_iso
   - _Fix:_ Extract a private staticmethod/helper on BuildSystem (e.g. `_collect_and_validate_sudo()`) and call it from both __init__ and for_iso so the env pickup, prompt, and validation live in one place.
-- [ ] **#39** `scripts/buildsystem.py:83` — Redundant `import os as _os` shadows the module-level `os` import
+- [x] **#39** `scripts/buildsystem.py:83` — Redundant `import os as _os` shadows the module-level `os` import
   - _Fix:_ Drop the two `import os as _os` lines and call `os.environ.pop('ATHENA_SUDO_PASSWORD', None)` directly.
 - [ ] **#41** `scripts/bump.py:381-491, 812-887` — strip_nmu_from_control_text and transpose_control_text duplicate ~50 lines of field-walk/X-field/sibling-idiom logic _(partial: real but overstated)_
   - _Fix:_ Extract the shared scaffold into one helper parameterized by the per-version rewrite callable (e.g. `_rewrite_control_text(content, version_op)`), and have both public functions pass strip_nmu_suffix / partial(transpose, prefix, release).
 - [ ] **#44** `scripts/cache.py:158, 161-162` — release_info / pkg_list / src_list initialised but never populated or read
   - _Fix:_ Delete the three unused attribute initialisations (and the corresponding test stub lines) to remove confusion about a cache 'package list' that is never built.
-- [ ] **#45** `scripts/cache.py:86` — Cache._VALID_CONSTRAINTS class attribute is unused
+- [x] **#45** `scripts/cache.py:86` — Cache._VALID_CONSTRAINTS class attribute is unused
   - _Fix:_ Remove the unused class attribute (and its comment), or have _lookup_packages reference it if a single source of truth on Cache is wanted.
 - [ ] **#46** `scripts/cache.py:854-893, 919-938` — Fork-source-drift audit duplicates the collision-gate comparison
   - _Fix:_ Extract a single helper `_dropped_entries_at_or_above_fork(drops, fork_versions_for(name))` returning the offending tuples, and have both the advisory source audit and the fatal binary/udeb gate call it.
@@ -272,7 +283,7 @@ found them not reachable on a live path):
   - _Fix:_ In the homedir-missing branch, also unlink the .sig (or factor a single _scrub() helper removing both _path and _sig, matching repo_audit) so failures never leave a dangling signature.
 - [ ] **#91** `scripts/coord/identity.py:217-235` — verify_claim_against_keyring is never called; real read-time verification reimplements it inline
   - _Fix:_ Either delete verify_claim_against_keyring (and fix the store.py:14 docstring to reference the inline read_all_claims path), or refactor read_all_claims/read_builder_claims to call it so the single keyring+revoked+verify policy lives in one
-- [ ] **#93** `scripts/coord/policy.py:41` — TUNNEL_REPUBLISH_OK is an unconsumed constant; its documented 'audit should flag' safety belt does not exist
+- [x] **#93** `scripts/coord/policy.py:41` — TUNNEL_REPUBLISH_OK is an unconsumed constant; its documented 'audit should flag' safety belt does not exist
   - _Fix:_ Remove the constant and its comment, or wire it into the tunnel/republished_from audit path it claims to govern. At minimum stop documenting behavior that no code performs.
 - [ ] **#94** `scripts/coord/policy.py:10` — Module docstring references a COORD_HEAD_FRESHNESS knob that is not defined in the file _(partial: real but overstated)_
   - _Fix:_ Update the docstring to name the real knob (COORD_HEAD_MAX_AGE_SECONDS) or drop the stale COORD_HEAD_FRESHNESS line.
@@ -282,7 +293,7 @@ found them not reachable on a live path):
   - _Fix:_ Either wire these three into a `coord audit` command (and fix finding #1 first) or mark them explicitly as staged-for-P3 primitives; correct the stale 'cmd_coord_audit (P1 wired)' docstring claim on line 24.
 - [ ] **#105** `scripts/coord/store.py:265-277` — Cross-builder merge + conflict-key branch in project_live_claims is never reached (only ever called single-builder) and is untested
   - _Fix:_ Either drop/guard the cross-builder branch with a comment that no caller passes >1 builder, or add a multi-builder test asserting the conflict-key shape so the documented behavior is pinned before any future multi-builder caller relies on i
-- [ ] **#109** `scripts/dep_drift.py:13-14, 74-76` — Vestigial mixin type stubs and stale module docstring
+- [x] **#109** `scripts/dep_drift.py:13-14, 74-76` — Vestigial mixin type stubs and stale module docstring
   - _Fix:_ Drop the unused `_dir_repo`, `_config`, and `strip_build_version` stubs (or replace with `_dir_repo_main`/`normalize_repo_filename`, which are the real dependencies) and update the docstring lines 13-14 to name the attributes actually used.
 - [ ] **#112** `scripts/dependencytree.py:1229-1253` — __getstate__/__setstate__ pickle support is unreachable (resume layer removed)
   - _Fix:_ Either delete __getstate__/__setstate__ and the pickle-safety comments, or add a regression test that round-trips a DependencyTree so the dormant code is exercised and stays correct if revived.
@@ -314,7 +325,7 @@ found them not reachable on a live path):
   - _Fix:_ Hoist `import apt_pkg` and a single `apt_pkg.init_system()` to the top of project_post_publish_state (before the builder/claims loops), matching the pattern already used in audit_closure_ledger.
 - [ ] **#141** `scripts/mirror.py:832-839` — read_mirror_state reloads + HMAC-verifies the entire mirror.conf on every call; callers invoke it in O(mirrors) loops
   - _Fix:_ Add a thin helper that calls load_mirror_conf once and iterates `_doc['mirrors']`, and have the loop-based functions (all_mirror_urls, all_mirror_neighbour_records, find_mirror_by_url, add_mirror's duplicate-URL scan) use it instead of per-
-- [ ] **#146** `scripts/onboarding.py:172, 502` — Redundant local re-imports of already top-level modules
+- [x] **#146** `scripts/onboarding.py:172, 502` — Redundant local re-imports of already top-level modules
   - _Fix:_ Drop the local re-imports and use the module-level `os` / `utils`.
 - [ ] **#151** `scripts/or_resolve.py:121-134` — Pass B re-scans the whole closure and re-parses every package's OR groups on every outer iteration, pulling at most one group per iteration
   - _Fix:_ Cache per-package or_groups once, and either resolve all currently-unsatisfied groups whose chosen alt doesn't change others in a single pass, or track only groups touched by newly-added packages instead of rescanning the full closure each 
@@ -324,19 +335,19 @@ found them not reachable on a live path):
   - _Fix:_ Extract a single helper that returns normalized (elapsed, pkg, status, version) rows and have both call sites consume it, so coercion rules and the verified-record read are shared and consistent.
 - [ ] **#157** `scripts/release_index.py:96` — Unreachable fallback in _human_size
   - _Fix:_ Drop the dead `return f"{n} B"` line (or keep only if you intend to defend against an empty units tuple, which is not the case here).
-- [ ] **#161** `scripts/remote_agent.py:50` — _TERMINAL set is defined but never referenced
+- [x] **#161** `scripts/remote_agent.py:50` — _TERMINAL set is defined but never referenced
   - _Fix:_ Either delete `_TERMINAL`, or use it in run_build/elsewhere as the single source of terminal-phase truth (and reuse it for the duplicated literal tuples in callers).
 - [ ] **#163** `scripts/remote_build.py:172-175` — Artifact-collection glob duplicated verbatim in remote_agent.py
   - _Fix:_ Expose a shared helper in remote_build.py, e.g. `def collect_outputs(out_dir) -> list[str]` returning the sorted basenames, and call it from both main() and remote_agent.py's post-build block.
 - [ ] **#166** `scripts/remote_localmirror.py:98-99` — 416 'already complete' branch is unreachable given upstream guards
   - _Fix:_ Either drop the dead sub-condition or document it as purely defensive; no functional change needed since the fall-through still returns a sane failure.
-- [ ] **#170** `scripts/repo_audit.py:881, 1043, 1173` — PkgRelation re-imported locally three times despite module-level import
+- [x] **#170** `scripts/repo_audit.py:881, 1043, 1173` — PkgRelation re-imported locally three times despite module-level import
   - _Fix:_ Delete the three function-local 'from debian.deb822 import PkgRelation' lines; the module-level import already covers them.
 - [ ] **#175** `scripts/sbom.py:167-172` — _strip_quotes re-applied to values BuildConfig already quote-strips at load
   - _Fix:_ Drop the redundant _strip_quotes wrapping here (use str()), or add a comment that it is defensive belt-and-suspenders; keep one canonical stripping site.
 - [ ] **#178** `scripts/select_packages.py:123-125, 350` — Redundant re-parsing/re-flattening on the render hot path
   - _Fix:_ Cache the flattened rows and invalidate on model mutation (toggle/add/drop); pass the entry's selected flag into _Row so _format_pkg_row need not re-scan; share one file read between the two parse helpers.
-- [ ] **#182** `scripts/signing.py:114-116` — Unreachable `if not parts: continue` guard in parse_secret_keys_colons
+- [x] **#182** `scripts/signing.py:114-116` — Unreachable `if not parts: continue` guard in parse_secret_keys_colons
   - _Fix:_ Remove the dead `if not parts: continue` lines (cosmetic; no behavior change).
 - [ ] **#183** `scripts/surfaces.py:98-120` — Extras fixpoint rescans the entire closure every round instead of only newly added nodes
   - _Fix:_ Track a `_frontier` of newly added nodes (the union of `_wanted` and the hard-deps added in the inner `while _stack` drain) and scan only `_frontier`'s recommends in the next round, instead of `for _n in _closure`. This is build-time, low-f
@@ -346,7 +357,7 @@ found them not reachable on a live path):
   - _Fix:_ Either add a test asserting ALL_EVENT_TYPES matches the dispatcher._handle isinstance chain (catching a forgotten handler when a new event is added), or drop the list if discovery is not actually needed.
 - [ ] **#190** `scripts/tui/logging_bridge.py:24-29` — _tab_for_logger ignores its `name` argument (always returns 'log')
   - _Fix:_ Either keep the parameter as an intentional interface stub with a comment, or drop the param and inline a 'log' constant; update the stale routing language in the pinning test's docstring so it does not imply _tab_for_logger differentiates 
-- [ ] **#195** `scripts/tui/tui.py:251` — Redundant local `import curses` inside attr_reverse
+- [x] **#195** `scripts/tui/tui.py:251` — Redundant local `import curses` inside attr_reverse
   - _Fix:_ Drop the local `import curses` on line 251 and reference the module-level import.
 - [ ] **#199** `scripts/utils.py:3943,4010` — parse_pkg_list_groups + parse_pkg_list_group_meta re-read the same file and recompute section detection
   - _Fix:_ Either parse once into a combined (groups, meta) structure shared by both call sites, or have the meta parser accept already-read lines, so a single read/scan serves both.
@@ -358,7 +369,7 @@ found them not reachable on a live path):
   - _Fix:_ Remove the `asg_ledger` parameter from both functions and delete the now-unnecessary published_ledger() call in cmd_virtual.py.
 - [ ] **#203** `scripts/virtual_build.py:265-267,1296-1303` — Each dep-relation field is PkgRelation-parsed/serialized up to three times in the full-repo audit
   - _Fix:_ Merge _transpose_relation and _rewrite_sibling_pins into a single parse→mutate→serialize pass (the global pass must stay separate since it runs after dedup).
-- [ ] **#204** `scripts/virtual_build.py:917-933` — `_strip_asg` applied on top of `pristine_base` is a no-op
+- [x] **#204** `scripts/virtual_build.py:917-933` — `_strip_asg` applied on top of `pristine_base` is a no-op
   - _Fix:_ Drop the redundant `_strip_asg(...)` wrapper in _filename_signature; pristine_base already removes the asg layer.
 - [ ] **#209** `scripts/webapi/jobs.py:159-164` — except PromptRequired branch is unreachable; structured prompt_required contract is not delivered _(partial: real but overstated)_
   - _Fix:_ Either re-raise PromptRequired out of _dispatch_one's generic handler (special-case it in cli.py before `except Exception`), or drop the dead except branch here and instead detect the prompt-required condition from the captured ERROR line /
@@ -369,9 +380,9 @@ found them not reachable on a live path):
 
 Version-scheme coverage gaps (verified):
 
-- [ ] **#15** `tests/test_module.py` — Tunnel keep-+bN (missing)
-- [ ] **#16** `tests/test_module.py` — Fork changelog-verbatim no-op (partial)
-- [ ] **#17** `tests/test_module.py` — Sibling '=' pin rewrite carrying +bN (missing)
+- [x] **#15** `tests/test_module.py` — Tunnel keep-+bN (missing)
+- [x] **#16** `tests/test_module.py` — Fork changelog-verbatim no-op (partial)
+- [x] **#17** `tests/test_module.py` — Sibling '=' pin rewrite carrying +bN (missing)
 
 Missing-test findings (medium/low):
 
@@ -442,33 +453,33 @@ Missing-test findings (medium/low):
 
 These were closed on GitHub with the `refuted` label and the verifier's reasoning.
 
-- [ ] **#49** `scripts/chroot.py:763-769` — _compute_install_batches install_set surface-filter branch has no direct test
+- [x] **#49** `scripts/chroot.py:763-769` — _compute_install_batches install_set surface-filter branch has no direct test
   - _Fix:_ Add a test passing install_set explicitly (e.g. a graph where install_set excludes some selected packages) asserting only install_set∩canonical−seed members appear in the batches and that legacy _extras/_group_extras/_pool_extras are NOT re
-- [ ] **#60** `scripts/commands/cmd_build.py:1048` — check 2 counts held/deinstall-marked packages as 'incomplete' (endswith '\tinstall')
+- [x] **#60** `scripts/commands/cmd_build.py:1048` — check 2 counts held/deinstall-marked packages as 'incomplete' (endswith '\tinstall')
   - _Fix:_ Only flag genuinely-incomplete states: e.g. keep packages whose status is not in {install, hold} (held == installed), or parse the second column explicitly via `l.split('\t')` and compare the state token rather than using endswith.
-- [ ] **#89** `scripts/coord/head.py:188-195` — is_fresh expects ISO-8601 for inrelease_date_iso, but the only InRelease Date producer yields RFC2822 — predates check silently disabled
+- [x] **#89** `scripts/coord/head.py:188-195` — is_fresh expects ISO-8601 for inrelease_date_iso, but the only InRelease Date producer yields RFC2822 — predates check silently disabled
   - _Fix:_ Parse the InRelease Date with email.utils.parsedate_to_datetime (RFC2822) before passing in, or have is_fresh accept the raw Date header and parse RFC2822 itself; on a parse failure treat it as a hard fail rather than silently skipping the 
-- [ ] **#102** `scripts/coord/reconcile.py:180-194` — audit_local emits one INFO Finding per unclaimed pool file (unbounded)
+- [x] **#102** `scripts/coord/reconcile.py:180-194` — audit_local emits one INFO Finding per unclaimed pool file (unbounded)
   - _Fix:_ Aggregate unclaimed pool files into a single count-bearing INFO Finding (or cap the per-file emission), rather than one Finding per file.
-- [ ] **#113** `scripts/dependencytree.py:376-380` — resolve_packages re-resolves raw (unstripped) seed names, unlike add_lookahead
+- [x] **#113** `scripts/dependencytree.py:376-380` — resolve_packages re-resolves raw (unstripped) seed names, unlike add_lookahead
   - _Fix:_ Filter/strip the seed list once at the top of resolve_packages (mirror add_lookahead's `if not name or name.isspace(): continue` + strip) before both add_lookahead and the parse_dependency comprehension consume it.
-- [ ] **#123** `scripts/fork_mirror.py:667` — No test covers a fork with an empty/malformed changelog
+- [x] **#123** `scripts/fork_mirror.py:667` — No test covers a fork with an empty/malformed changelog
   - _Fix:_ Add a test that drops a fork tree with debian/control present and an empty (0-byte) debian/changelog, then asserts generate_fork_mirror logs+skips that pkg and does not raise.
-- [ ] **#134** `scripts/iso_installer.py:883-889` — udebs are never version-deduplicated, unlike .debs _(partial: real but overstated)_
+- [x] **#134** `scripts/iso_installer.py:883-889` — udebs are never version-deduplicated, unlike .debs _(partial: real but overstated)_
   - _Fix:_ If pool size or stale-udeb selection matters, run udebs through the same highest-version-per-name dedup as .debs; otherwise document explicitly that multi-version udeb shipping is intentional and relies on apt picking the highest.
-- [ ] **#142** `scripts/mirror.py:1049` — Inconsistent exception scope around apt_pkg.version_compare vs the sibling site _(partial: real but not reachable)_
+- [x] **#142** `scripts/mirror.py:1049` — Inconsistent exception scope around apt_pkg.version_compare vs the sibling site _(partial: real but not reachable)_
   - _Fix:_ Pick one convention for both sites; given the inputs are controlled Debian versions, a narrow `except (SystemError, TypeError, ValueError)` (or a shared helper) applied to both keeps them aligned.
-- [ ] **#150** `scripts/or_resolve.py:55-61, 133-134` — Empty OR group is never satisfiable and crashes with IndexError
+- [x] **#150** `scripts/or_resolve.py:55-61, 133-134` — Empty OR group is never satisfiable and crashes with IndexError
   - _Fix:_ Skip empty groups in _or_groups: `if not isinstance(_d, str) and len(_d): _out.append(tuple(_d))`.
-- [ ] **#154** `scripts/package.py:184` — Priority field not guarded against present-but-None, unlike every other field _(partial: real but not reachable)_
+- [x] **#154** `scripts/package.py:184` — Priority field not guarded against present-but-None, unlike every other field _(partial: real but not reachable)_
   - _Fix:_ Mirror the defensive pattern: `if (self.get('Priority') or '').strip(): self.priority = self['Priority'].strip() else: self.priority = 'optional'`.
-- [ ] **#174** `scripts/sbom.py:135-221` — generate_cdx has no functional test — only a structural source-grep assertion
+- [x] **#174** `scripts/sbom.py:135-221` — generate_cdx has no functional test — only a structural source-grep assertion
   - _Fix:_ Add a unit test that builds two stub Source objects (one in both trees to exercise setdefault dedup, one udeb-only) plus a stub BuildConfig, calls generate_cdx to a temp path, and asserts bomFormat/specVersion/component count/PURL/patch pro
-- [ ] **#193** `scripts/tui/state.py:224-231` — active_tab_name() mutates state (selects a tab) without setting dirty _(partial: real but not reachable)_
+- [x] **#193** `scripts/tui/state.py:224-231` — active_tab_name() mutates state (selects a tab) without setting dirty _(partial: real but not reachable)_
   - _Fix:_ Set self.dirty = True in the recovery branch before returning, or move recovery into a clearly mutating helper and keep active_tab_name() read-only.
-- [ ] **#197** `scripts/tui/widgets.py:178-183` — Spinner.__str__ mutates animation state (impure render) _(partial: real but not reachable)_
+- [x] **#197** `scripts/tui/widgets.py:178-183` — Spinner.__str__ mutates animation state (impure render) _(partial: real but not reachable)_
   - _Fix:_ Drive frame advancement from an explicit tick()/advance() called once per dispatcher wake, keeping __str__ pure.
-- [ ] **#198** `scripts/utils.py:1176,1232` — read_build_history collapses multiple failed runs of one package via read-time ts fallback
+- [x] **#198** `scripts/utils.py:1176,1232` — read_build_history collapses multiple failed runs of one package via read-time ts fallback
   - _Fix:_ Use a stable per-record timestamp as the fallback instead of read-time now, e.g. ts = record.get('finished') or record.get('started') or _utc_now_iso(); and/or widen the dedup key to include record.get('started')/exit_code so distinct runs 
-- [ ] **#211** `scripts/webapi/jobs.py:137-169` — No test coverage for the job loop, drain-then-stop, or prompt handling
+- [x] **#211** `scripts/webapi/jobs.py:137-169` — No test coverage for the job loop, drain-then-stop, or prompt handling
   - _Fix:_ Add a unit test that submits a command whose handler calls self.prompt(), runs one wait() iteration with a sentinel, and asserts the resulting job.state/error — which would immediately expose the unreachable branch.
