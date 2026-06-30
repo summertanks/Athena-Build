@@ -36901,7 +36901,9 @@ def test_cmd_mirror_reclaim_lists_resolves_and_confirms():
         _r = _mk().cmd_mirror_reclaim('srcb', 'force')
         assert _r is True and len(_published) == 1, (_r, _published)
         _a, _intents = _published[0]
-        assert _a == ('m1',)
+        # audit #64: reclaim must publish with --no-iso so the release-media
+        # gate doesn't refuse it when current-snapshot ISOs are absent.
+        assert _a == ('m1', '--no-iso'), _a
         assert [_i['filename'] for _i in _intents] == ['b_1.0_amd64.deb']
         # 3. unmatched target → False, no publish
         _published.clear()

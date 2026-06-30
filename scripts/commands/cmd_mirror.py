@@ -2199,7 +2199,13 @@ class MirrorCommandsMixin(SessionState):
                 if _resp.lower() not in ('y', 'yes'):
                     console.print("  aborted by operator")
                     continue
-            _r = self.cmd_mirror_publish(_n, reclaim_intents=_sel)
+            # --no-iso: a reclaim re-publishes the repo/claims for an
+            # already-shipped filename; it must not be gated on the current
+            # version+snapshot live/installer ISOs being present in image/
+            # (the release-media gate would otherwise refuse the reclaim).
+            # reclaim is a documented incremental --no-iso case (see
+            # cmd_mirror_publish docstring).
+            _r = self.cmd_mirror_publish(_n, '--no-iso', reclaim_intents=_sel)
             _all_ok = bool(_r) and _all_ok
         return _all_ok
 
