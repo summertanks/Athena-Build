@@ -80,8 +80,7 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         #   2. tui.Prompt (PROMPT_PASSWORD, masked) — interactive.
         # dpkg and the install scripts run under sudo via sudo -S (stdin),
         # cached for all subprocess calls.
-        import os as _os
-        _env_pw = _os.environ.pop('ATHENA_SUDO_PASSWORD', None)
+        _env_pw = os.environ.pop('ATHENA_SUDO_PASSWORD', None)
         if _env_pw is not None:
             tui.console.print(
                 "Build system: using sudo password from ATHENA_SUDO_PASSWORD")
@@ -169,8 +168,7 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
                 raise RuntimeError(f"Missing essential directory: {_dir}")
 
         # same env-var pickup as the main constructor.
-        import os as _os
-        _env_pw = _os.environ.pop('ATHENA_SUDO_PASSWORD', None)
+        _env_pw = os.environ.pop('ATHENA_SUDO_PASSWORD', None)
         if _env_pw is not None:
             tui.console.print(
                 "Build system: using sudo password from ATHENA_SUDO_PASSWORD")

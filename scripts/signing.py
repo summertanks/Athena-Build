@@ -112,8 +112,6 @@ def parse_secret_keys_colons(output: str) -> List[Dict[str, str]]:
     current: Optional[Dict[str, str]] = None
     for line in output.splitlines():
         parts = line.split(':')
-        if not parts:
-            continue
         rec = parts[0]
         if rec == 'sec':
             if current is not None:

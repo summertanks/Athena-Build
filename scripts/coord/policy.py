@@ -32,14 +32,6 @@ HASH_CONFLICT_POLICY = 'BLOCK'
 ORPHAN_WARN_AFTER_DAYS = 14
 
 
-# Tunneled packages bypass the "don't pull your own" rule because the
-# real authority is the upstream snapshot.debian.org binary the
-# republisher proxied.  This list isn't authoritative — the
-# republished_from claim field is — but it's a safety belt: if a
-# package starts appearing in tunnel records when it didn't before,
-# audit should flag.
-TUNNEL_REPUBLISH_OK = True
-
 
 # Sentinel file written under repo-coord/ when audit detects a hash
 # conflict.  Presence of this file blocks all subsequent publishes

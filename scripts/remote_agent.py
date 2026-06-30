@@ -47,8 +47,6 @@ PHASE_FAILED = 'failed'
 PHASE_TIMEOUT = 'timeout'      # watchdog killed a hung build
 PHASE_ABORTED = 'aborted'      # operator/orchestrator abort
 
-_TERMINAL = {PHASE_DONE, PHASE_FAILED, PHASE_TIMEOUT, PHASE_ABORTED}
-
 DEFAULT_HANG_SECS = 1800       # 30 min of NO progress ⇒ hung
 WATCHDOG_TICK = 15
 CPU_PROGRESS_PCT = 0.5         # container CPU above this counts as progress
