@@ -16714,6 +16714,20 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_publish_obsolescence_view_includes_deprecations():
+    """Regression (audit #96): step 6c's supersession-obsolescence view must
+    include the 6b deprecation claims, so a file just deprecated (ownership
+    released to the commons) is not re-asserted as obsolete (ownership
+    retained) within the same publish."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _p
+    _src = inspect.getsource(_p)
+    assert '+ list(_pending) + _appended_deprecations' in _src, (
+        "step 6c view must merge the 6b deprecation claims so they win the fold")
+
+
 def test_read_selection_state_distinguishes_transient_io_error():
     """Regression (audit #179): a transient READ error (the file is present but
     unreadable — EIO/EACCES/NFS) must return STATUS_IOERROR, not
@@ -42325,6 +42339,7 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_publish_obsolescence_view_includes_deprecations,
         test_read_selection_state_distinguishes_transient_io_error,
         test_cli_quit_detection_keys_on_first_token,
         test_fork_version_gate_ignores_provides_injected_records,
