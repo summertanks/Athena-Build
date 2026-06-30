@@ -23154,6 +23154,40 @@ def test_bump_version_rewrite_patterns_match_real_files():
     assert _n2 == 1, "_version._BASE_VERSION rewrite pattern did not match once"
 
 
+def test_bump_version_freeze_stamp_excludes_gitignored_buildstamp():
+    """Regression (audit #9): --freeze-stamp must NOT stage the gitignored
+    scripts/_buildstamp.py for the release commit.  `git add` on an ignored
+    path exits 1, which aborted the release mid-way (pyproject + _version.py
+    rewritten, stamp written, but no commit and no tag).  Drive main() with
+    git/file ops stubbed and assert the recorded `git add` excludes the stamp
+    while still writing it to disk."""
+    import sys
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump_version
+    _calls = []
+
+    def _fake_git(*args):
+        _calls.append(args)
+        return ''                       # status --porcelain -> '' (clean tree)
+
+    with mock.patch.object(bump_version, '_git', side_effect=_fake_git), \
+         mock.patch.object(bump_version, '_git_ok', return_value=False), \
+         mock.patch.object(bump_version, '_current_version',
+                           return_value='1.2.3'), \
+         mock.patch.object(bump_version, '_rewrite'), \
+         mock.patch.object(bump_version, '_write_buildstamp') as _ws:
+        _rc = bump_version.main(['patch', '--freeze-stamp', '--no-tag'])
+
+    assert _rc == 0
+    assert _ws.called, "freeze-stamp must still write the stamp to disk"
+    _add = next(c for c in _calls if c and c[0] == 'add')
+    assert bump_version._BUILDSTAMP_PY not in _add, (
+        "gitignored _buildstamp.py must not be staged for the release commit "
+        f"(git add on it exits 1 and aborts the release); add args: {_add}")
+    assert bump_version._PYPROJECT in _add and bump_version._VERSION_PY in _add
+
+
 def test_build_record_carries_toolchain_version():
     """new_build_record stamps the producing Athena-Build version (provenance);
     additive + informational, so it must not perturb the existing fields."""
@@ -40943,6 +40977,7 @@ def main() -> int:
         test_version_command_registered_and_user_agent_derived,
         test_bump_version_next_computation,
         test_bump_version_rewrite_patterns_match_real_files,
+        test_bump_version_freeze_stamp_excludes_gitignored_buildstamp,
         test_build_record_carries_toolchain_version,
         test_provenance_stamped_into_iso_and_repo_metadata,
         test_get_version_is_cached,

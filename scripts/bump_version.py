@@ -177,9 +177,13 @@ def main(argv: 'list[str] | None' = None) -> int:
               f"{'no tag' if _a.no_tag else 'git tag ' + _tag}")
         return 0
 
-    # 2. commit the bump
-    _files = [_PYPROJECT, _VERSION_PY] + ([_BUILDSTAMP_PY]
-                                          if _a.freeze_stamp else [])
+    # 2. commit the bump.  _buildstamp.py is intentionally gitignored
+    #    (.gitignore — never commit a stale stamp) and _write_buildstamp
+    #    already wrote it to disk above, so it must NOT be in the commit set:
+    #    `git add` on a gitignored path exits 1, which under --freeze-stamp
+    #    aborted the release mid-way (pyproject + _version.py rewritten, stamp
+    #    written, but NO commit and NO tag).
+    _files = [_PYPROJECT, _VERSION_PY]
     _git('add', *_files)
     _git('commit', '-m', f'release: {_tag}')
     print(f"committed release: {_tag}")
