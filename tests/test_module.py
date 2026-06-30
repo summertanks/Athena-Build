@@ -24205,6 +24205,43 @@ def test_buildlog_write_never_raises_on_unwritable_dir():
     _b.write()   # must not raise — no assertion needed; reaching here passes
 
 
+def test_buildlog_write_encodes_utf8_under_ascii_locale():
+    """Regression (audit #34): BuildLog.write must encode the narrative as
+    UTF-8 — it carries '→'/'…' glyphs (relocation/file + buildcontainer
+    bullets), so under a C/ASCII locale the default text encoder would raise
+    UnicodeEncodeError, the broad except would swallow it, and the .buildlog
+    would silently never be written.  Simulate the C locale by making a
+    no-encoding text open() default to ASCII; assert the log is still written
+    and round-trips the glyph."""
+    import sys
+    import tempfile
+    import builtins
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildlog
+    _real_open = builtins.open
+
+    def _ascii_default_open(file, mode='r', *_a, **_kw):
+        # A C/ASCII locale: a text open with no explicit encoding uses ASCII
+        # (what locale.getpreferredencoding(False) would return).
+        if 'b' not in mode and 'encoding' not in _kw:
+            _kw['encoding'] = 'ascii'
+        return _real_open(file, mode, *_a, **_kw)
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _bl = buildlog.BuildLog(_tmp, 'foo', kind='build')
+        _bl.relocation('foo_1.0_amd64.deb', 'dists/thor/main')   # emits '→'
+        with mock.patch.object(buildlog, 'open', _ascii_default_open,
+                               create=True):
+            _bl.write()
+        assert os.path.isfile(_bl._path), (
+            "buildlog silently not written — UTF-8 encoding lost under the "
+            "simulated ASCII locale")
+        with _real_open(_bl._path, encoding='utf-8') as _fh:
+            _content = _fh.read()
+        assert '→' in _content, repr(_content)              # '→' survived
+
+
 def test_buildlog_methods_tolerate_bad_input_and_helpers():
     """OBS-04 safety: accumulation methods + size helpers never raise on
     odd inputs (None, non-numeric, missing paths)."""
@@ -41109,6 +41146,7 @@ def main() -> int:
         # OBS-04: exhaustive per-package build/tunnel log
         test_buildlog_writes_header_sections_and_files,
         test_buildlog_write_never_raises_on_unwritable_dir,
+        test_buildlog_write_encodes_utf8_under_ascii_locale,
         test_buildlog_methods_tolerate_bad_input_and_helpers,
         test_segregate_appends_relocate_and_purge_events,
         test_virtual_buildlog_writes_predicted_and_filtered,
