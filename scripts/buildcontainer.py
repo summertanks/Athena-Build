@@ -139,7 +139,6 @@ class BuildContainer:
         # Originally the code only needed the path strings below.
         self.config = config
 
-        self.build_path = config.dir_repo
         self.src_path = config.dir_source
         self.log_path = config.dir_log
         self.repo_path = config.dir_repo
@@ -171,8 +170,6 @@ class BuildContainer:
 
         self.patch_path = config.dir_patch_source
         self.patch_empty = config.dir_patch_empty
-        self.build_profiles = config.build_profiles
-        self.build_options  = config.build_options
         # when true, build() runs a `apt-get install --simulate`
         # preview against build-deps in a transient container and prompts
         # the operator to proceed.  Off by default.
@@ -1132,8 +1129,9 @@ class BuildContainer:
               profiles_override=None, options_override=None) -> bool:
         """Build a single source package inside the container.
 
-        profiles_override / options_override (keyword-only) replace
-        self.build_profiles / self.build_options for THIS invocation only.
+        profiles_override / options_override (keyword-only) replace the
+        per-package config defaults (config.build_profiles_for /
+        build_options_for) for THIS invocation only.
         Pass an iterable of profile/option names; pass an empty iterable
         for "no profiles/options at all" (the most permissive build,
         includes docs and runs tests).  None means "use the configured
