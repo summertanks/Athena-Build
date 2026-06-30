@@ -33115,6 +33115,36 @@ def test_coord_store_project_owners_picks_latest_by_seq():
     assert _owners['foo.deb']['seq'] == 7
 
 
+def test_project_owners_published_takeover_beats_higher_seq_deprecation():
+    """Regression (audit #104): a builder's higher-seq DEPRECATION marker must
+    NOT outrank another builder's lower-seq live PUBLISHED takeover for the same
+    filename.  seq is builder-local, so ranking purely by (-seq, builder) let an
+    established builder A's deprecation win and report the file as un-owned even
+    though newcomer B legitimately republished and owns it."""
+    _s, _i, _st, *_ = _coord_modules()
+    _alice_dep = _s.new_claim(
+        builder='alice', seq=9, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo.deb', sha256='a' * 64, size=1,
+        snapshot='S1', built_at='T1',
+        claim_state=_s.CLAIM_STATE_DEPRECATED,
+    )
+    _bob_pub = _s.new_claim(
+        builder='bob', seq=2, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo.deb', sha256='a' * 64, size=1,
+        snapshot='S1', built_at='T1',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _owners = _st.project_owners({'alice': [_alice_dep], 'bob': [_bob_pub]})
+    # B's live PUBLISHED claim wins over A's higher-seq deprecation marker.
+    assert _owners['foo.deb']['builder'] == 'bob', _owners['foo.deb']
+    assert _owners['foo.deb']['seq'] == 2
+    # The all-deprecation case (no takeover) still yields no owner.
+    _owners2 = _st.project_owners({'alice': [_alice_dep]})
+    assert _owners2['foo.deb']['builder'] is None, _owners2['foo.deb']
+
+
 def test_coord_store_project_owners_skips_retracted():
     """A retracted claim isn't a candidate for ownership."""
     _s, _i, _st, *_ = _coord_modules()
@@ -41590,6 +41620,7 @@ def main() -> int:
         test_coord_store_project_owners_single_owner_per_filename,
         test_coord_store_project_owners_tunneled_has_no_owner,
         test_coord_store_project_owners_picks_latest_by_seq,
+        test_project_owners_published_takeover_beats_higher_seq_deprecation,
         test_coord_store_project_owners_skips_retracted,
         test_coord_store_project_owners_handles_empty_input,
         test_coord_reconcile_detect_hash_conflicts_critical_and_info,

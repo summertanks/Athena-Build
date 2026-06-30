@@ -365,14 +365,28 @@ def project_owners(
     for _fn, _c in iter_live_claims_by_filename(by_builder):
         _candidates.setdefault(_fn, []).append(_c)
 
+    def _release_rank(_c: dict) -> int:
+        # 0 = confers ownership (a live PUBLISHED / OBSOLETE claim);
+        # 1 = RELEASES ownership (a DEPRECATED marker or a tunneled republish —
+        # exactly the two cases that yield no_owner below).  A live owned claim
+        # must outrank a release marker for the SAME filename BEFORE seq is
+        # considered: seq is builder-local, so an established builder A's
+        # higher-seq DEPRECATION would otherwise outrank a newcomer B's
+        # legitimate PUBLISHED takeover and wrongly report the file as un-owned.
+        if (_c.get('claim_state') == _schema.CLAIM_STATE_DEPRECATED
+                or _c.get('republished_from')):
+            return 1
+        return 0
+
     _out: Dict[str, dict] = {}
     for _fn, _claims in _candidates.items():
-        # Sort by (seq, builder) descending; first wins.  ``-`` on
-        # seq for desc; builder for stable tie-break (asc to match
-        # alphabetical convention).
+        # Rank ownership-conferring claims above release markers, THEN by
+        # (seq, builder) descending; first wins.  ``-`` on seq for desc;
+        # builder for stable tie-break (asc to match alphabetical convention).
         _sorted = sorted(
             _claims,
             key=lambda _c: (
+                _release_rank(_c),
                 -int(_c.get('seq', 0)),
                 str(_c.get('builder', '')),
             ),
