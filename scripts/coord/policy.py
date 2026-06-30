@@ -29,7 +29,8 @@ HASH_CONFLICT_POLICY = 'BLOCK'
 # can persist before audit escalates to WARN.  Manual operator action
 # (rebuild + adopt, or retract) clears it.  Below this threshold the
 # orphan is INFO-only — covers short-window crashes and snapshot pivots
-# where the owner intentionally dropped a build.
+# where the owner intentionally dropped a build.  Enforced in
+# reconcile.audit_local's C-1 orphan branch (claim age from built_at).
 ORPHAN_WARN_AFTER_DAYS = 14
 
 

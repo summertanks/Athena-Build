@@ -32446,6 +32446,39 @@ def test_coord_store_project_live_claims_collapses_retraction():
     assert _proj == {}, f"retracted claim must vanish from projection; got {_proj}"
 
 
+def test_coord_store_project_live_claims_cross_builder_conflict_key():
+    """Audit #105: two builders publishing the SAME (package, built_version)
+    surface as TWO entries — the first under (pkg, ver), the second under the
+    builder-suffixed conflict key (pkg, ver+'!'+builder) — so the reconcile
+    layer can flag the cross-builder hash conflict.  Pins the otherwise-
+    untested cross-builder merge branch (no production caller passes >1
+    builder today, but the documented shape must hold for a future one)."""
+    _s, _i, _st, *_ = _coord_modules()
+    _alice = _s.new_claim(
+        builder='alice', seq=1, package='foo', intended_version='1.0',
+        built_version='1.0', filename='foo_1.0_amd64.deb', sha256='a' * 64,
+        size=1, snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _bob = _s.new_claim(
+        builder='bob', seq=1, package='foo', intended_version='1.0',
+        built_version='1.0', filename='foo_1.0_amd64.deb', sha256='b' * 64,
+        size=1, snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _proj = _st.project_live_claims({'alice': [_alice], 'bob': [_bob]})
+    assert len(_proj) == 2, f"both builders' claims must survive; got {_proj}"
+    _plain = [_k for _k in _proj if '!' not in _k[1]]
+    _conflict = [_k for _k in _proj if '!' in _k[1]]
+    assert len(_plain) == 1 and len(_conflict) == 1, _proj
+    assert _plain[0] == ('foo', '1.0')
+    assert _conflict[0][0] == 'foo'
+    assert _conflict[0][1].endswith(('!alice', '!bob'))
+    # the two surviving entries carry the two distinct hashes
+    assert {_proj[_plain[0]]['sha256'], _proj[_conflict[0]]['sha256']} == {
+        'a' * 64, 'b' * 64}
+
+
 def test_release_index_manifest_and_html():
     """The release-index generator: releases.json carries the apt deb-line
     + resolved ISO URLs; index.html renders the same data; both derive from
@@ -42526,6 +42559,7 @@ def main() -> int:
         test_coord_store_rejects_builder_mismatch,
         test_coord_store_tamper_drops_line_on_read,
         test_coord_store_project_live_claims_collapses_retraction,
+        test_coord_store_project_live_claims_cross_builder_conflict_key,
         test_release_index_manifest_and_html,
         test_installer_smoke_workflow_contract,
         test_release_iso_descriptors_finds_and_reports_missing,

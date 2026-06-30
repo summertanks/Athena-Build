@@ -302,19 +302,26 @@ class TunnelCommandsMixin(SessionState):
         # final_paths is keyed by the FINAL on-disk filename; final_to_upstream
         # remembers which upstream filename each post-normalize file came
         # from so we can attach `republished_from` provenance.
-        _final_paths: 'dict[str, str]' = {}
-        _final_to_upstream: 'dict[str, str]' = {}
-        _stamps_count = 0
-        if _success and _upstream_paths:
-            try:
-                _release: 'Optional[int]' = int(
-                    str(self.config.build_version).strip('"').strip("'"))
-            except (TypeError, ValueError):
+        # [Build] VERSION is the transpose release ordinal R.  A non-integer
+        # DISABLES the transpose — we then ship AND record the upstream-named
+        # debs as-is (no +debNuK → +asg<R>uK rewrite, no strip-to-pristine).
+        # Parsed here (not inside the success block) so it stays in scope for
+        # the build-record + narrative below.
+        try:
+            _release: 'Optional[int]' = int(
+                str(self.config.build_version).strip('"').strip("'"))
+        except (TypeError, ValueError):
+            if _success and _upstream_paths:
                 logger.warning(
                     "tunnel transpose: [Build] VERSION not an integer "
                     f"({self.config.build_version!r}) — shipping upstream "
                     f"version for {src_pkg.package}")
-                _release = None
+            _release = None
+
+        _final_paths: 'dict[str, str]' = {}
+        _final_to_upstream: 'dict[str, str]' = {}
+        _stamps_count = 0
+        if _success and _upstream_paths:
             for _ups_fn, _ups_path in _upstream_paths.items():
                 _final_path = _ups_path
                 if _release is not None:
@@ -365,16 +372,20 @@ class TunnelCommandsMixin(SessionState):
         try:
             # resolve the prior-build stash — a re-tunnel at a
             # new version rolls the old episode into history as 'obsolete'.
+            # When transpose is active we record the PRISTINE base (the +asg
+            # stamp is a generation layer on disk); when it's DISABLED
+            # (_release is None) the deb ships upstream-named, so the record
+            # must carry that same un-stripped upstream version.
+            _tunnel_built_ver = (
+                utils.strip_nmu_suffix(str(src_pkg.version))
+                if _release is not None else str(src_pkg.version))
             if _success:
                 utils.roll_prior_build_history(
-                    _buildlog_path, src_pkg.package,
-                    utils.strip_nmu_suffix(str(src_pkg.version)))
+                    _buildlog_path, src_pkg.package, _tunnel_built_ver)
             utils.update_build_record(
                 _buildlog_path, src_pkg.package,
                 phase=('tunneled' if _success else 'failed'),
-                built_version=(
-                    utils.strip_nmu_suffix(str(src_pkg.version))
-                    if _success else None),
+                built_version=(_tunnel_built_ver if _success else None),
                 finished=utils._utc_now_iso(),
                 elapsed_seconds=round(_time.monotonic() - _t_tunnel_start, 3),
                 output_count=len(_outputs_sorted),
@@ -455,7 +466,12 @@ class TunnelCommandsMixin(SessionState):
             _pristine_ver = utils.strip_nmu_suffix(_upstream_ver)
             _total_bytes = sum(
                 max(safe_size(_dst), 0) for _dst in _final_paths.values())
-            if _pristine_ver == _upstream_ver and _stamps_count == 0:
+            if _release is None:
+                # transpose disabled (non-integer VERSION): we ship the
+                # upstream-named deb as-is — no '→ pristine' arrow, since it
+                # was NOT stripped/transposed.
+                _ver_line = f"{_upstream_ver} (upstream; transpose disabled)"
+            elif _pristine_ver == _upstream_ver and _stamps_count == 0:
                 _ver_line = f"{_pristine_ver} (pristine)"
             else:
                 _ver_line = f"{_upstream_ver} → {_pristine_ver}"

@@ -35,6 +35,7 @@ Findings vocabulary:
 """
 
 import dataclasses as _dc
+import datetime as _dt
 import logging as _logging
 import os as _os
 from typing import Callable, Dict, List, Optional, Tuple
@@ -133,21 +134,37 @@ def audit_local(
     # Project to live state (collapse retractions, prefer published
     # over pending).
     _by_builder = {builder_id: _my_claims} if _my_claims else {}
-    _live = _store.project_live_claims(_by_builder)
 
-    # C-1, C-2 — for each of our LIVE claims, check pool presence + hash
+    # C-1, C-2 — drive from the FILENAME-keyed live view so EVERY binary of a
+    # multi-binary source is pool-checked + hash-verified.  project_live_claims
+    # keys by package and would collapse a source's siblings to a single binary
+    # (lossy projection — audit #98).
     _claimed_filenames: set = set()
-    for _key, _claim in _live.items():
-        _fn = _claim.get('filename')
-        if not isinstance(_fn, str) or not _fn:
-            continue
+    for _fn, _claim in _store.iter_live_claims_by_filename(_by_builder):
         _claimed_filenames.add(_fn)
         _pkg = _claim.get('package')
         _claim_sha = _claim.get('sha256')
         _path = _pool.get(_fn)
         if _path is None:
+            # Orphan grace (policy.ORPHAN_WARN_AFTER_DAYS): a freshly-built
+            # claim whose file is briefly absent (a crash or snapshot pivot
+            # mid-rebuild) stays INFO until the threshold; an older orphan is
+            # WARN.  An absent/unparseable built_at fails toward WARN.
+            _orphan_sev = 'WARN'
+            _built_at = _claim.get('built_at')
+            if isinstance(_built_at, str):
+                try:
+                    _age_days = (
+                        _dt.datetime.now(_dt.timezone.utc)
+                        - _dt.datetime.fromisoformat(
+                            _built_at.replace('Z', '+00:00'))
+                    ).total_seconds() / 86400.0
+                    if 0 <= _age_days < _policy.ORPHAN_WARN_AFTER_DAYS:
+                        _orphan_sev = 'INFO'
+                except ValueError:
+                    pass
             _findings.append(Finding(
-                severity='WARN', kind='orphan',
+                severity=_orphan_sev, kind='orphan',
                 message=(
                     f"claim for {_fn} exists but file is absent from "
                     f"local pool {repo_root} — rebuild or retract"),
@@ -200,7 +217,7 @@ def audit_local(
         severity='INFO', kind='summary',
         message=(
             f"audit_local: pool={len(_pool)} files, "
-            f"live_claims={len(_live)}, "
+            f"live_claims={len(_claimed_filenames)}, "
             f"claimed_pool_files={sum(1 for _f in _pool if _f in _claimed_filenames)}"),
     ))
     return Report.make('local', _findings)
