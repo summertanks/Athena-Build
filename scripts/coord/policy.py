@@ -7,7 +7,8 @@ override doesn't touch correctness code.
 For v1, every knob is HARDCODED at the value the original
 design fixed:
   HASH_CONFLICT_POLICY = 'BLOCK'   — see plan §"Hard constraints" #1
-  COORD_HEAD_FRESHNESS = require InRelease.Date ≤ head_time
+  COORD_HEAD_MAX_AGE_SECONDS = max age of a fetched coord-head (stale +
+                               fresh InRelease ⇒ rollback signal)
 
 Mutation point if/when these need to flex: this file, plus a coord
 config block.  Don't sprinkle policy decisions inline in reconcile.

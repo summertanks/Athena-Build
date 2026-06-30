@@ -432,7 +432,7 @@ class RepoCommandsMixin(SessionState):
             f"Strip complete: {_rewritten} rewritten, "
             f"{_unchanged} unchanged, {_failed} failed{_tun_tail}.  "
             f"{_total_strips} suffix(es) stripped in total.  "
-            f"Run `repo audit_nmu` to confirm zero residue."
+            f"Run `repo audit` to confirm zero residue."
         )
 
     def _superseded_binary_names(self) -> 'set[str]':

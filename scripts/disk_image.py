@@ -419,8 +419,9 @@ def build_disk_image(
                 "W: update-initramfs -u failed — image initramfs may lack "
                 "fsck tools (root fs won't be checked from the initramfs)")
 
+        _bios = _has_bios_modules(_mnt)   # one os.path.isdir; reused below
         _spin = tui.Spinner(
-            f"grub-install EFI{' + BIOS' if _has_bios_modules(_mnt) else ''} "
+            f"grub-install EFI{' + BIOS' if _bios else ''} "
             f"into chroot ({_loop_dev})"
         )
         try:
@@ -450,7 +451,7 @@ def build_disk_image(
             # i386-pc/ — operator's pkg.list may not include it
             # (config check above), or upstream resolution dropped it.
             # EFI image still boots cleanly on any UEFI firmware.
-            if _has_bios_modules(_mnt):
+            if _bios:
                 _r = _sudo(
                     ['env', _chroot_env, 'chroot', _mnt,
                      '/usr/sbin/grub-install', '--target=i386-pc',
@@ -585,7 +586,7 @@ def build_disk_image(
             _loop_dev = None
 
         logger.info(f"qcow2 convert: {_raw} → {output_qcow2}")
-        return _convert_to_qcow2(_raw, output_qcow2, password)
+        return _convert_to_qcow2(_raw, output_qcow2)
 
     finally:
         # Reverse-order cleanup.  Each step uses || true semantics —
@@ -826,13 +827,11 @@ def _read_uuid(partition: str, password: str) -> str:
     return _r.stdout.strip()
 
 
-def _convert_to_qcow2(raw_path: str, qcow2_path: str,
-                       password: str) -> bool:
-    """qemu-img convert raw → qcow2 + chown to the running user +
-    rm raw.  Sparse qcow2 keeps the image small (only allocated
-    sectors take space)."""
-    del password   # qemu-img runs as user; raw is owned via sudo so
-                   # we may need sudo only for chown — see below
+def _convert_to_qcow2(raw_path: str, qcow2_path: str) -> bool:
+    """qemu-img convert raw → qcow2 + rm raw.  Sparse qcow2 keeps the
+    image small (only allocated sectors take space).  No privileged step
+    is needed here: qemu-img runs as the user and the raw is already
+    user-owned, so no sudo/chown (hence no password)."""
     _spin = tui.Spinner(
         f"qemu-img convert {os.path.basename(raw_path)} → "
         f"{os.path.basename(qcow2_path)}"

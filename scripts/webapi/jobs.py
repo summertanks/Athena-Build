@@ -76,9 +76,10 @@ class ApiBackend(Cli):
 
     # ── job api (called from uvicorn's thread via the routes) ──────────
 
-    def known_command(self, line: str) -> bool:
-        _first = (line.split() or [''])[0]
-        return _first in self._cmds
+    def known_command(self, verb: str) -> bool:
+        # The route already split + validated the line; it passes the parsed
+        # first token (verb), so no re-split here.
+        return verb in self._cmds
 
     def submit(self, cmd: str) -> Job:
         _job = Job(cmd)
@@ -175,9 +176,9 @@ class ApiBackend(Cli):
                     _job.error = (_job.output[-1] if _job.output
                                   else 'command failed')
             except PromptRequired as _p:
-                # raised through _dispatch_one only when a handler lets
-                # it propagate; normally _dispatch_one catches it and
-                # we land in the not-_ok branch with the ERROR line.
+                # _dispatch_one re-raises PromptRequired (cli.py) precisely so
+                # it reaches here and we can deliver the structured
+                # prompt_required error rather than a generic ERROR line.
                 _job.state = 'error'
                 _job.error = f'prompt_required: {_p}'
             finally:

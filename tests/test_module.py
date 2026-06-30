@@ -16550,21 +16550,22 @@ def test_disk_image_writes_minimal_grub_cfg_unconditionally():
 def test_disk_image_efi_only_fallback_when_no_bios_modules():
     """When the chroot has no /usr/lib/grub/i386-pc/ (grub-pc-bin
     not installed), BIOS grub-install must be SKIPPED — not attempted
-    and failed.  Source-text pin: the `if _has_bios_modules(_mnt):`
-    gate must wrap the BIOS install branch."""
+    and failed.  Source-text pin: the BIOS install branch must be gated
+    on the `_bios = _has_bios_modules(_mnt)` result (computed once, audit
+    #122)."""
     _path = os.path.join(_ROOT, 'scripts', 'disk_image.py')
     with open(_path) as fh:
         _body = fh.read()
     import re
-    # The BIOS grub-install call must live inside an if _has_bios_modules
-    # block (heuristic: pattern shows up before the i386-pc invocation).
+    # _has_bios_modules is computed once into _bios, and the i386-pc
+    # invocation must live inside the `if _bios:` block.
     _m = re.search(
-        r"if _has_bios_modules\(_mnt\):.*?--target=i386-pc",
+        r"_bios = _has_bios_modules\(_mnt\).*?if _bios:.*?--target=i386-pc",
         _body, re.DOTALL,
     )
     assert _m, (
-        "BIOS grub-install must be gated on _has_bios_modules(_mnt) — "
-        "running it unconditionally on a chroot without i386-pc modules "
+        "BIOS grub-install must be gated on _bios (= _has_bios_modules(_mnt)) "
+        "— running it unconditionally on a chroot without i386-pc modules "
         "fails the whole build"
     )
 
@@ -25463,7 +25464,7 @@ def test_api01_jobs_backend_dispatch_capture_and_prompt():
             'test')
         _b.register_command('boom', lambda: 1 / 0, 'test')
         _b.register_command('ask', lambda: _b.prompt('password?'), 'test')
-        assert _b.known_command('hello world')
+        assert _b.known_command('hello')      # known_command takes the verb
         assert not _b.known_command('nosuch')
         _j1 = _b.submit('hello a b')
         _j2 = _b.submit('boom')
@@ -25476,7 +25477,11 @@ def test_api01_jobs_backend_dispatch_capture_and_prompt():
         assert _j2.state == 'error'
         assert any('ZeroDivisionError' in _l for _l in _j2.output), _j2.output
         assert _j3.state == 'error'
-        assert any('PromptRequired' in _l for _l in _j3.output), _j3.output
+        # audit #209: PromptRequired is re-raised through _dispatch_one and
+        # delivered as the structured prompt_required error, not a generic
+        # ERROR output line.
+        assert _j3.error and _j3.error.startswith('prompt_required:'), \
+            _j3.as_dict()
         assert _j1.as_dict()['elapsed'] is not None
         _ids = [j['id'] for j in _b.list_jobs()]
         assert _ids == [_j1.id, _j2.id, _j3.id]   # submission order

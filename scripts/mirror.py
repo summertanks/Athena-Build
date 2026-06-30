@@ -1031,6 +1031,14 @@ def project_post_publish_state(local_state, remote_by_builder: dict):
     closure walk is bounded to what we're about to push.
     """
     import repo_audit as _repo_audit
+    import apt_pkg as _apt_pkg
+    # MAT-11(1): init the apt config system ONCE here or version_compare falls
+    # back to a LEXICAL compare (`6.10` < `6.9`).  Idempotent; hoisted out of
+    # the per-claim collision loop below (was re-imported + re-inited per claim).
+    try:
+        _apt_pkg.init_system()
+    except Exception:
+        pass
     # Build a mutable copy of local packages, then layer in remote-only
     # entries.  Local entries have the rich control data (Depends,
     # Provides etc.) so they participate fully in audit_dep_closure;
@@ -1060,10 +1068,7 @@ def project_post_publish_state(local_state, remote_by_builder: dict):
                 # Local entry wins on version compare; remote satisfies
                 # only if its version is strictly higher than the local
                 # one (mirror has a newer pkg we haven't built yet).
-                import apt_pkg as _apt_pkg
-                # MAT-11(1): init the apt config system or version_compare
-                # falls back to a LEXICAL compare (`6.10` < `6.9`).  Idempotent.
-                _apt_pkg.init_system()
+                # _apt_pkg imported + inited once at the top of this function.
                 try:
                     _cmp = _apt_pkg.version_compare(
                         _ver, str(_existing.get('Version', '')))

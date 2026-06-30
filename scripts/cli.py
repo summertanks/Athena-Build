@@ -429,6 +429,14 @@ class Cli:
             fn(*args)
             return True
         except Exception as exc:
+            # The --api job loop (webapi/jobs.py) raises PromptRequired from its
+            # headless prompt(); re-raise it so that loop can deliver the
+            # structured prompt_required error instead of swallowing it into a
+            # generic ERROR line.  The REPL/one-shot prompt() reads stdin and
+            # never raises this, so the branch is inert there.  Matched by name
+            # to avoid a cli→webapi.jobs import cycle (jobs imports cli).
+            if type(exc).__name__ == 'PromptRequired':
+                raise
             self.ERROR(f"command '{cmd}' raised "
                        f"{type(exc).__name__}: {exc}")
             return False

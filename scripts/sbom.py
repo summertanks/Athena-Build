@@ -130,10 +130,6 @@ def _resolve_snapshot_ts(buildconfig: Any, container: Any) -> str:
         return ''
 
 
-def _strip_quotes(s: Any) -> str:
-    return str(s).strip('"').strip("'")
-
-
 def generate_cdx(buildconfig: Any,
                  dep_tree: Any,
                  udeb_dep_tree: Optional[Any] = None,
@@ -164,13 +160,16 @@ def generate_cdx(buildconfig: Any,
     _baseid     = buildconfig.build_base_id
     _patch_root = buildconfig.dir_patch_source
 
+    # build_distribution / build_version / build_codename are already
+    # _strip_quotes'd when BuildConfig loads them (utils.py) — the canonical
+    # stripping site — so use them directly here (str() for safety only).
     _meta_component: Dict[str, Any] = {
         'type':    'operating-system',
-        'name':    _strip_quotes(buildconfig.build_distribution),
-        'version': _strip_quotes(buildconfig.build_version),
+        'name':    str(buildconfig.build_distribution),
+        'version': str(buildconfig.build_version),
         'properties': [
             {'name': 'athena:codename',
-             'value': _strip_quotes(buildconfig.build_codename)},
+             'value': str(buildconfig.build_codename)},
             {'name': 'athena:arch',
              'value': str(buildconfig.arch)},
             {'name': 'athena:base-id',

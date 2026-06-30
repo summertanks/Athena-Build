@@ -25,7 +25,7 @@ import re
 import shutil
 import string
 import subprocess
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 import tui
 import utils
@@ -790,6 +790,26 @@ def _parse_deb_filename(filename: str) -> tuple:
     return _name, _ver.replace('%3a', ':')
 
 
+_apt_pkg_mod: 'Any' = None
+_apt_pkg_inited = False
+
+
+def _get_apt_pkg() -> 'Any':
+    """Return an initialised apt_pkg module, or None if it isn't importable.
+    Imports + init_system() run exactly once (memoized) rather than on every
+    version comparison."""
+    global _apt_pkg_mod, _apt_pkg_inited
+    if not _apt_pkg_inited:
+        _apt_pkg_inited = True
+        try:
+            import apt_pkg as _ap
+            _ap.init_system()
+            _apt_pkg_mod = _ap
+        except Exception:
+            _apt_pkg_mod = None
+    return _apt_pkg_mod
+
+
 def _debian_version_cmp(a: str, b: str) -> int:
     """Compare two Debian version strings.  Returns -1/0/1.
 
@@ -800,14 +820,12 @@ def _debian_version_cmp(a: str, b: str) -> int:
     for the common case of source-built packages with identical
     everything-except-the-revision (`6.1.170-1` vs `6.1.170-3` etc.).
     """
-    try:
-        import apt_pkg
-        apt_pkg.init_system()
-        return apt_pkg.version_compare(a, b)
-    except Exception:
-        if a == b:
-            return 0
-        return -1 if a < b else 1
+    _ap = _get_apt_pkg()
+    if _ap is not None:
+        return _ap.version_compare(a, b)
+    if a == b:
+        return 0
+    return -1 if a < b else 1
 
 
 def _select_pool_files(

@@ -20,6 +20,7 @@ import gzip
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -30,6 +31,10 @@ from debian.deb822 import Deb822
 
 import tui
 import utils
+
+# debhelper substvars like ${misc:Depends} that haven't been substituted yet
+# (cache reads debian/control before dh_gencontrol runs); compiled once.
+_SUBSTVAR_RE = re.compile(r'\$\{[^}]+\}')
 
 logger = logging.getLogger('athena.cache')
 
@@ -815,9 +820,8 @@ def _format_packages_stanza(binary: Deb822, source_name: str,
     # BEFORE dh_gencontrol runs).  Leaving them in produces "unresolved
     # dependency '${misc:Depends}'" warnings at dep-parse time.  The
     # actual built .deb has these substituted by dh, so this strip
-    # affects only the synthetic Packages record.
-    import re as _re
-    _SUBSTVAR_RE = _re.compile(r'\$\{[^}]+\}')
+    # affects only the synthetic Packages record.  _SUBSTVAR_RE is compiled
+    # once at module scope.
     for _rel in ('Depends', 'Pre-Depends', 'Recommends', 'Suggests',
                  'Conflicts', 'Replaces', 'Provides', 'Breaks', 'Enhances'):
         _val = (binary.get(_rel, '') or '').strip()

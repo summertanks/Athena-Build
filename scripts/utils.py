@@ -1450,10 +1450,17 @@ def lifecycle_touch_selected(buildlog_dir: str, selected: 'Dict[str, str]',
         try:
             _rec = read_build_record(buildlog_dir, _name)
             if _rec is None:
-                upsert_build_record(
-                    buildlog_dir, _name,
-                    selection=SELECTION_SELECTED, selected_version=_v,
-                    snapshot=snapshot, selected_at=_now)
+                # Create directly (mirrors upsert_build_record's None branch)
+                # rather than calling upsert, which would read_build_record a
+                # second time for a record we already know is absent.
+                _new = new_build_record(
+                    package=_name, intended_version=_v, patch_set_hash='')
+                _new['phase'] = 'selected'
+                _new.update(selection=SELECTION_SELECTED, selected_version=_v,
+                            snapshot=snapshot, selected_at=_now)
+                _new.setdefault('lifecycle_v', 1)
+                _new.setdefault('history', [])
+                write_build_record(buildlog_dir, _new)
                 _stats['created'] += 1
                 continue
             _sel = _rec.get('selection')

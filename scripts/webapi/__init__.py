@@ -179,14 +179,15 @@ def create_app(*, buildlog_dir: str, flags_path: str,
             _cmd = (payload.cmd or '').strip()
             if not _cmd:
                 raise HTTPException(status_code=400, detail='empty cmd')
-            if _cmd.split()[0] in ('quit', 'exit', 'help'):
+            _verb = _cmd.split()[0]
+            if _verb in ('quit', 'exit', 'help'):
                 raise HTTPException(status_code=400,
                                     detail='REPL control tokens are not '
                                            'dispatchable over the API')
-            if not backend.known_command(_cmd):
+            if not backend.known_command(_verb):
                 raise HTTPException(
                     status_code=400,
-                    detail=f'unknown command {_cmd.split()[0]!r}')
+                    detail=f'unknown command {_verb!r}')
             _job = backend.submit(_cmd)
             return {'job_id': _job.id, 'state': _job.state}
 
