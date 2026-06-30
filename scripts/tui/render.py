@@ -286,6 +286,11 @@ class Renderer:
             _safe_addstr(win, row, 0, text, self._attr_for(attr))
             row += 1
 
+        # Anchor widgets to the bottom band: when the content didn't fill the
+        # pane, advance row so the widgets sit at the bottom rather than
+        # floating directly under the last content line.  max() keeps row as-is
+        # when content already overflows into the widget band.
+        row = max(row, max_y - len(widget_strs))
         for wstr in widget_strs:
             if row >= max_y:
                 break
