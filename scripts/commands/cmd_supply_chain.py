@@ -239,7 +239,7 @@ class SupplyChainCommandsMixin(SessionState):
 
         console.print(
             f"cve: {len(_matches)} finding(s) across "
-            f"{len({_m.get('artifact', {}).get('name', '') for _m in _matches})}"
+            f"{len({(_m.get('artifact', {}) or {}).get('name', '') for _m in _matches})}"
             f" component(s)",
             tui.COLOR_WARNING,
         )

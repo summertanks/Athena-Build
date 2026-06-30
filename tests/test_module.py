@@ -16714,6 +16714,43 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_tier3_misc_source_pins():
+    """Regression pins for a cluster of low-reachability Tier-3 fixes (audit
+    #21/#55/#75/#78/#95/#133/#159) where a behavioral harness is disproportion-
+    ate; each asserts the specific corrected code is present."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import arch_filter
+    import remote_agent
+    import iso_installer
+    import coord.publish as _pub
+    import commands.cmd_audit as _ca
+    import commands.cmd_source as _cs
+    import commands.cmd_supply_chain as _sc
+    # #21: per-arch failure degrades only that arch, not the whole triplet map
+    assert 'except subprocess.CalledProcessError' in inspect.getsource(
+        arch_filter), '#21'
+    # #159: next-offset is frm + bytes read, not the stale size
+    assert 'frm + len(_data)' in inspect.getsource(remote_agent), '#159'
+    # #133: exclude_names applied on the legacy (deb_whitelist is None) path
+    _isrc = inspect.getsource(iso_installer)
+    assert ('if deb_whitelist is None:' in _isrc
+            and '_excl = exclude_names or set()' in _isrc), '#133'
+    # #95: drift requires the binary to actually be present in the pool
+    assert '_latest is not None and _fn != _latest' in inspect.getsource(
+        _pub), '#95'
+    # #55: stale-files row colour matches the gate (counts malformed)
+    assert 'ok=(_n_stale == 0 and not _malformed)' in inspect.getsource(
+        _ca), '#55'
+    # #75: the .disabled marker hint is an f-string (real pkg name)
+    assert 'f\'run `source fork {pkg} enabled` to \'' in inspect.getsource(
+        _cs), '#75'
+    # #78: the component-count set comprehension uses the `or {}` idiom
+    assert "(_m.get('artifact', {}) or {}).get('name', '')" in inspect.getsource(
+        _sc), '#78'
+
+
 def test_resolve_closure_accepts_generator_seeds():
     """Regression (audit #148): resolve_closure consumes `seeds` twice
     (_infer_real + the _pending comprehension), so a one-shot generator was
@@ -42409,6 +42446,7 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_tier3_misc_source_pins,
         test_resolve_closure_accepts_generator_seeds,
         test_build_patch_list_sorts_by_full_filename,
         test_format_gpg_time_survives_overflow_epoch,

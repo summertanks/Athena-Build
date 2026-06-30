@@ -113,10 +113,16 @@ def _build_maps() -> 'Tuple[Dict[str, str], Set[str]]':
         ).stdout.split()
         for _a in _listed:
             arches.add(_a)
-            _trip = subprocess.run(
-                ['dpkg-architecture', '-a', _a, '-qDEB_HOST_MULTIARCH'],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
+            try:
+                _trip = subprocess.run(
+                    ['dpkg-architecture', '-a', _a, '-qDEB_HOST_MULTIARCH'],
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+            except subprocess.CalledProcessError:
+                # One misbehaving arch degrades only THAT arch — don't let it
+                # nuke the whole map (which would degrade the filter to
+                # keep-everything for the rest of the process).
+                continue
             if _trip:
                 triplets[_trip.replace('_', '-')] = _a
         # Augment with GNU cpu-alias spellings of each triplet's head

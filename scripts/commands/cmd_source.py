@@ -1420,7 +1420,7 @@ class SourceCommandsMixin(SessionState):
                 with open(_marker, 'w') as fh:
                     fh.write('Disabled via `source fork '
                              f'{pkg} disabled` — remove this file or '
-                             'run `source fork {pkg} enabled` to '
+                             f'run `source fork {pkg} enabled` to '
                              're-include in cache builds.\n')
                 console.print(
                     f"source fork {pkg}: disabled "
