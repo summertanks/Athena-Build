@@ -25,7 +25,46 @@ v1 (`{v:1, 'pkg.list', 'pool.list'}`) is still read for back-compat.
 import hashlib
 import json
 import os
+import tempfile
 from typing import Optional, Tuple
+
+
+def _write_lists_atomic(items: 'list[Tuple[str, str]]') -> None:
+    """Write several files all-or-nothing.  Each (path, text) is staged to a
+    temp file in the SAME directory and fsync'd; only once EVERY file has
+    staged successfully are they os.replace()'d into place (atomic rename
+    within a dir).  A failure mid-staging (e.g. ENOSPC) raises BEFORE the first
+    replace, so every target file is left untouched — no partial application of
+    the canonical config's four lists.  Empty paths are skipped.  Raises
+    OSError on failure, after cleaning up any staged temps."""
+    _staged: 'list[Tuple[str, str]]' = []        # (tmp_path, final_path)
+    try:
+        for _p, _text in items:
+            if not _p:
+                continue
+            _dir = os.path.dirname(_p) or '.'
+            _fd, _tmp = tempfile.mkstemp(dir=_dir, prefix='.canon-',
+                                         suffix='.tmp')
+            try:
+                with os.fdopen(_fd, 'w', encoding='utf-8') as _fh:
+                    _fh.write(_text if isinstance(_text, str) else '')
+                    _fh.flush()
+                    os.fsync(_fh.fileno())
+            except BaseException:
+                try:
+                    os.unlink(_tmp)
+                finally:
+                    raise
+            _staged.append((_tmp, _p))
+        for _tmp, _p in _staged:
+            os.replace(_tmp, _p)
+        _staged = []
+    finally:
+        for _tmp, _ in _staged:
+            try:
+                os.unlink(_tmp)
+            except OSError:
+                pass
 
 CONFIG_MANIFEST_VERSION = 2
 
@@ -122,11 +161,6 @@ def apply_canonical_config(fetched_coord_dir: str, expected_sha256: str,
     except (ValueError, UnicodeDecodeError) as _e:
         return False, f'canonical config unparseable: {_e}', None
 
-    def _write(_p: str, _text: str) -> None:
-        if _p:
-            with open(_p, 'w') as _fh:
-                _fh.write(_text if isinstance(_text, str) else '')
-
     _v = _doc.get('v')
     _lists = _doc.get('lists')
     if isinstance(_v, int) and _v >= 2 and isinstance(_lists, dict):
@@ -134,10 +168,16 @@ def apply_canonical_config(fetched_coord_dir: str, expected_sha256: str,
         if not isinstance(_pkg, str):
             return False, 'canonical config missing pkg.list', None
         try:
-            _write(pkglist_path, _pkg)
-            _write(poollist_path, _lists.get('pool', '') or '')
-            _write(livelist_path, _lists.get('live', '') or '')
-            _write(installerlist_path, _lists.get('installer', '') or '')
+            # All-or-nothing: a mid-write failure (e.g. ENOSPC during pull)
+            # must not leave pkg.list rewritten with federation content while
+            # pool/live/installer keep stale content AND the caller is told
+            # "NOT applied" (so no re-resolve is forced) — a silent split brain.
+            _write_lists_atomic([
+                (pkglist_path, _pkg),
+                (poollist_path, _lists.get('pool', '') or ''),
+                (livelist_path, _lists.get('live', '') or ''),
+                (installerlist_path, _lists.get('installer', '') or ''),
+            ])
         except OSError as _e:
             return False, f'write failed: {_e}', None
         _payload = {'pins': _doc.get('pins', {}) or {},
@@ -154,8 +194,10 @@ def apply_canonical_config(fetched_coord_dir: str, expected_sha256: str,
     if not isinstance(_pkg, str):
         return False, 'canonical config missing pkg.list', None
     try:
-        _write(pkglist_path, _pkg)
-        _write(poollist_path, _pool if isinstance(_pool, str) else '')
+        _write_lists_atomic([
+            (pkglist_path, _pkg),
+            (poollist_path, _pool if isinstance(_pool, str) else ''),
+        ])
     except OSError as _e:
         return False, f'write failed: {_e}', None
     return True, (f'applied canonical pkg.list ({len(_pkg.splitlines())} '

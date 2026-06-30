@@ -32604,6 +32604,56 @@ def test_canonical_config_round_trip_and_verify():
             assert _f.read() == 'V1PKG\n'
 
 
+def test_apply_canonical_config_is_all_or_nothing():
+    """Regression (audit #86): apply_canonical_config applies the four list
+    files ALL-OR-NOTHING.  If a later list's write fails (bad dir / ENOSPC),
+    pkg.list must NOT be left rewritten with federation content while the
+    others keep stale content and the caller is told 'NOT applied' — a silent
+    split brain where no re-resolve is forced."""
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import config_manifest as _cm
+    with tempfile.TemporaryDirectory() as _td:
+        _o = {n: os.path.join(_td, f'o_{n}.list')
+              for n in ('pkg', 'pool', 'live', 'installer')}
+        for _n, _txt in (('pkg', 'FED-PKG\n'), ('pool', 'FED-POOL\n'),
+                         ('live', 'FED-LIVE\n'), ('installer', 'FED-INST\n')):
+            with open(_o[_n], 'w') as _f:
+                _f.write(_txt)
+        _coord = os.path.join(_td, 'coord')
+        _sha = _cm.write_canonical_config(
+            _coord, _o['pkg'], _o['pool'], _o['live'], _o['installer'])
+        # peer's PRIOR on-disk content that MUST survive a failed apply
+        _p = {n: os.path.join(_td, f'p_{n}.list')
+              for n in ('pkg', 'pool', 'live')}
+        for _n in _p:
+            with open(_p[_n], 'w') as _f:
+                _f.write(f'PRIOR-{_n.upper()}\n')
+        # installer target lives in a NON-EXISTENT dir → staging raises mid-way
+        _bad_installer = os.path.join(_td, 'nope', 'p_installer.list')
+
+        _ok, _det, _payload = _cm.apply_canonical_config(
+            _coord, _sha, _p['pkg'], _p['pool'], _p['live'], _bad_installer)
+        assert _ok is False, (_ok, _det)
+        # all-or-nothing: NONE of the existing lists were mutated
+        for _n in ('pkg', 'pool', 'live'):
+            with open(_p[_n]) as _f:
+                assert _f.read() == f'PRIOR-{_n.upper()}\n', (
+                    f'{_n}.list partially applied on a failed apply: {_det}')
+        assert not os.path.exists(_bad_installer)
+
+        # sanity: a fully-valid apply DOES overwrite all four
+        _good_installer = os.path.join(_td, 'p_installer.list')
+        _ok2, _, _ = _cm.apply_canonical_config(
+            _coord, _sha, _p['pkg'], _p['pool'], _p['live'], _good_installer)
+        assert _ok2 is True
+        with open(_p['pkg']) as _f:
+            assert _f.read() == 'FED-PKG\n'
+        with open(_good_installer) as _f:
+            assert _f.read() == 'FED-INST\n'
+
+
 def test_closure_ledger_write_read_verify_round_trip():
     """Owner writes closure_ledger.json (sha pinned in head); a peer reads it
     only on sha match; empty pin / mismatch / malformed → refused with None."""
@@ -41519,6 +41569,7 @@ def main() -> int:
         test_mirror_builders_register_gates_and_uploads,
         test_revoke_builder_adds_to_revoked_preserving_head,
         test_canonical_config_round_trip_and_verify,
+        test_apply_canonical_config_is_all_or_nothing,
         test_closure_ledger_write_read_verify_round_trip,
         test_closure_gate_runs_in_both_modes,
         test_federation_lab_build_mode_peer_workflow,
