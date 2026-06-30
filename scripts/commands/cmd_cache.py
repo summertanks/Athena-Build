@@ -244,7 +244,18 @@ class CacheCommandsMixin(SessionState):
         """
         assert self.dep_tree is not None
         assert self.cache is not None
-        _names = utils.parse_build_pkg_list(self.config.build_pkg_list_path)
+        # parse_build_pkg_list raises OSError on an unreadable file (its
+        # docstring says the caller surfaces it).  Catch it and degrade to the
+        # same missing-file path rather than letting it crash the parse.
+        try:
+            _names = utils.parse_build_pkg_list(self.config.build_pkg_list_path)
+        except OSError as _e:
+            console.print(
+                f"ERROR: cannot read build_pkg.list at "
+                f"{self.config.build_pkg_list_path}: {_e}", tui.COLOR_ERROR)
+            logger.error(
+                f"parse_build_pkg_list({self.config.build_pkg_list_path}): {_e}")
+            return False
         if not _names:
             console.print(
                 f"WARNING: [Build] Mode = build but build_pkg.list at "

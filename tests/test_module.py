@@ -16711,6 +16711,43 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
     )
 
 
+def test_cache_parse_build_mode_guards_unreadable_list():
+    """Regression (audit #61): _cache_parse_build_mode must catch the OSError
+    parse_build_pkg_list raises on an unreadable build_pkg.list and degrade to
+    return False, not let it crash the parse."""
+    import sys
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    import commands.cmd_cache as _cc
+
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.dep_tree = object()
+    _sess.cache = object()
+
+    class _Cfg:
+        build_pkg_list_path = '/nonexistent/build_pkg.list'
+    _sess.config = _Cfg()
+    with mock.patch.object(_cc, 'console'), \
+         mock.patch.object(_cc.utils, 'parse_build_pkg_list',
+                           side_effect=OSError('permission denied')):
+        assert _sess._cache_parse_build_mode() is False   # must not raise
+
+
+def test_verify_chroot_get_selections_checks_returncode():
+    """Regression (audit #59): _verify_chroot's 'All packages fully installed'
+    check must consider the dpkg returncode — a failed `dpkg --get-selections`
+    yields empty stdout (→ _incomplete == []) and would otherwise falsely
+    PASS."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import commands.cmd_build as _cb
+    assert 'dpkg --get-selections failed' in inspect.getsource(_cb), (
+        "the 'fully installed' check must surface a dpkg returncode failure "
+        "distinctly, else a failed get-selections falsely PASSes")
+
+
 def test_cmd_repo_cleanup_report_lists_all_scanned_components():
     """Regression (audit #68): the cleanup summary's scanned-component list must
     track utils._STALE_SCAN_SUBDIRS (it hardcoded {main,doc,dbgsym,tests},
@@ -41978,6 +42015,8 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_cache_parse_build_mode_guards_unreadable_list,
+        test_verify_chroot_get_selections_checks_returncode,
         test_cmd_repo_cleanup_report_lists_all_scanned_components,
         test_cmd_source_audit_pool_remediation_is_runnable,
         test_repo_dispatcher_advertises_merged_package_actions,
