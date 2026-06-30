@@ -4992,6 +4992,39 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
     )
 
 
+def test_apt_repo_generate_repo_indexes_udeb_scan_allows_empty():
+    """Regression (audit #18, apt_repo.py:307-311): the udeb (debian-installer)
+    Packages scan in generate_repo_indexes must pass allow_empty=True, matching
+    the sibling generate_apt_repo.  The debian-installer/binary-<arch> dir is
+    created unconditionally at BuildConfig init, but udebs only come from the
+    installer pipeline — so a repo with .debs but no udebs has a present-but-
+    empty dir.  Without allow_empty, dpkg-scanpackages' zero-entry output is
+    treated as a failure (_run_dpkg_scan, allow_empty=False branch) and
+    _scan_packages_to → generate_repo_indexes → cmd_index_repo aborts the whole
+    publish."""
+    import inspect
+    import re
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+    _src = inspect.getsource(apt_repo.generate_repo_indexes)
+    # The udeb scan call passes udeb=True; the fix appends allow_empty=True
+    # immediately after it (matching generate_apt_repo).  Keying on the
+    # adjacency avoids brittle balanced-paren matching across the inner
+    # os.path.join(...) argument.
+    assert 'udeb=True' in _src, (
+        'udeb _scan_packages_to call not found in generate_repo_indexes')
+    assert re.search(r'udeb=True,\s*allow_empty=True', _src), (
+        "generate_repo_indexes udeb scan must pass allow_empty=True (parity "
+        "with generate_apt_repo) — a present-but-empty debian-installer/ dir "
+        "is valid and must not abort the publish")
+    # And confirm the sibling it mirrors still sets it, so the parity claim
+    # this test pins can't silently rot.
+    _sib = inspect.getsource(apt_repo.generate_apt_repo)
+    assert re.search(r'udeb=True,\s*allow_empty=True', _sib), (
+        "generate_apt_repo (the parity reference) no longer sets "
+        "allow_empty=True on its udeb scan")
+
+
 def test_cmd_repo_dispatcher_drops_index_and_tunnel_hints():
     """`repo index` / `repo tunnel` were retired and their redirect hints
     removed — the dispatcher no longer special-cases either action; both
@@ -41298,6 +41331,7 @@ def main() -> int:
         test_apt_repo_generate_repo_indexes_walks_all_suites_and_components,
         test_apt_repo_generate_repo_indexes_skips_when_binary_dir_missing,
         test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others,
+        test_apt_repo_generate_repo_indexes_udeb_scan_allows_empty,
         test_cmd_repo_dispatcher_drops_index_and_tunnel_hints,
         test_stage_d_no_old_repo_subdir_paths_in_production_code,
         test_stage_d_buildconfig_paths_use_new_nested_layout,
