@@ -1136,6 +1136,53 @@ def test_tunnel_transposes_and_needs_no_ledger():
         "tunnel no longer needs the ledger (K is intrinsic)")
 
 
+def test_tunnel_filenames_prefers_resolved_source_not_parse_order():
+    """Regression (audit #14): _tunnel_filenames_for_source must enumerate the
+    RESOLVED source's binary set — dep_tree.selected_srcs first, else the
+    HIGHEST-version cache candidate — not source_hashtable[0] (arbitrary
+    cache-parse order).  When a source coexists across snapshots with a
+    differing binary set, _cands[0] could enumerate the wrong (non-selected)
+    set, drifting the tunnel set away from virtual_build's prediction."""
+    import sys
+    import types
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts', 'commands'))
+    import cohorts
+    import virtual_build
+    from debian.debian_support import Version
+
+    class _Src:
+        def __init__(self, ver, binaries):
+            self.version = Version(ver)
+            self.binary = binaries
+
+    _low = _Src('1.0', ['oldbin'])
+    _high = _Src('2.0', ['newbin'])
+
+    obj = cohorts.CohortResolverMixin.__new__(cohorts.CohortResolverMixin)
+    obj.dep_tree = types.SimpleNamespace(selected_srcs={}, selected_pkgs={})
+    obj.udeb_dep_tree = None
+    # source_hashtable in cache-PARSE order: low version first (the trap).
+    obj.cache = types.SimpleNamespace(source_hashtable={'foo': [_low, _high]})
+    obj.config = types.SimpleNamespace(
+        arch='amd64', build_profiles=frozenset(), dir_fork_source_repo=None)
+    obj._resolve_tunnel_filename = lambda b, e: f"{b}.deb"
+
+    with mock.patch.object(virtual_build, '_package_list_index',
+                           return_value={}), \
+         mock.patch.object(virtual_build, '_binary_active_for_arch',
+                           return_value=True), \
+         mock.patch.object(virtual_build, '_binary_active_under_profiles',
+                           return_value=True):
+        # (a) not in selected_srcs -> highest-version cache candidate wins,
+        #     NOT _cands[0] (the low version).
+        assert obj._tunnel_filenames_for_source('foo') == ['newbin.deb']
+        # (b) selected_srcs wins outright.
+        obj.dep_tree.selected_srcs = {'foo': _high}
+        assert obj._tunnel_filenames_for_source('foo') == ['newbin.deb']
+
+
 def test_sta33_build_depends_serialises_apt_pkg_profile_global():
     """STA-33: the apt_pkg Build-Profiles global set + every parse that
     reads it must run under a module lock so concurrent build workers
@@ -5972,6 +6019,7 @@ def _make_pool_dep_tree_stub():
             self.pre_depends = []
             self.recommends = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.breaks = breaks or []
             self.constraints_satisfied = True
         def __getitem__(self, k): return self._fields[k]
@@ -6066,6 +6114,7 @@ def test_validate_selection_skips_break_when_pool_extra():
             self.pre_depends = []
             self.recommends = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.breaks = breaks or []
             self.constraints_satisfied = True
         def __getitem__(self, k): return self._fields[k]
@@ -8058,6 +8107,19 @@ def test_parse_apt_install_line_variants():
         ['foo'], False
     )
     assert _parse_apt_install_line('apt-install foo >> file.log\n') == (
+        ['foo'], False
+    )
+    # Regression (audit #12): 'apt-install' appearing ONLY inside a trailing
+    # ' #' inline comment on a non-comment command line must return None, not
+    # raise IndexError (the whole-line gate passes but the comment-stripped
+    # head no longer contains the token).  Without the guard this aborted the
+    # entire chroot-hook audit.
+    assert _parse_apt_install_line(
+        'echo done # call apt-install foo later\n') is None
+    assert _parse_apt_install_line(
+        'mkdir /x   # apt-install bar baz\n') is None
+    # And a real invocation WITH a trailing comment still parses.
+    assert _parse_apt_install_line('apt-install foo # see note\n') == (
         ['foo'], False
     )
 
@@ -11619,6 +11681,7 @@ class _FakePkg:
         self.depends = [(d, '', '') for d in (depends or [])]
         self.pre_depends = []
         self.alt_depends = []
+        self.alt_pre_depends = []
         self.depends_on = []
         self.depended_by = []
 
@@ -11953,6 +12016,7 @@ def test_validate_selection_unversioned_provides_no_spurious_break():
             self.breaks = [[(n, v, op)] for n, v, op in breaks]
             self.conflicts = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.recommends = []
             # _provides: list of (name, version_str_or_None).  None
             # means "unversioned Provides" — explicit_provides_version
@@ -12005,6 +12069,7 @@ def test_validate_selection_versioned_provides_still_flagged():
             self.breaks = [[(n, v, op)] for n, v, op in breaks]
             self.conflicts = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.recommends = []
             self._provides = list(provides)  # [(name, version_str_or_None)]
             self.constraints_satisfied = True
@@ -12068,6 +12133,7 @@ def _sta18_make_dt():
             self.breaks = []
             self.conflicts = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.recommends = []
             self.constraints_satisfied = True
         def __getitem__(self, k): return self._fields[k]
@@ -13811,6 +13877,7 @@ def test_parse_dependency_reuses_lookahead_for_multi_version_same_name():
             self.pre_depends = []
             self.recommends = []
             self.alt_depends = []
+            self.alt_pre_depends = []
             self.breaks = []
             self.constraints_satisfied = True
         def __getitem__(self, k): return self._fields[k]
@@ -18064,6 +18131,41 @@ def test_fork_mirror_discover_skips_dirs_missing_debian_control():
         assert found == [], f"expected empty, got {found}"
 
 
+def test_fork_mirror_read_pkg_version_rejects_broken_changelog():
+    """Regression (audit #11): an empty/truncated/malformed debian/changelog
+    must raise ValueError from _read_pkg_version so _generate_source_packages /
+    _build_packages_stanzas (which guard (OSError, ValueError)) log-and-skip
+    the fork — rather than aborting the cache build or silently shipping a
+    'None' version (python-debian's file-handle form yields version=None on a
+    broken changelog instead of raising).  A valid changelog still parses."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as _td:
+        _deb = os.path.join(_td, 'debian')
+        os.makedirs(_deb)
+        _cl = os.path.join(_deb, 'changelog')
+        for _label, _content in [('empty', ''),
+                                 ('whitespace', '   \n'),
+                                 ('garbage', 'not a changelog at all\n')]:
+            with open(_cl, 'w') as _fh:
+                _fh.write(_content)
+            try:
+                _v = fork_mirror._read_pkg_version(_td)
+            except ValueError:
+                pass                              # expected
+            else:
+                raise AssertionError(
+                    f"{_label} changelog accepted, got {_v!r}")
+        # A valid changelog still returns its top version verbatim.
+        with open(_cl, 'w') as _fh:
+            _fh.write(
+                'athena-base-files (12.4+athena1) thor; urgency=low\n\n'
+                '  * test entry\n\n'
+                ' -- Tester <t@example.org>  Mon, 30 Jun 2026 00:00:00 +0000\n')
+        assert fork_mirror._read_pkg_version(_td) == '12.4+athena1'
+
+
 def test_fork_mirror_generate_empty_tree_returns_false():
     """No source trees → False return → no Mirror should be registered
     (skip-if-empty per FORK-01 plan Q6)."""
@@ -21658,7 +21760,8 @@ class _ParseDepPkg:
     pull_recommends / installer_chroot tests) — different shape, kept
     separate to avoid namespace collisions on shared keyword args."""
     def __init__(self, name, ver='1.0', *, depends=None, pre_depends=None,
-                 recommends=None, alt_depends=None, provides=None):
+                 recommends=None, alt_depends=None, alt_pre_depends=None,
+                 provides=None):
         self._fields = {'Package': name, 'Version': ver}
         self.package = name
         self.version = ver
@@ -21666,6 +21769,7 @@ class _ParseDepPkg:
         self.pre_depends  = list(pre_depends  or [])
         self.recommends   = list(recommends   or [])
         self.alt_depends  = list(alt_depends  or [])
+        self.alt_pre_depends = list(alt_pre_depends or [])
         self.conflicts    = []
         self.breaks       = []
         self.replaces     = []
@@ -21810,6 +21914,26 @@ def test_parse_dependency_alt_deps_default_to_first_alternative():
     dt = _make_parse_dep_tree({'foo': [foo], 'a': [a], 'b': [b]})
     dt.parse_dependency('foo')
     # First alt picked.
+    assert 'a' in foo.depends_on
+    assert 'b' not in foo.depends_on
+
+
+def test_parse_dependency_resolves_or_grouped_pre_depends():
+    """Regression (audit #10): an OR-grouped Pre-Depends (`Pre-Depends: a | b`,
+    carried as alt_pre_depends) must be resolved through the SAME alternative-
+    selection loop as alt_depends — defaulting to the first alternative when
+    none is pre-selected — so its provider enters the closure.  Before the fix
+    parse_dependency never read alt_pre_depends, so an OR pre-dep whose
+    providers aren't otherwise pulled was silently dropped (and
+    validate_selection never flagged it either)."""
+    a = _ParseDepPkg('a', '1.0')
+    b = _ParseDepPkg('b', '1.0')
+    foo = _ParseDepPkg('foo', '1.0', alt_pre_depends=[
+        [('a', '', ''), ('b', '', '')]
+    ])
+    dt = _make_parse_dep_tree({'foo': [foo], 'a': [a], 'b': [b]})
+    dt.parse_dependency('foo')
+    # First alternative of the OR pre-dep is pulled (Debian convention).
     assert 'a' in foo.depends_on
     assert 'b' not in foo.depends_on
 
@@ -23106,6 +23230,40 @@ def test_bump_version_rewrite_patterns_match_real_files():
     assert _n2 == 1, "_version._BASE_VERSION rewrite pattern did not match once"
 
 
+def test_bump_version_freeze_stamp_excludes_gitignored_buildstamp():
+    """Regression (audit #9): --freeze-stamp must NOT stage the gitignored
+    scripts/_buildstamp.py for the release commit.  `git add` on an ignored
+    path exits 1, which aborted the release mid-way (pyproject + _version.py
+    rewritten, stamp written, but no commit and no tag).  Drive main() with
+    git/file ops stubbed and assert the recorded `git add` excludes the stamp
+    while still writing it to disk."""
+    import sys
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump_version
+    _calls = []
+
+    def _fake_git(*args):
+        _calls.append(args)
+        return ''                       # status --porcelain -> '' (clean tree)
+
+    with mock.patch.object(bump_version, '_git', side_effect=_fake_git), \
+         mock.patch.object(bump_version, '_git_ok', return_value=False), \
+         mock.patch.object(bump_version, '_current_version',
+                           return_value='1.2.3'), \
+         mock.patch.object(bump_version, '_rewrite'), \
+         mock.patch.object(bump_version, '_write_buildstamp') as _ws:
+        _rc = bump_version.main(['patch', '--freeze-stamp', '--no-tag'])
+
+    assert _rc == 0
+    assert _ws.called, "freeze-stamp must still write the stamp to disk"
+    _add = next(c for c in _calls if c and c[0] == 'add')
+    assert bump_version._BUILDSTAMP_PY not in _add, (
+        "gitignored _buildstamp.py must not be staged for the release commit "
+        f"(git add on it exits 1 and aborts the release); add args: {_add}")
+    assert bump_version._PYPROJECT in _add and bump_version._VERSION_PY in _add
+
+
 def test_build_record_carries_toolchain_version():
     """new_build_record stamps the producing Athena-Build version (provenance);
     additive + informational, so it must not perturb the existing fields."""
@@ -24198,6 +24356,50 @@ def test_api01_readers_index_get_and_tamper():
         assert not readers.valid_package_name('Foo')
         assert not readers.valid_package_name('')
         assert readers.valid_package_name('libzstd')
+
+
+def test_webapi_mirror_state_reads_signed_mirror_conf_not_legacy():
+    """Regression (audit #13): webapi mirror_state reads the authoritative
+    HMAC-signed mirror.conf (via mirror.load_mirror_conf) — a mirror
+    registered ONLY in mirror.conf is visible, a leftover stale legacy
+    mirror.<name>.state is ignored, and the verify status is surfaced.  And
+    the read is side-effect-free: querying a box with no mirror.conf must NOT
+    create one (migrate=False)."""
+    import sys
+    import types
+    import json as _json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror
+    from webapi import readers
+    with tempfile.TemporaryDirectory() as _td:
+        _cfgdir = os.path.join(_td, 'config')
+        os.makedirs(_cfgdir)
+        _coord = os.path.join(_td, 'coord')
+        os.makedirs(_coord)
+        # shim with only dir_config — mirror derives the HMAC key dir from its
+        # parent, exactly as the webapi reader's shim does, so save+read agree.
+        _cfg = types.SimpleNamespace(dir_config=_cfgdir)
+        _doc = mirror._empty_mirror_doc()
+        _doc['mirrors']['peerX'] = {'role': 'peer', 'url': 'http://x.test'}
+        assert mirror.save_mirror_conf(_cfg, _doc)
+        # stale legacy state file that must be IGNORED post-migration
+        with open(os.path.join(_cfgdir, 'mirror.staleY.state'), 'w') as _fh:
+            _json.dump({'role': 'stale'}, _fh)
+
+        _out = readers.mirror_state(_cfgdir, _coord)
+        assert _out['mirror_conf_status'] == 'ok', _out
+        assert 'peerX' in _out['mirrors'], "mirror.conf-only entry invisible"
+        assert 'staleY' not in _out['mirrors'], "stale legacy .state leaked"
+
+    # No mirror.conf at all -> status 'missing', and the read must not write.
+    with tempfile.TemporaryDirectory() as _td2:
+        _cfgdir2 = os.path.join(_td2, 'config')
+        os.makedirs(_cfgdir2)
+        _out2 = readers.mirror_state(_cfgdir2, _td2)
+        assert _out2['mirror_conf_status'] == 'missing', _out2
+        assert _out2['mirrors'] == {}
+        assert not os.path.exists(os.path.join(_cfgdir2, 'mirror.conf')), (
+            "read-only mirror_state must not create mirror.conf (migrate=False)")
 
 
 def test_api01_http_endpoints_auth_and_payloads():
@@ -25491,6 +25693,7 @@ def test_tunnel_filenames_full_set_arch_profile_filtered():
 
     class _Src:
         package = 'fw'
+        version = '1'                     # real Source always carries .version
         binary = ['fw-common', 'fw-amd64-only', 'fw-arm-only',
                   'fw-doc', 'fw-udeb']
         package_list = [
@@ -40087,6 +40290,7 @@ def main() -> int:
         test_sta34_autorun_build_calls_source_build_bare_not_invalid_token,
         test_sta36_mirror_add_confirmation_declines_on_no,
         test_tunnel_transposes_and_needs_no_ledger,
+        test_tunnel_filenames_prefers_resolved_source_not_parse_order,
         test_sta33_build_depends_serialises_apt_pkg_profile_global,
         test_parse_source_build_args_recognises_indl_subset,
         test_cmd_source_build_indl_subset_rejected_in_dist_mode,
@@ -40636,6 +40840,7 @@ def main() -> int:
         test_download_file_file_scheme_missing_source,
         test_fork_mirror_discover_skips_repo_subdir,
         test_fork_mirror_discover_skips_dirs_missing_debian_control,
+        test_fork_mirror_read_pkg_version_rejects_broken_changelog,
         test_fork_mirror_generate_empty_tree_returns_false,
         test_fork_mirror_generate_emits_complete_layout,
         test_fork_mirror_strips_epoch_from_constructed_filenames,
@@ -40751,6 +40956,7 @@ def main() -> int:
         test_parse_dependency_recommends_pulled_when_flag_on,
         test_parse_dependency_alt_deps_first_already_selected_wins,
         test_parse_dependency_alt_deps_default_to_first_alternative,
+        test_parse_dependency_resolves_or_grouped_pre_depends,
         # TEST-08: Mirror.with_snapshot properties
         test_mirror_with_snapshot_none_returns_self,
         test_mirror_with_snapshot_is_idempotent,
@@ -40894,6 +41100,7 @@ def main() -> int:
         test_version_command_registered_and_user_agent_derived,
         test_bump_version_next_computation,
         test_bump_version_rewrite_patterns_match_real_files,
+        test_bump_version_freeze_stamp_excludes_gitignored_buildstamp,
         test_build_record_carries_toolchain_version,
         test_provenance_stamped_into_iso_and_repo_metadata,
         test_get_version_is_cached,
@@ -40908,6 +41115,7 @@ def main() -> int:
         # API-01: HTTP API (chunk 1 — auth + read endpoints)
         test_api01_key_lifecycle,
         test_api01_readers_index_get_and_tamper,
+        test_webapi_mirror_state_reads_signed_mirror_conf_not_legacy,
         test_api01_http_endpoints_auth_and_payloads,
         test_api01_artifact_tail_windowing_and_guards,
         test_api01_progress_aggregate,

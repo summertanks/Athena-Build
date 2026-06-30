@@ -229,29 +229,36 @@ def repo_summary(repo_dir: str) -> 'Dict[str, Any]':
 
 
 def mirror_state(config_dir: str, coord_dir: str) -> 'Dict[str, Any]':
-    """Registered mirrors' state files + the local coord head.  All of
-    this is already public-by-design federation metadata (heads are
-    published to every peer); private identity material under
-    coord/identity is NOT served."""
+    """Registered mirrors + the local coord head.  All of this is already
+    public-by-design federation metadata (heads are published to every peer);
+    private identity material under coord/identity is NOT served.
+
+    Mirror state is read from the authoritative HMAC-signed config/mirror.conf
+    via mirror.load_mirror_conf (with migrate=False so this read-only endpoint
+    never writes), NOT the legacy mirror.<name>.state files — those are left in
+    place but stale after migration, and a mirror registered only into
+    mirror.conf would otherwise be invisible.  The verify status is surfaced
+    so a tampered/unsigned mirror.conf is visible rather than served as truth."""
+    import types
+    import mirror as _mirror
     _mirrors: 'Dict[str, Any]' = {}
+    _status = 'error'
     try:
-        for _entry in sorted(os.listdir(config_dir)):
-            if _entry.startswith('mirror.') and _entry.endswith('.state'):
-                try:
-                    with open(os.path.join(config_dir, _entry)) as _fh:
-                        _mirrors[_entry[len('mirror.'):-len('.state')]] = \
-                            json.load(_fh)
-                except (OSError, ValueError):
-                    _mirrors[_entry] = {'error': 'unreadable'}
+        _cfg = types.SimpleNamespace(dir_config=config_dir)
+        _doc, _status = _mirror.load_mirror_conf(_cfg, migrate=False)
+        _raw = _doc.get('mirrors', {})
+        if isinstance(_raw, dict):
+            _mirrors = dict(_raw)
     except OSError:
-        pass
+        _status = 'error'
     _head: 'Any' = None
     try:
         with open(os.path.join(coord_dir, 'coord-head.json')) as _fh:
             _head = json.load(_fh)
     except (OSError, ValueError):
         pass
-    return {'mirrors': _mirrors, 'coord_head': _head}
+    return {'mirrors': _mirrors, 'mirror_conf_status': _status,
+            'coord_head': _head}
 
 
 _DELTA_MISS_RE = re.compile(r'declared-not-emitted: (.+)')

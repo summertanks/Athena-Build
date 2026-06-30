@@ -585,7 +585,13 @@ class DependencyTree:
         # Slightly more tricky how to handle alt_depends
         # Virtual names are registered in selected_pkgs at L134-135, so the name check
         # below covers both real packages and provides without a separate provides lookup.
-        _alt_depends = _selected_pkg.alt_depends
+        # alt_pre_depends (OR-grouped Pre-Depends, e.g. `Pre-Depends: A | B`) are
+        # resolved through the SAME alternative-selection loop: Pre-Depends are
+        # treated like Depends (see pre_depends above), so an OR pre-dep must
+        # pull a provider too.  Without this an OR pre-dep whose providers are
+        # not otherwise selected silently never enters selected_pkgs.
+        _alt_depends = list(_selected_pkg.alt_depends) + \
+            list(_selected_pkg.alt_pre_depends)
 
         for _alt in _alt_depends:
             # Find alts already selected whose version constraint is also satisfied.
@@ -831,8 +837,10 @@ class DependencyTree:
                 logger.error(f"DEPENDENCY HELL: {_pkg} version constraints unsatisfied")
                 _breaks = True
 
-            # Check Alt Depends
-            for _section in self.selected_pkgs[_pkg].alt_depends:
+            # Check Alt Depends — and Alt Pre-Depends (same OR-group shape;
+            # an unsatisfied OR pre-dep must be flagged, not silently passed).
+            for _section in (list(self.selected_pkgs[_pkg].alt_depends)
+                             + list(self.selected_pkgs[_pkg].alt_pre_depends)):
                 _found = False
 
                 for pkg in _section:

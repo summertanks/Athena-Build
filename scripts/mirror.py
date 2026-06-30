@@ -712,27 +712,33 @@ def _migrate_legacy_mirror_state(config) -> Optional[dict]:
     return _doc if _found else None
 
 
-def load_mirror_conf(config) -> 'tuple[dict, str]':
+def load_mirror_conf(config, migrate: bool = True) -> 'tuple[dict, str]':
     """Load + verify config/mirror.conf.  Returns (doc, status):
       'ok'        — present and HMAC-verified (or freshly migrated)
       'missing'   — no mirror.conf and no legacy state (empty doc)
       'badsig'    — present but HMAC mismatch → manual edit / tamper
       'malformed' — present but not a valid signed mirror document
     On 'badsig'/'malformed' the doc is empty — callers must NOT act on it;
-    `mirror reseal` re-signs an intentionally-edited file."""
+    `mirror reseal` re-signs an intentionally-edited file.
+
+    migrate=False suppresses the one-time legacy-state→mirror.conf migration
+    that otherwise runs (and WRITES mirror.conf) when the file is absent — for
+    read-only callers (e.g. the web API) that must not have side effects."""
     import utils as _utils
     _path = mirror_conf_path(config)
     try:
         with open(_path, 'rb') as _fh:
             _raw = _fh.read()
     except FileNotFoundError:
-        _migrated = _migrate_legacy_mirror_state(config)
-        if _migrated is not None:
-            save_mirror_conf(config, _migrated)
-            logger.info(
-                "mirror.conf: migrated %d legacy mirror.<name>.state file(s) "
-                "into the signed mirror.conf", len(_migrated['mirrors']))
-            return _migrated, 'ok'
+        if migrate:
+            _migrated = _migrate_legacy_mirror_state(config)
+            if _migrated is not None:
+                save_mirror_conf(config, _migrated)
+                logger.info(
+                    "mirror.conf: migrated %d legacy mirror.<name>.state "
+                    "file(s) into the signed mirror.conf",
+                    len(_migrated['mirrors']))
+                return _migrated, 'ok'
         return _empty_mirror_doc(), 'missing'
     except OSError as _e:
         logger.error(f"mirror.conf read failed ({_path}): {_e}")

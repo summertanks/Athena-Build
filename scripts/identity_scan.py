@@ -234,6 +234,14 @@ def _parse_apt_install_line(line: str) -> Optional[Tuple[List[str], bool]]:
     # Strip trailing inline-comment.  Conservative: only treat ' #' as a
     # comment marker so URLs containing # in the body don't get clipped.
     head = stripped.split(' #', 1)[0]
+    # The 'apt-install' gate above tested the whole line; if the token
+    # survived only inside the stripped ' #' comment (e.g.
+    # `echo done # call apt-install foo later`), the actual command has no
+    # invocation to audit.  Re-check the comment-stripped command — without
+    # this, the split below returns a 1-element list and [1] raises
+    # IndexError, aborting the whole hook audit.
+    if 'apt-install' not in head:
+        return None
     # Take whatever follows the `apt-install` token.  Multiple occurrences
     # of the literal in one line (rare) would be malformed; take the first.
     after = head.split('apt-install', 1)[1]
