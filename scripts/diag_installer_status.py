@@ -143,12 +143,16 @@ def main(path: str) -> int:
         print(f"ERROR: {path} not found")
         return 2
     # File may be root-owned; try plain read first, fall back to sudo.
+    # Decode latin-1 (1:1 byte→codepoint) so the non-ASCII scan reports the
+    # TRUE byte value via ord(_c); a utf-8/errors='replace' read would map a
+    # high byte to U+FFFD and misreport it.
     try:
-        with open(path, 'r', errors='replace') as fh:
+        with open(path, 'r', encoding='latin-1') as fh:
             _content = fh.read()
     except PermissionError:
         import subprocess
-        _r = subprocess.run(['sudo', 'cat', path], capture_output=True, text=True)
+        _r = subprocess.run(['sudo', 'cat', path], capture_output=True,
+                            text=True, encoding='latin-1')
         if _r.returncode != 0:
             print(f"ERROR: cannot read {path}: {_r.stderr}")
             return 2
