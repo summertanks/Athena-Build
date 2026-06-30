@@ -530,6 +530,35 @@ def test_write_local_conf_writes_relocated_machine_keys():
         assert cfg2.signing_key_uid == 'Athena Build <athena@local>'
 
 
+def test_cmd_run_setters_survive_local_conf_write_failure():
+    """Regression (audit #71): the machine-local `set` setters must not abort
+    on a local.conf write failure — the in-memory value is already applied,
+    only durability is lost (mirroring _set_mode).  A raising write_local_conf
+    is caught and surfaced as a warning, not bubbled to the dispatcher."""
+    import sys
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    import commands.cmd_run as _cr
+
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Cfg:
+        pass
+    _sess.config = _Cfg()
+    with mock.patch.object(_cr, 'console'), \
+         mock.patch.object(_cr.utils, 'write_local_conf',
+                           side_effect=OSError('disk full')):
+        # the helper returns a warning suffix, never raises
+        _suffix = _sess._persist_local(name='x')
+        assert 'could not persist' in _suffix.lower(), _suffix
+        # a full setter swallows the OSError AND still applies the live value
+        _sess._set_name('athena-x')
+        assert _sess.config.system_name == 'athena-x'
+        _sess._set_jobs('4')
+        assert _sess.config.max_parallel_builds == 4
+
+
 def test_remote_conf_helpers_round_trip():
     """REMOTE-CONF: add_remote / list_remotes / delete_remote round-trip
     through config/remote.conf, validate names, and BuildConfig derives
@@ -40555,6 +40584,7 @@ def main() -> int:
         test_local_conf_absent_falls_back_to_build_conf,
         test_local_conf_malformed_invalidates_config,
         test_write_local_conf_writes_relocated_machine_keys,
+        test_cmd_run_setters_survive_local_conf_write_failure,
         test_mirror_conf_registration_round_trips_and_migrates,
         test_remote_conf_helpers_round_trip,
         test_remote_token_generate_and_path,
