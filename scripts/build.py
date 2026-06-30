@@ -560,9 +560,12 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         chroot contents are root-owned (debootstrap + dpkg --unpack
         run as root; remove-time also needs root)."""
         _force = 'force' in args
-        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
-        if not self._refresh_sudo(_password):
+        # Funnel through the single prompt -> validate -> scrub path rather than
+        # prompting + _refresh_sudo inline (which never scrubbed the password).
+        _password = self._collect_validated_sudo_password(context='clean')
+        if _password is None:
             return
+        _password = '*' * len(_password)   # wipes rely on the `sudo -v` cache
         _ok_live = self._wipe_dir_contents(
             'buildroot/live', self.config.dir_chroot,
             sudo=True, skip_prompt=_force)

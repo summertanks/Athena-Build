@@ -80,27 +80,12 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         #   2. tui.Prompt (PROMPT_PASSWORD, masked) — interactive.
         # dpkg and the install scripts run under sudo via sudo -S (stdin),
         # cached for all subprocess calls.
-        _env_pw = os.environ.pop('ATHENA_SUDO_PASSWORD', None)
-        if _env_pw is not None:
-            tui.console.print(
-                "Build system: using sudo password from ATHENA_SUDO_PASSWORD")
-            self._password = _env_pw
-        else:
-            tui.console.print(
-                "Build system needs sudo — current user must be in the "
-                "sudoers group")
-            self._password = Prompt(
-                PROMPT_PASSWORD, "Enter sudo password").get_response()
+        # Collect + validate the sudo credential (shared with for_iso) so we
+        # fail fast rather than discovering a bad credential mid-install.
+        self._password = self._collect_and_validate_sudo()
         # Initialised here so the .password property's post-scrub check
         # behaves the same on a fresh instance and a scrubbed one.
         self._password_scrubbed = False
-
-        # Validate the password immediately so we fail fast rather than
-        # discovering a bad credential mid-install.
-        _proc = subprocess.run(['sudo', '-S', '-v'], input=self._password + '\n',
-                               capture_output=True, text=True)
-        if _proc.returncode != 0:
-            raise RuntimeError(f"Incorrect password or user not in sudoers file: {_proc.stderr.strip() or _proc.stdout.strip()}")
 
         # Wipe the chroot now that we have a validated sudo credential.
         # rm -rf the contents (not the directory itself) so dir_chroot remains.
@@ -146,6 +131,33 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         # Run pre-Install
         self.pre_install()
 
+    @staticmethod
+    def _collect_and_validate_sudo() -> str:
+        """Collect the sudo password and validate it via `sudo -S -v`.
+
+        Source order: 1. $ATHENA_SUDO_PASSWORD (scripted/CI), pop'd from
+        os.environ after read so it doesn't leak into child subprocesses or
+        /proc/<pid>/environ; 2. an interactive masked Prompt.  Raises
+        RuntimeError on a bad credential.  Shared by __init__ and for_iso so the
+        pickup+prompt+validate sequence lives in one place.
+        """
+        _env_pw = os.environ.pop('ATHENA_SUDO_PASSWORD', None)
+        if _env_pw is not None:
+            tui.console.print(
+                "Build system: using sudo password from ATHENA_SUDO_PASSWORD")
+            _password = _env_pw
+        else:
+            tui.console.print(
+                "Build system needs sudo — current user must be in the "
+                "sudoers group")
+            _password = Prompt(
+                PROMPT_PASSWORD, "Enter sudo password").get_response()
+        _proc = subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
+                               capture_output=True, text=True)
+        if _proc.returncode != 0:
+            raise RuntimeError(f"Incorrect password or user not in sudoers file: {_proc.stderr.strip() or _proc.stdout.strip()}")
+        return _password
+
     @classmethod
     def for_iso(cls, config: BuildConfig) -> 'BuildSystem':
         """Factory: create a BuildSystem for ISO assembly only.
@@ -167,25 +179,8 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
             if not os.path.exists(_dir):
                 raise RuntimeError(f"Missing essential directory: {_dir}")
 
-        # same env-var pickup as the main constructor.
-        _env_pw = os.environ.pop('ATHENA_SUDO_PASSWORD', None)
-        if _env_pw is not None:
-            tui.console.print(
-                "Build system: using sudo password from ATHENA_SUDO_PASSWORD")
-            _password = _env_pw
-        else:
-            tui.console.print(
-                "Build system needs sudo — current user must be in the "
-                "sudoers group")
-            _password = Prompt(
-                PROMPT_PASSWORD, "Enter sudo password").get_response()
-        _proc = subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
-                               capture_output=True, text=True)
-        if _proc.returncode != 0:
-            raise RuntimeError(
-                f"Incorrect password or user not in sudoers file: {_proc.stderr.strip() or _proc.stdout.strip()}"
-            )
-        _self._password = _password
+        # same pickup + validate as the main constructor (shared helper).
+        _self._password = cls._collect_and_validate_sudo()
         _self._password_scrubbed = False
         return _self
 

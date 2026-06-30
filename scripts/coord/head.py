@@ -22,8 +22,10 @@ codebase.  Differences:
 Freshness:
   read_coord_head(...) returns the parsed dict + the head_time field.
   is_fresh(head, inrelease_sha256, inrelease_date_iso) is a separate
-  policy check the caller composes (called by `coord sync pull` in
-  P2 and the publish state machine in P3).
+  policy check the caller composes.  NOTE: is_fresh is a STAGED primitive
+  with no production caller yet — the rollback/staleness defence is
+  deferred (intended for `coord sync pull` / the publish state machine),
+  so today nothing enforces it.
 """
 
 import datetime as _dt
@@ -90,6 +92,10 @@ def write_coord_head(
         logger.error(
             f"coord.head: tier-1 signing homedir missing or unreadable: "
             f"{signing_homedir!r} — refusing to leave unsigned manifest")
+        # _cleanup_tmp removes BOTH .tmp files; the real coord-head.json/.sig
+        # pair is only swapped in atomically (os.replace) after signing
+        # succeeds, so this failure path can never orphan a stale .sig — the
+        # prior valid pair is left intact (audit #88/#90).
         _cleanup_tmp()
         return False
     _r = _subprocess.run(
@@ -168,6 +174,10 @@ def is_fresh(
     head: dict, inrelease_sha256: str, inrelease_date_iso: str,
 ) -> Tuple[bool, str]:
     """Policy check: is this coord-head fresh enough to use?
+
+    STAGED: this has no production caller yet (the rollback/staleness defence
+    is deferred to P2/P3); it is implemented and unit-tested but not wired into
+    the pull/publish read paths, so nothing enforces freshness today.
 
     Returns (ok, reason).  `ok=False` cases:
       - head's inrelease_sha256 doesn't match the InRelease we fetched

@@ -3356,17 +3356,21 @@ def test_ux05b_atena_sudo_password_env_var_picked_up():
     _bs = os.path.join(_ROOT, 'scripts', 'buildsystem.py')
     with open(_bs) as fh:
         _src = fh.read()
-    # The constructor and for_iso factory both must read+pop the env var
-    # before reaching for Prompt(PROMPT_PASSWORD, ...).
+    # The env var must be read+pop'd before reaching for Prompt(
+    # PROMPT_PASSWORD, ...).
     assert "os.environ.pop('ATHENA_SUDO_PASSWORD'" in _src, (
         "UX-05b: ATHENA_SUDO_PASSWORD must be pop'd from os.environ "
         "(read + remove in one step so the env var doesn't leak to "
         "child subprocesses)")
-    # Pop must happen TWICE (once per code path: __init__ + for_iso)
+    # The pickup now lives in ONE shared helper (audit #38) — pop'd once —
+    # called from BOTH __init__ and for_iso (the iso-only factory).
     assert _src.count(
-        "os.environ.pop('ATHENA_SUDO_PASSWORD'") == 2, (
-        "UX-05b: env-var pickup must be in BOTH BuildSystem.__init__ "
-        "and BuildSystem.for_iso (the iso-only factory)")
+        "os.environ.pop('ATHENA_SUDO_PASSWORD'") == 1, (
+        "UX-05b: env-var pickup should live in the single "
+        "_collect_and_validate_sudo helper")
+    assert _src.count('_collect_and_validate_sudo') >= 3, (
+        "UX-05b: _collect_and_validate_sudo must be DEFINED once and CALLED "
+        "from both BuildSystem.__init__ and BuildSystem.for_iso")
 
 
 def test_ux05d_cli_print_emits_ansi_when_tty():
