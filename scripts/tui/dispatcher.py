@@ -20,6 +20,7 @@ import time
 import traceback as _traceback
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as _FutureTimeout
+from concurrent.futures import CancelledError
 from typing import Any, Callable, List, Optional, Protocol
 
 from .events import (
@@ -210,6 +211,11 @@ class Dispatcher:
                 if self.state.quit:
                     raise RuntimeError(
                         'dispatcher stopped during prompt') from None
+            except CancelledError:
+                # The UI loop cancelled the pending Future on shutdown; a
+                # prompt has no value to return, so fail loudly (don't hang).
+                raise RuntimeError(
+                    'dispatcher stopped during prompt') from None
 
     def set_key_interceptor(self, tab_name: str,
                             fn: Callable[[str], bool]) -> None:
@@ -241,6 +247,8 @@ class Dispatcher:
             except _FutureTimeout:
                 if self.state.quit:
                     return 0    # shutdown raced in — don't hang the caller
+            except CancelledError:
+                return 0        # Future cancelled on shutdown — don't propagate
 
     # ─── Loop ────────────────────────────────────────────────────────────
     def run(self) -> int:
