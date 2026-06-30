@@ -10007,6 +10007,134 @@ def test_transpose_deb_round_trip():
         assert _xup == '1:2.39.5-0+deb12u3', _xup
 
 
+def _build_test_deb(_tmp, pkg, version, fname):
+    """Build a minimal .deb with the given Package/Version under _tmp; return
+    its path.  Shared by the transpose coverage tests."""
+    import subprocess
+    _work = os.path.join(_tmp, 'src_' + fname)
+    os.makedirs(os.path.join(_work, 'DEBIAN'))
+    os.makedirs(os.path.join(_work, 'usr', 'lib'))
+    with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as _fh:
+        _fh.write(f'Package: {pkg}\nVersion: {version}\n'
+                  'Architecture: amd64\nMaintainer: T <t@l>\n'
+                  'Description: transpose coverage\n')
+    with open(os.path.join(_work, 'usr', 'lib', 'p'), 'w') as _fh:
+        _fh.write('x\n')
+    _p = os.path.join(_tmp, fname)
+    subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _p],
+                   check=True, capture_output=True)
+    return _p
+
+
+def _have_dpkg_deb():
+    import subprocess
+    try:
+        subprocess.run(['dpkg-deb', '--version'], check=True,
+                       capture_output=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def test_transpose_deb_tunnel_keeps_binnmu_and_rewrites_trailing_deb():
+    """Coverage gap (audit #15): the TUNNEL call shape of transpose_deb (no
+    patch_level / force_bn / sibling_names — the firmware/microcode path).
+      (a) a tunnelled binNMU `X+debNuK+bN`: the trailing token is a binNMU, so
+          the transpose is a NO-OP on the EMBEDDED +deb and the frozen +bN
+          inter-binary pin is KEPT (status 'unchanged').
+      (b) a tunnel whose trailing token IS a `+debNuK` rewrites to `+asg<R>uK`.
+    A trailing-token-regex regression would silently corrupt a frozen +bN pin
+    on a real production path; this is the highest-value of the three gaps."""
+    import subprocess
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import transpose_deb
+    if not _have_dpkg_deb():
+        print("SKIP test_transpose_deb_tunnel_keeps_binnmu (no dpkg-deb)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        # (a) tunnelled binNMU — unchanged, +b1 AND embedded +deb12u3 retained.
+        _a = _build_test_deb(_tmp, 'shim-signed', '1.0-2+deb12u3+b1',
+                             'shim-signed_1.0-2+deb12u3+b1_amd64.deb')
+        _ra = transpose_deb(_a, 'asg', 1)               # tunnel shape
+        assert _ra['status'] == 'unchanged', _ra
+        _va = subprocess.run(['dpkg-deb', '-f', _ra['new_path'], 'Version'],
+                             check=True, capture_output=True,
+                             text=True).stdout.strip()
+        assert _va == '1.0-2+deb12u3+b1', _va
+        assert (os.path.basename(_ra['new_path'])
+                == 'shim-signed_1.0-2+deb12u3+b1_amd64.deb'), _ra['new_path']
+        # (b) trailing +debNuK rewrites to +asg<R>uK.
+        _b = _build_test_deb(_tmp, 'shim-signed', '1.0-2+deb12u3',
+                             'shim-signed_1.0-2+deb12u3_amd64.deb')
+        _rb = transpose_deb(_b, 'asg', 1)
+        assert _rb['status'] == 'rewritten', _rb
+        assert _rb['version'] == '1.0-2+asg1u3', _rb
+        assert (os.path.basename(_rb['new_path'])
+                == 'shim-signed_1.0-2+asg1u3_amd64.deb'), _rb['new_path']
+
+
+def test_transpose_fork_athena_version_is_noop():
+    """Coverage gap (audit #16): a fork version (Model A — changelog-verbatim,
+    ending +athenaN with an EMBEDDED +deb before it) must pass through transpose
+    unchanged: no trailing +debNuK, so no rewrite, and a faithful (was_patched=
+    False) build adds no +asg / +asg1u0+p1.  Pinned at the pure-transpose level
+    AND end-to-end through transpose_deb (the per-binary transform
+    _normalize_built_artifacts runs)."""
+    import subprocess
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    # (a) pure transpose: the embedded +deb followed by +athenaN is left alone.
+    assert utils.transpose('12.4+deb12u14+athena1', 'asg', 1) == \
+        '12.4+deb12u14+athena1'
+    assert utils.transpose('12.4+athena2', 'asg', 1) == '12.4+athena2'
+    # (b) end-to-end on a fork .deb (faithful build): filename + control Version
+    # stay +athena1 — no +asg, no +asg1u0+p1.
+    if not _have_dpkg_deb():
+        print("SKIP test_transpose_fork_athena_version_is_noop (no dpkg-deb)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _f = _build_test_deb(
+            _tmp, 'athena-base-files', '12.4+deb12u14+athena1',
+            'athena-base-files_12.4+deb12u14+athena1_amd64.deb')
+        _r = utils.transpose_deb(_f, 'asg', 1)          # patch_level=0 (faithful)
+        assert _r['status'] == 'unchanged', _r
+        _v = subprocess.run(['dpkg-deb', '-f', _r['new_path'], 'Version'],
+                            check=True, capture_output=True,
+                            text=True).stdout.strip()
+        assert _v == '12.4+deb12u14+athena1', _v
+        assert (os.path.basename(_r['new_path'])
+                == 'athena-base-files_12.4+deb12u14+athena1_amd64.deb'), \
+            _r['new_path']
+
+
+def test_restamp_sibling_pins_force_bn_branch():
+    """Coverage gap (audit #17): the force-binNMU branch of _restamp_sibling_pins
+    (only the +p1 patch tail was covered).  A force build (force_bn set) restamps
+    every same-source sibling `=` pin (already transposed) with the +bN tail —
+    anchored to +asg<R>u0 on a pristine base — while a non-sibling pin is left
+    untouched.  Note: bn_bump_count is only ever 0 at runtime today, so the
+    force path is shipped-but-inert; this pins the wiring."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump
+    _content = ('Depends: libX (= 1.0-2+asg1u3), libY (= 1.0-2), '
+                'other (= 1.0-2+asg1u3)\n')
+    # force_bn=1, patch_level=0
+    _out = bump._restamp_sibling_pins(
+        _content, {'libX', 'libY'}, 0, 1, 'asg', 1)
+    assert 'libX (= 1.0-2+asg1u3+b1)' in _out, _out     # asg marker → +b1
+    assert 'libY (= 1.0-2+asg1u0+b1)' in _out, _out     # pristine → u0 anchor
+    assert 'other (= 1.0-2+asg1u3)' in _out, _out       # non-sibling untouched
+    # combined patch + force: +pP then +bN, in that order.
+    _out2 = bump._restamp_sibling_pins(
+        'Depends: libX (= 1.0-2+asg1u3)\n', {'libX'}, 2, 1, 'asg', 1)
+    assert 'libX (= 1.0-2+asg1u3+p2+b1)' in _out2, _out2
+    # no patch + no force = no-op (returns content unchanged).
+    assert bump._restamp_sibling_pins(
+        _content, {'libX'}, 0, None, 'asg', 1) == _content
+
+
 def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
     """STA-21 anti-regression: _strip_nmu_from_built_artifacts must
     NOT walk repo/ subdirs nor open .debs to filter by Source field.
@@ -40255,6 +40383,9 @@ def main() -> int:
         test_strip_nmu_from_deb_round_trip,
         test_strip_nmu_from_deb_idempotent,
         test_transpose_deb_round_trip,
+        test_transpose_deb_tunnel_keeps_binnmu_and_rewrites_trailing_deb,
+        test_transpose_fork_athena_version_is_noop,
+        test_restamp_sibling_pins_force_bn_branch,
         test_audit_nmu_residue_skips_tunneled_sources,
         test_cmd_audit_nmu_residue_absorbed_into_cmd_audit,
         test_cmd_strip_repo_registered_in_repo_dispatcher,
