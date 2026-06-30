@@ -360,7 +360,10 @@ def _onboard_federation(session) -> bool:
     utils.write_local_conf(config, role='federation')
     # Registration marker now lives in the signed mirror.conf, not local.conf.
     import mirror as _mirror
-    _mirror.set_registration(config, _name, _keys[0] if _keys else '')
+    if not _mirror.set_registration(config, _name, _keys[0] if _keys else ''):
+        console.print(
+            "✗ could not record registration in mirror.conf", tui.COLOR_ERROR)
+        return False                      # stay un-configured + re-runnable
 
     # 6. Mode.
     _mode = _ask(PROMPT_OPTIONS, "Build mode",
