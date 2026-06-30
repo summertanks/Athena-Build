@@ -78,6 +78,11 @@ def resolve_closure(
     Returns the set of selected real package names — identical for any
     ordering of ``seeds`` (this is the property the live resolver lacks).
     """
+    # Materialize once: `seeds` is an Iterable and is consumed BOTH by
+    # _infer_real below AND the _pending comprehension; a one-shot generator
+    # would be exhausted by the first pass, yielding an empty closure on the
+    # default (real_pkgs=None) path.
+    seeds = list(seeds)
     _provides = provides or {}
     _prov_index = _provider_index(_provides)
     _real = real_pkgs if real_pkgs is not None else _infer_real(seeds, deps, _provides)
