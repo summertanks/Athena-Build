@@ -13421,6 +13421,7 @@ def _make_collision_cache(deb_drops=None, udeb_drops=None,
       udeb_versions: same shape, for udeb namespace
     """
     import sys
+    import types
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from cache import Cache
     from collections import defaultdict
@@ -13429,12 +13430,14 @@ def _make_collision_cache(deb_drops=None, udeb_drops=None,
     c._upstream_udeb_collisions = defaultdict(list, udeb_drops or {})
     c.package_hashtable = defaultdict(lambda: defaultdict(list))
     c.udeb_hashtable    = defaultdict(lambda: defaultdict(list))
+    # Real records carry a .package field == the standalone name; the fork
+    # gate now filters on it (audit #47), so the scaffold must too.
     for _n, _vers in (pkg_versions or {}).items():
         for _v in _vers:
-            c.package_hashtable[_n][_v] = ['<placeholder>']
+            c.package_hashtable[_n][_v] = [types.SimpleNamespace(package=_n)]
     for _n, _vers in (udeb_versions or {}).items():
         for _v in _vers:
-            c.udeb_hashtable[_n][_v] = ['<placeholder>']
+            c.udeb_hashtable[_n][_v] = [types.SimpleNamespace(package=_n)]
     c.error_str = ''
     return c
 
@@ -16709,6 +16712,123 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
         f"long={_pos_long} pad={_pos_pad}; bar must stay horizontally "
         f"stable"
     )
+
+
+def test_fork_version_gate_ignores_provides_injected_records():
+    """Regression (audit #47): the fork-vs-upstream collision gate must compute
+    the fork version only from records whose real Package field is the name. A
+    Provides-injected record (a DIFFERENT binary providing this name, keyed
+    under its own epoch-bearing version) must NOT inflate the fork version and
+    mask a real upstream-dominates collision."""
+    import sys
+    import types
+    from collections import defaultdict
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    c = Cache.__new__(Cache)
+    c._upstream_collisions = defaultdict(list, {'pkgsel': [('main', '0.80')]})
+    c._upstream_udeb_collisions = defaultdict(list)
+    c.package_hashtable = defaultdict(lambda: defaultdict(list))
+    c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
+    # real fork record (low version) + a Provides-injected record (different
+    # Package, high epoch version) both keyed under 'pkgsel'.
+    c.package_hashtable['pkgsel']['0.79+thor1'] = [
+        types.SimpleNamespace(package='pkgsel')]
+    c.package_hashtable['pkgsel']['2:99'] = [
+        types.SimpleNamespace(package='other-binary-providing-pkgsel')]
+    c.error_str = ''
+    # upstream 0.80 > real fork 0.79+thor1 → gate must FIRE.  The old code took
+    # the injected 2:99 as the fork version (0.80 < 2:99) and wrongly passed.
+    assert c._verify_no_fork_collisions() is False
+    assert 'pkgsel' in c.error_str and '0.79+thor1' in c.error_str
+
+
+def test_diag_installer_status_reports_folded_line():
+    """Regression (audit #117): the non-ASCII position must be interpretable —
+    report the folded line number, since the offset is into the continuation-
+    joined value, not a source column."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import diag_installer_status
+    assert 'folded line' in inspect.getsource(diag_installer_status), (
+        "non-ASCII diagnostic must report the folded line, not a bare offset")
+
+
+def test_select_packages_detects_reserved_pool_group_clash():
+    """Regression (audit #176): a real pkg.list [(pool)] section collides with
+    the reserved POOL_GROUP; _load_model must detect and warn, not silently
+    overwrite (the old comment wrongly claimed it couldn't collide)."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import select_packages
+    assert 'if POOL_GROUP in self._groups' in inspect.getsource(
+        select_packages), "the reserved-pool-group clash must be detected"
+
+
+def test_api_backend_prunes_completed_jobs():
+    """Regression (audit #210): the --api backend must cap retained completed
+    jobs — the queue worker added a Job per submit and never evicted any, so a
+    long-lived server accumulated Job records unboundedly.  Running/queued jobs
+    are never pruned."""
+    import sys
+    import threading
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from webapi.jobs import ApiBackend, Job
+    _b = ApiBackend.__new__(ApiBackend)
+    _b._jobs = {}
+    _b._jobs_lock = threading.Lock()
+    _cap = ApiBackend._MAX_COMPLETED_JOBS
+    for _i in range(_cap + 50):
+        _j = Job(f'cmd{_i}')
+        _j.state = 'done'
+        _j.finished = float(_i)
+        _b._jobs[_j.id] = _j
+    _running = Job('live')
+    _running.state = 'running'
+    _b._jobs[_running.id] = _running
+    _b._prune_completed_jobs()
+    _done = [_j for _j in _b._jobs.values() if _j.state == 'done']
+    assert len(_done) == _cap, len(_done)
+    assert _running.id in _b._jobs, "running job must never be pruned"
+    assert all(_j.finished >= 50 for _j in _done), "evicted the wrong (newest)"
+
+
+def test_dispatcher_handles_cancelled_future():
+    """Regression (audit #186): console_mark / request_prompt must catch
+    CancelledError (the UI loop cancels pending Futures on shutdown), not let
+    it propagate."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui.dispatcher as _d
+    _src = inspect.getsource(_d)
+    assert _src.count('except CancelledError') >= 2, (
+        "both console_mark and request_prompt must handle a cancelled Future")
+
+
+def test_render_anchors_widgets_to_bottom_band():
+    """Regression (audit #191): when content doesn't fill the pane, widgets
+    must be anchored to the bottom band, not floated under the last line."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui.render as _r
+    assert 'max(row, max_y - len(widget_strs))' in inspect.getsource(_r), (
+        "widget row must be padded to the bottom band")
+
+
+def test_disk_image_removes_raw_intermediate_on_failure():
+    """Regression (audit #120): build_disk_image must unlink the sparse _raw
+    intermediate in its finally — _convert_to_qcow2 only removes it on success,
+    so a failure path leaked GBs of disk."""
+    import inspect
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    assert 'os.unlink(_raw)' in inspect.getsource(disk_image.build_disk_image), (
+        "build_disk_image's finally must remove the _raw intermediate")
 
 
 def test_selection_lock_classify_returns_independent_empty_sets():
@@ -42168,6 +42288,13 @@ def main() -> int:
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,
         test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_fork_version_gate_ignores_provides_injected_records,
+        test_diag_installer_status_reports_folded_line,
+        test_select_packages_detects_reserved_pool_group_clash,
+        test_api_backend_prunes_completed_jobs,
+        test_dispatcher_handles_cancelled_future,
+        test_render_anchors_widgets_to_bottom_band,
+        test_disk_image_removes_raw_intermediate_on_failure,
         test_selection_lock_classify_returns_independent_empty_sets,
         test_remote_localmirror_cum_total_guards_null_total_size,
         test_fork_mirror_release_architectures_uses_build_arch,
