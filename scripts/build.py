@@ -82,7 +82,7 @@ asciiart_logo = (
     'https://github.com/summertanks/Athena-Build'
 )
 
-# TODO: make all apt_pkg.parse functions arch specific
+# See #222: make all apt_pkg.parse call sites arch-specific.
 
 
 class BuildFlags:

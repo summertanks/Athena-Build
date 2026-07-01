@@ -220,7 +220,7 @@ def load_keyring(keyring_dir: str) -> Dict[str, str]:
 # checked as a whole.  A pubkey dropped onto the mirror by anyone with SSH
 # write but NO tier-1 key has no entry in that signed map, so its claims are
 # rejected.  (Caveat, accepted: the tier-1 key is shared across peers, so this
-# stops OUTSIDERS, not a malicious insider peer — see TODO FED-03.)
+# stops OUTSIDERS, not a malicious insider peer — see #223 (FED-03 insider-peer).)
 
 
 def pubkey_sha256(pub_path: str) -> 'Optional[str]':

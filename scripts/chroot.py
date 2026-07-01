@@ -1260,7 +1260,7 @@ class _ChrootMixin:
 
         Ref: https://www.linuxfromscratch.org/lfs/view/development/chapter07/creatingdirs.html
         Note: man(1..8) directories are intentionally omitted for now.
-        TODO: load dir/owner/permission list from a config file rather than hardcoding.
+        See #221: load the dir/owner/permission list from a config file rather than hardcoding.
         """
 
         # Step 1: usrmerge — create /usr/<name> targets then symlink the legacy
@@ -1300,7 +1300,8 @@ class _ChrootMixin:
 
     def pre_install(self):
         # Two parts here - copy files and then run commands
-        # TODO: Let it load from file rather than hard coding it, risk of something malicious coming in though
+        # See #221: load the overlay list from a TRUST-GATED manifest rather than
+        # hardcoding — a writable manifest could inject malicious files into the chroot.
         logger.info(f"pre_install: overlay + patch from {self._dir_preinstall_patch}")
         # Parse files to copy
         for root, _dirs, files in os.walk(self._dir_preinstall_patch):
