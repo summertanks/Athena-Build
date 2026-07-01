@@ -35864,9 +35864,11 @@ def test_prep_mirror_script_contract():
         assert _tok in _src, f"prep-mirror.sh missing {_tok!r}"
     # never clobbers: the unexpected/abort paths must exit non-zero
     assert 'Refusing to modify' in _src or 'refusing' in _src.lower(), _src
-    # dist-id + root are DERIVED, not typed: reads build.conf DISTRIBUTION,
-    # serves /<dist-id>, resolves $HOME for the default root.
-    assert 'build.conf' in _src and 'DISTRIBUTION' in _src, _src
+    # dist-id + root are DERIVED, not typed: reads distro.conf [Build]
+    # DISTRIBUTION, serves /<dist-id>, resolves $HOME for the default root.
+    # (Identity keys live in distro.conf, not build.conf — build.conf only
+    # carries [Live]/[Disk]/[Packages]/[Source].)
+    assert 'distro.conf' in _src and 'DISTRIBUTION' in _src, _src
     assert 'EXPLICIT_ROOT' in _src and 'CANON_URL' in _src, _src
     # Q2 — reports a per-component inventory (fills only the gaps)
     assert 'Inventory' in _src and 'INV_dists' in _src and 'INV_marker' in _src, _src

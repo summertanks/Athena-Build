@@ -21,7 +21,7 @@
 #
 # The remote root + served path are DERIVED, not typed:
 #   * the served path is /<dist-id> where <dist-id> = [Build] DISTRIBUTION
-#     (config/build.conf) lowercased — the SAME value `mirror add` derives
+#     (config/distro.conf) lowercased — the SAME value `mirror add` derives
 #     via derive_public_url(), so the two can't disagree.
 #   * the remote root defaults to <remote-$HOME>/<dist-id> (resolved over
 #     SSH), matching `repo publish ssh`.  Pass an explicit path in the
@@ -43,7 +43,7 @@
 #
 set -euo pipefail
 _SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONF="${_SELF_DIR}/config/build.conf"
+CONF="${_SELF_DIR}/config/distro.conf"
 
 # ── presentation ────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -86,9 +86,9 @@ SSH_URL="${_pos[0]}"; SSH_KEY="${_pos[1]}"
 [ -f "$SSH_KEY" ] || die "SSH key not found: ${SSH_KEY}" 2
 case "$PROTO" in http|https) ;; *) die "--proto must be http or https (got '${PROTO}')" 2 ;; esac
 
-# ── distribution id (from config/build.conf, [Build] DISTRIBUTION) ───────
+# ── distribution id (from config/distro.conf, [Build] DISTRIBUTION) ──────
 # Mirrors scripts/mirror.py: dist_id = re.sub(r'[^a-z0-9_-]', '', DIST.lower()).
-[ -f "$CONF" ] || die "config/build.conf not found next to this script (${CONF})" 2
+[ -f "$CONF" ] || die "config/distro.conf not found next to this script (${CONF})" 2
 DIST_RAW="$(awk '
     /^[[:space:]]*\[/ { insec = ($0 ~ /^[[:space:]]*\[Build\]/) }
     insec && /^[[:space:]]*DISTRIBUTION[[:space:]]*=/ {
