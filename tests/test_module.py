@@ -41615,6 +41615,123 @@ def test_classify_tiers_transit_through_non_member_and_overlap():
     assert not _tiers['leaf']
 
 
+def test_cli_command_gate_refuses_ungated_command():
+    """Audit #54: command_gate refuses a non-allowlisted command with the
+    'configure first' ERROR (returns False), while help still runs and
+    quit short-circuits."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import cli as _climod
+    _errs: list = []
+    _ran: list = []
+    _c = object.__new__(_climod.Cli)
+    _c._cmds = {'foo': (lambda *a: _ran.append('foo'), 'test')}
+    _c.command_gate = lambda _cmd: _cmd == 'configure'
+    _c.ERROR = lambda _m: _errs.append(_m)
+    _c._print_help = lambda: _ran.append('help')
+    assert _c._dispatch_one('foo') is False        # gated → refused
+    assert any('configure' in _e for _e in _errs)
+    assert 'foo' not in _ran
+    assert _c._dispatch_one('help') is True         # help not gated
+    assert 'help' in _ran
+    assert _c._dispatch_one('quit') is False         # quit short-circuits
+
+
+def test_dependencytree_pickle_roundtrip():
+    """Audit #112: DependencyTree.__getstate__/__setstate__ round-trip — the
+    non-picklable __cache is dropped (restored to None), and __lookahead's
+    defaultdict is flattened for pickling then restored as a defaultdict."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import pickle
+    from collections import defaultdict
+    import dependencytree as _dt
+    _tree = object.__new__(_dt.DependencyTree)
+    # a lambda is unpicklable — if __getstate__ didn't drop __cache, dumps()
+    # would raise, so this also proves the drop.
+    _tree.__dict__['_DependencyTree__cache'] = lambda: None
+    _la: 'defaultdict' = defaultdict(dict)
+    _la['x'] = {'1.0': 'pkgstub'}
+    _tree.__dict__['_DependencyTree__lookahead'] = _la
+    _tree.selected_pkgs = {'a': 1}
+    _round = pickle.loads(pickle.dumps(_tree))
+    assert _round.selected_pkgs == {'a': 1}
+    assert _round.__dict__['_DependencyTree__cache'] is None
+    _rla = _round.__dict__['_DependencyTree__lookahead']
+    assert isinstance(_rla, defaultdict)
+    assert _rla['x'] == {'1.0': 'pkgstub'}
+
+
+def test_buildlog_write_survives_ascii_locale():
+    """Audit #35: BuildLog.write opens with explicit encoding='utf-8', so
+    non-ASCII glyphs ('→','…') are written even when the locale's preferred
+    encoding is ASCII (which would otherwise raise UnicodeEncodeError)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import locale as _locale
+    import buildlog as _bl
+    with tempfile.TemporaryDirectory() as _d:
+        _p = os.path.join(_d, 'x.buildlog')
+        _log = object.__new__(_bl.BuildLog)
+        _log._path = _p
+        _log._lines = ['relocation → done', 'truncated …']
+        _orig = _locale.getpreferredencoding
+        _locale.getpreferredencoding = lambda *a, **k: 'ascii'
+        try:
+            _log.write()
+        finally:
+            _locale.getpreferredencoding = _orig
+        with open(_p, encoding='utf-8') as _fh:
+            _txt = _fh.read()
+        assert '→' in _txt and '…' in _txt
+
+
+def test_bump_version_freeze_stamp_commits_without_gitignored_stamp():
+    """Audit #42: bump_version --freeze-stamp rewrites pyproject + _version.py,
+    writes the gitignored _buildstamp.py to disk, and COMMITS the release
+    (the stamp is excluded from the commit set, so a gitignored `git add`
+    can't abort the release mid-way — the #9 regression)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump_version as _bv
+    import subprocess as _sp
+    with tempfile.TemporaryDirectory() as _d:
+        _scripts = os.path.join(_d, 'scripts')
+        os.makedirs(_scripts)
+        with open(os.path.join(_d, 'pyproject.toml'), 'w') as _fh:
+            _fh.write('[project]\nversion = "0.1.0"\n')
+        with open(os.path.join(_scripts, '_version.py'), 'w') as _fh:
+            _fh.write('_BASE_VERSION = "0.1.0"\n')
+        with open(os.path.join(_d, '.gitignore'), 'w') as _fh:
+            _fh.write('scripts/_buildstamp.py\n')
+
+        def _g(*_a):
+            _sp.run(['git', '-C', _d, *_a], check=True, capture_output=True)
+        _g('init', '-q')
+        _g('config', 'user.email', 't@example.com')
+        _g('config', 'user.name', 'Test')
+        _g('add', '-A')
+        _g('commit', '-q', '-m', 'init')
+
+        _saved = (_bv._ROOT, _bv._PYPROJECT, _bv._VERSION_PY, _bv._BUILDSTAMP_PY)
+        _bv._ROOT = _d
+        _bv._PYPROJECT = os.path.join(_d, 'pyproject.toml')
+        _bv._VERSION_PY = os.path.join(_scripts, '_version.py')
+        _bv._BUILDSTAMP_PY = os.path.join(_scripts, '_buildstamp.py')
+        try:
+            _rc = _bv.main(['patch', '--freeze-stamp', '--no-tag'])
+        finally:
+            (_bv._ROOT, _bv._PYPROJECT, _bv._VERSION_PY,
+             _bv._BUILDSTAMP_PY) = _saved
+        assert _rc == 0
+        _log = _sp.run(['git', '-C', _d, 'log', '--oneline'],
+                       capture_output=True, text=True).stdout
+        assert 'release: v0.1.1' in _log, _log
+        # the stamp was written but is NOT tracked (gitignored)
+        assert os.path.isfile(os.path.join(_scripts, '_buildstamp.py'))
+        _tracked = _sp.run(['git', '-C', _d, 'ls-files'],
+                           capture_output=True, text=True).stdout
+        assert '_buildstamp.py' not in _tracked, _tracked
+        with open(os.path.join(_d, 'pyproject.toml')) as _fh:
+            assert 'version = "0.1.1"' in _fh.read()
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -43104,6 +43221,10 @@ def main() -> int:
         test_package_add_constraint_conflict_matrix,
         test_compute_build_closure_provides_resolution_path,
         test_classify_tiers_transit_through_non_member_and_overlap,
+        test_cli_command_gate_refuses_ungated_command,
+        test_dependencytree_pickle_roundtrip,
+        test_buildlog_write_survives_ascii_locale,
+        test_bump_version_freeze_stamp_commits_without_gitignored_stamp,
         test_arch_filter_failsafe_keeps_on_uncertainty,
         test_generate_pending_claims_skips_foreign_target,
         test_scan_stale_files_buckets_foreign_keeps_native_sibling,
