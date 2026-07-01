@@ -1,6 +1,7 @@
 
 import logging
 import os
+import shlex
 import shutil
 import threading
 import time
@@ -1053,7 +1054,8 @@ class BuildContainer:
         except (FileNotFoundError, OSError):
             _live_patch_list = []
         patch_cmd = (
-            f'for PATCH in {" ".join(_live_patch_list)}; do patch -p1 < /patch/"$PATCH"; done; '
+            f'for PATCH in {" ".join(shlex.quote(_p) for _p in _live_patch_list)}; '
+            f'do patch -p1 < /patch/"$PATCH"; done; '
             if _live_patch_list else ''
         )
         _patch_set_hash = utils.patch_set_hash(_live_patch_dir, _live_patch_list)
@@ -1088,13 +1090,19 @@ class BuildContainer:
             f"-e 's|@CODENAME@|{self.codename}|g'; "
         )
         _write_sources = self._write_snapshot_sources_cmd(localmirror=localmirror)
+        # shlex.quote the source-derived names (MAT-04): the package name and
+        # .dsc filename come from the (potentially untrusted) source and are
+        # interpolated into a root shell.  No-op for legit names; the trailing
+        # `*` in the cp glob stays OUTSIDE the quotes so globbing still works.
+        _q_prefix = shlex.quote(_filename_prefix)
+        _q_dsc = shlex.quote(_dsc_file)
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'{_write_sources}' \
                   f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
                   f'{_dep_install}' \
-                  f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
-                  f'dpkg-source -x {_dsc_file} {_filename_prefix}; ' \
-                  f'cd {_filename_prefix}; ' \
+                  f'cd /home/athena; cp /source/{_q_prefix}* .; ' \
+                  f'dpkg-source -x {_q_dsc} {_q_prefix}; ' \
+                  f'cd {_q_prefix}; ' \
                   f'{patches_applied_cmd}' \
                   f'{patch_cmd}' \
                   f'{_token_subst}' \
@@ -1544,17 +1552,23 @@ class BuildContainer:
         # snapshot.  Pinning the build to the Depends closure both leans the env
         # AND lets the localmirror cover it completely.
         _norec = '--no-install-recommends '
+        # shlex.quote every build-dep NAME (MAT-04): package names come from the
+        # source's debian/control and are interpolated into a root shell — a
+        # no-op for legit Debian names (their charset has no shell metachars),
+        # defense-in-depth against a malicious/untrusted source name.
         _plain = ''
         if plain_deps:
+            _names = ' '.join(shlex.quote(_d) for _d in plain_deps)
             _plain = (
                 f'sudo DEBIAN_FRONTEND=noninteractive apt -y {_norec}{_flag}'
-                f'{_retry}install {" ".join(plain_deps)}; '
+                f'{_retry}install {_names}; '
             )
         _ors: 'list[str]' = []
         for _grp in or_groups:
             _chain = (
                 f' || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y '
-                f'{_norec}{_flag}{_retry}').join(_grp)
+                f'{_norec}{_flag}{_retry}').join(
+                    shlex.quote(_alt) for _alt in _grp)
             _ors.append(
                 f'{{ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y '
                 f'{_norec}{_flag}{_retry}{_chain}; }}'

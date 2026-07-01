@@ -42355,6 +42355,26 @@ def test_dependencytree_order_independence_report():
         'greedy_only': [], 'fixpoint_only': []}
 
 
+def test_render_install_cmd_shlex_quotes_pkg_names():
+    """MAT-04: build-dep names are shlex.quoted in the root apt install command
+    — a no-op for legit Debian names (their charset has no shell metachars),
+    but a name carrying shell metacharacters is neutralized (defense-in-depth
+    for an untrusted source's debian/control)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _cmd = buildcontainer.BuildContainer._render_install_cmd(
+        ['libssl-dev', 'evil; rm -rf /'],
+        [['gawk', 'mawk|hax']], simulate=False)
+    # legit name is unquoted (rendered command identical to pre-MAT-04)
+    assert 'install libssl-dev ' in _cmd, _cmd
+    # a metachar-laden plain dep is single-quoted, not left bare
+    assert "'evil; rm -rf /'" in _cmd, _cmd
+    assert 'install evil; rm -rf /' not in _cmd, _cmd
+    # OR-group alternative with a metachar is quoted too
+    assert "'mawk|hax'" in _cmd, _cmd
+    assert ' gawk ' in _cmd or _cmd.rstrip().endswith('gawk')  # legit alt bare
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -43858,6 +43878,7 @@ def main() -> int:
         test_remote_localmirror_download_resume_206_and_restart_200,
         test_repo_audit_nmu_residue_clean_on_anchored_asg,
         test_dependencytree_order_independence_report,
+        test_render_install_cmd_shlex_quotes_pkg_names,
         test_run_remote_agent_partial_scp_and_abort_paths,
         test_webapi_sse_stream_emits_all_lines_then_end,
         test_dep_drift_syncs_version_from_disk,
