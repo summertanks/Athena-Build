@@ -42131,6 +42131,174 @@ def test_webapi_sse_stream_emits_all_lines_then_end():
             tui.tui_instance = _prev
 
 
+def test_dep_drift_syncs_version_from_disk():
+    """Audit #110: _check_dep_drift syncs the cache Package's Version to the
+    on-disk (NMU-stripped) value, so the consumer/provider version surfaces
+    agree (the 144-spurious-mismatch fix) - both .version and ['Version']."""
+    from unittest import mock
+    import types as _t
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dep_drift as _dd
+    import package as _pkgm
+    with tempfile.TemporaryDirectory() as _repo:
+        _fn = 'libx_0.8-10_amd64.deb'
+        open(os.path.join(_repo, _fn), 'w').close()
+        _cache_pkg = _pkgm.Package(
+            "Package: libx\nVersion: 0.8-10+deb12u1\n"
+            f"Architecture: amd64\nFilename: pool/{_fn}\n")
+        _dt = _t.SimpleNamespace(canonical_pkgs={'libx': _cache_pkg},
+                                 selected_pkgs={})
+        _self = _t.SimpleNamespace(
+            _dependencytree=_dt, _dir_repo_main=_repo,
+            normalize_repo_filename=lambda _f: _f)
+        _self._verify_dep_resolution = (
+            lambda: _dd._DepDriftMixin._verify_dep_resolution(_self))
+
+        def _fake_run(argv, **k):
+            return _t.SimpleNamespace(
+                returncode=0,
+                stdout="Package: libx\nVersion: 0.8-10\nArchitecture: amd64\n",
+                stderr='')
+
+        with mock.patch.object(_dd, 'subprocess',
+                               _t.SimpleNamespace(run=_fake_run)):
+            _dd._DepDriftMixin._check_dep_drift(_self)
+        assert str(_cache_pkg.version) == '0.8-10', _cache_pkg.version
+        assert _cache_pkg.get('Version') == '0.8-10', _cache_pkg.get('Version')
+
+
+
+def test_cmd_snapshot_workload_early_branches():
+    """Audit #74: _cmd_snapshot_workload early branches - dep_check not ready,
+    malformed target, and current==target short-circuit - print the right
+    message and return without computing a workload."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import types as _t
+    from commands import cmd_snapshot as _cs
+    _printed = []
+    _orig = _cs.console.print
+    _cs.console.print = lambda *a, **k: _printed.append(str(a[0]) if a else '')
+    try:
+        _self = _t.SimpleNamespace(
+            flags=_t.SimpleNamespace(dep_check_ready=False))
+        _cs.SnapshotCommandsMixin._cmd_snapshot_workload(_self)
+        assert any('cache build' in _m for _m in _printed), _printed
+        _printed.clear()
+        _self = _t.SimpleNamespace(
+            flags=_t.SimpleNamespace(dep_check_ready=True),
+            _snapshot_current=lambda: '20260101T000000Z')
+        _cs.SnapshotCommandsMixin._cmd_snapshot_workload(_self, 'not-a-ts')
+        assert any('YYYYMMDD' in _m or 'not a' in _m for _m in _printed), _printed
+        _printed.clear()
+        _self = _t.SimpleNamespace(
+            flags=_t.SimpleNamespace(dep_check_ready=True),
+            _snapshot_current=lambda: '20260101T000000Z')
+        _cs.SnapshotCommandsMixin._cmd_snapshot_workload(
+            _self, '20260101T000000Z')
+        assert any('nothing would change' in _m for _m in _printed), _printed
+    finally:
+        _cs.console.print = _orig
+
+
+def test_cache_build_mode_picks_debian_highest_version():
+    """Audit #63: build-mode dep parse picks the Debian-HIGHER version across
+    multiple cached versions of one package (1.10-1 > 1.9-1, not the string
+    max which would wrongly pick 1.9-1)."""
+    import types as _t
+    from debian.debian_support import Version
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from commands import cmd_cache as _cc
+    with tempfile.TemporaryDirectory() as _d:
+        _bpl = os.path.join(_d, 'build_pkg.list')
+        with open(_bpl, 'w') as _fh:
+            _fh.write('foo\n')
+        _pkg19 = {'Package': 'foo', 'Version': '1.9-1'}
+        _pkg110 = {'Package': 'foo', 'Version': '1.10-1'}
+        _cache = _t.SimpleNamespace(package_hashtable={
+            'foo': {Version('1.9-1'): [_pkg19], Version('1.10-1'): [_pkg110]}})
+        _dt = _t.SimpleNamespace(selected_pkgs={}, selected_srcs={},
+                                 parse_sources=lambda: True)
+        _self = _t.SimpleNamespace(
+            config=_t.SimpleNamespace(build_pkg_list_path=_bpl),
+            cache=_cache, dep_tree=_dt)
+        assert _cc.CacheCommandsMixin._cache_parse_build_mode(_self) is True
+        assert _self.dep_tree.selected_pkgs['foo'] is _pkg110
+
+
+def test_tunnel_filenames_for_source_picks_highest_version():
+    """Audit #85/#14: _tunnel_filenames_for_source falls to the HIGHEST-version
+    source (max by version), never source_hashtable parse order, so a
+    multi-version source enumerates the selected version's binary set (incl.
+    a binary the newer version renamed/added)."""
+    from unittest import mock
+    import types as _t
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from commands import cohorts
+    import virtual_build as _vb
+    _older = _t.SimpleNamespace(version='1.0', binary=['libx'])
+    _newer = _t.SimpleNamespace(version='2.0', binary=['libx', 'libx-extra'])
+    _self = _t.SimpleNamespace(
+        cache=_t.SimpleNamespace(source_hashtable={'x': [_older, _newer]}),
+        dep_tree=_t.SimpleNamespace(selected_srcs={}),
+        udeb_dep_tree=None,
+        config=_t.SimpleNamespace(arch='amd64', build_profiles=frozenset(),
+                                  dir_fork_source_repo=None),
+        _resolve_tunnel_filename=lambda _bin, _entry: _bin + '_2.0_amd64.deb')
+    with mock.patch.object(_vb, '_package_list_index', lambda *a, **k: {}), \
+            mock.patch.object(_vb, '_binary_active_for_arch',
+                              lambda *a, **k: True), \
+            mock.patch.object(_vb, '_binary_active_under_profiles',
+                              lambda *a, **k: True):
+        _fns = cohorts.CohortResolverMixin._tunnel_filenames_for_source(
+            _self, 'x')
+    assert 'libx-extra_2.0_amd64.deb' in _fns, _fns   # newer source's binary
+    assert 'libx_2.0_amd64.deb' in _fns
+
+
+def test_buildcontainer_segregate_rollback_keeps_published_dup():
+    """Audit #32/#7: the segregate rollback tracks a kept-existing published
+    duplicate in _kept_existing (NOT _moved_paths), and the rollback loop
+    reverses only _moved_paths - so a data-loss relocation of a published .deb
+    on a multi-binary rebuild failure can't happen."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import buildcontainer
+    _src = inspect.getsource(buildcontainer)
+    assert '_kept_existing' in _src and '_moved_paths' in _src
+    # the collision branch appends the dup to _kept_existing, not _moved_paths
+    assert '_kept_existing.append(_dst)' in _src
+    # rollback is driven by _moved_paths (the genuinely-moved set)
+    assert 'rolling back' in _src and 'len(_moved_paths)' in _src
+
+
+def test_do_tunnel_records_provenance_and_outputs():
+    """Audit #81: _do_tunnel transposes each upstream .deb, records
+    republished_from provenance keyed by the FINAL on-disk name, and writes the
+    build-record outputs as the final on-disk filenames (behavioural coverage
+    needs dpkg-deb + a pool; this pins the provenance/record contract)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    from commands import cmd_tunnel
+    _src = inspect.getsource(cmd_tunnel.TunnelCommandsMixin._do_tunnel)
+    assert 'transpose_deb' in _src                      # per-file transpose
+    assert '_republished_from[_final_fn]' in _src       # keyed by FINAL name
+    assert "'upstream_sha256'" in _src                  # upstream provenance
+    assert 'outputs=_outputs_sorted' in _src            # record = on-disk names
+
+
+def test_onboarding_jobs_clamps_with_warning():
+    """Audit #147: the onboarding wizard clamps a jobs answer to 1-8 and warns
+    (mirroring `set jobs`), rather than silently adjusting (full wizard-drive
+    is brittle; this pins the clamp + warning)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import onboarding
+    _src = inspect.getsource(onboarding._prompt_machine_settings)
+    assert 'max(1, min(_jobs, 8))' in _src              # clamp to 1-8
+    assert 'jobs clamped to' in _src                    # surfaces the clamp
+    assert 'is not an integer' in _src
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -43635,6 +43803,13 @@ def main() -> int:
         test_repo_audit_nmu_residue_clean_on_anchored_asg,
         test_run_remote_agent_partial_scp_and_abort_paths,
         test_webapi_sse_stream_emits_all_lines_then_end,
+        test_dep_drift_syncs_version_from_disk,
+        test_cmd_snapshot_workload_early_branches,
+        test_cache_build_mode_picks_debian_highest_version,
+        test_tunnel_filenames_for_source_picks_highest_version,
+        test_buildcontainer_segregate_rollback_keeps_published_dup,
+        test_do_tunnel_records_provenance_and_outputs,
+        test_onboarding_jobs_clamps_with_warning,
         test_arch_filter_failsafe_keeps_on_uncertainty,
         test_generate_pending_claims_skips_foreign_target,
         test_scan_stale_files_buckets_foreign_keeps_native_sibling,
