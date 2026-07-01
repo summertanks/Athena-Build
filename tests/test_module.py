@@ -42299,6 +42299,62 @@ def test_onboarding_jobs_clamps_with_warning():
     assert 'is not an integer' in _src
 
 
+def test_dependencytree_order_independence_report():
+    """SELECT-02 shadow: order_independence_report flags the order-pulled
+    extras the greedy closure holds that an order-independent fixpoint would
+    drop (xterm + libutempter0 once x-terminal-emulator is satisfied by
+    gnome-terminal's Provides), and reports nothing for an order-invariant
+    closure."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree as _dt
+
+    class _P:
+        def __init__(self, name, depends=(), alt_depends=(), provides=()):
+            self._n = name
+            self.depends = [(_d, '', '') for _d in depends]
+            self.pre_depends = []
+            self.alt_depends = [[(a, '', '') for a in g] for g in alt_depends]
+            self.alt_pre_depends = []
+            self.recommends = []
+            self._prov = list(provides)
+
+        def __getitem__(self, k):
+            if k == 'Package':
+                return self._n
+            raise KeyError(k)
+
+        def get_provides(self):
+            return [(v, '') for v in self._prov]
+
+    # (1) order-sensitive: greedy pulled xterm (+ its libutempter0 dep) even
+    # though gnome-terminal Provides x-terminal-emulator.
+    _tree = object.__new__(_dt.DependencyTree)
+    _tree._DependencyTree__recommended = False
+    _tree.selected_pkgs = {
+        'xorg': _P('xorg', alt_depends=[['xterm', 'x-terminal-emulator']]),
+        'gnome-terminal': _P('gnome-terminal',
+                             provides=['x-terminal-emulator']),
+        'xterm': _P('xterm', depends=['libutempter0']),
+        'libutempter0': _P('libutempter0'),
+    }
+    _tree._seed_history = ['xorg', 'gnome-terminal']
+    _rep = _tree.order_independence_report()
+    assert set(_rep['greedy_only']) == {'xterm', 'libutempter0'}, _rep
+    assert _rep['fixpoint_only'] == [], _rep
+
+    # (2) order-invariant plain chain a->b->c: no divergence.
+    _tree2 = object.__new__(_dt.DependencyTree)
+    _tree2._DependencyTree__recommended = False
+    _tree2.selected_pkgs = {
+        'a': _P('a', depends=['b']),
+        'b': _P('b', depends=['c']),
+        'c': _P('c'),
+    }
+    _tree2._seed_history = ['a']
+    assert _tree2.order_independence_report() == {
+        'greedy_only': [], 'fixpoint_only': []}
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -43801,6 +43857,7 @@ def main() -> int:
         test_generate_repo_indexes_udeb_scan_allows_empty,
         test_remote_localmirror_download_resume_206_and_restart_200,
         test_repo_audit_nmu_residue_clean_on_anchored_asg,
+        test_dependencytree_order_independence_report,
         test_run_remote_agent_partial_scp_and_abort_paths,
         test_webapi_sse_stream_emits_all_lines_then_end,
         test_dep_drift_syncs_version_from_disk,

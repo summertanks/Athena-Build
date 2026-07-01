@@ -35,7 +35,8 @@ Algorithm (closure as a pure function of the seed SET):
   add a satisfiable-but-not-strictly-needed alternative).
 """
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import (Dict, Iterable, List, Mapping, Optional, Sequence, Set,
+                    Tuple, Union)
 
 # A dependency entry is either a hard dep (a single name) or an OR group
 # (a sequence of alternative names).  This mirrors how a package's parsed
@@ -43,7 +44,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 DepEntry = Union[str, Sequence[str]]
 
 
-def _provider_index(provides: Dict[str, Iterable[str]]) -> Dict[str, List[str]]:
+def _provider_index(provides: Mapping[str, Iterable[str]]) -> Dict[str, List[str]]:
     """virtual-name -> sorted list of real packages that Provide it."""
     _idx: Dict[str, List[str]] = defaultdict(list)
     for _pkg, _names in provides.items():
@@ -65,9 +66,9 @@ def _or_groups(entry_list: Iterable[DepEntry]) -> List[Tuple[str, ...]]:
 
 def resolve_closure(
     seeds: Iterable[str],
-    deps: Dict[str, Sequence[DepEntry]],
+    deps: Mapping[str, Sequence[DepEntry]],
     real_pkgs: Optional[Set[str]] = None,
-    provides: Optional[Dict[str, Iterable[str]]] = None,
+    provides: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> Set[str]:
     """Resolve the selection closure as a pure function of the seed SET.
 
@@ -163,8 +164,8 @@ def resolve_closure(
 
 def _infer_real(
     seeds: Iterable[str],
-    deps: Dict[str, Sequence[DepEntry]],
-    provides: Dict[str, Iterable[str]],
+    deps: Mapping[str, Sequence[DepEntry]],
+    provides: Mapping[str, Iterable[str]],
 ) -> Set[str]:
     """Default real-package universe: every name that appears as a package
     key, a seed, or a dependency name (alternatives included).  Names that
@@ -187,9 +188,9 @@ def _infer_real(
 
 def resolve_closure_greedy(
     seeds_ordered: Sequence[str],
-    deps: Dict[str, Sequence[DepEntry]],
+    deps: Mapping[str, Sequence[DepEntry]],
     real_pkgs: Optional[Set[str]] = None,
-    provides: Optional[Dict[str, Iterable[str]]] = None,
+    provides: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> Set[str]:
     """Reference model of the LIVE inline resolver's order-sensitive
     behaviour (``dependencytree.parse_dependency`` lines 590-622): a

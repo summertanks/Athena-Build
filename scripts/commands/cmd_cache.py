@@ -306,6 +306,39 @@ class CacheCommandsMixin(SessionState):
         # udeb_dep_tree stays None — installer is N/A in build mode.
         return True
 
+    def _report_order_independence(self) -> None:
+        """SELECT-02 shadow: WARN when the greedy closure diverges from the
+        order-independent fixpoint over the same seeds (see
+        DependencyTree.order_independence_report).  Diagnostic ONLY — the
+        shipped selection is unchanged; this surfaces the divergence set the
+        eventual order-independent cutover is gated on."""
+        for _label, _tree in (('deb', getattr(self, 'dep_tree', None)),
+                              ('udeb', getattr(self, 'udeb_dep_tree', None))):
+            if _tree is None:
+                continue
+            _rep = _tree.order_independence_report()
+            _extra = _rep.get('greedy_only') or []
+            _missing = _rep.get('fixpoint_only') or []
+            if not _extra and not _missing:
+                continue
+            console.print(
+                f"SELECT-02 ({_label}): order-sensitive closure divergence — "
+                f"{len(_extra)} order-pulled extra(s), "
+                f"{len(_missing)} fixpoint-only", tui.COLOR_WARNING)
+            if _extra:
+                console.print(
+                    "  greedy pulled (an order-independent resolution would "
+                    f"drop): {', '.join(_extra[:30])}"
+                    f"{' …' if len(_extra) > 30 else ''}", tui.COLOR_WARNING)
+            if _missing:
+                console.print(
+                    "  fixpoint would add (likely a version/conflict drop in "
+                    f"the greedy path): {', '.join(_missing[:30])}"
+                    f"{' …' if len(_missing) > 30 else ''}", tui.COLOR_INFO)
+            logger.info(
+                f"SELECT-02 {_label}: greedy_only={_extra} "
+                f"fixpoint_only={_missing}")
+
     def cmd_parse_dependency(self, *args):
         """Resolve the full closure of packages needed to build the target system.
 
@@ -1016,6 +1049,10 @@ class CacheCommandsMixin(SessionState):
         # stamp the lifecycle layer on every selected source
         # (bootstrap + refresh paths; the accept path touched above).
         _lc_touch()
+
+        # SELECT-02 shadow: report where the greedy closure is order-sensitive
+        # vs the order-independent fixpoint (diagnostic only; selection unchanged).
+        self._report_order_independence()
 
         self.flags.dep_check_ready = True
 

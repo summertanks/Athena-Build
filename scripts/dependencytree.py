@@ -98,6 +98,11 @@ class DependencyTree:
 
         self.selected_pkgs: Dict[str, package.Package] = {}
         self.selected_srcs: Dict[str, package.Source]  = {}
+        # SELECT-02 shadow: every seed name ever fed to add_lookahead (across
+        # all resolve_packages passes), so order_independence_report() can
+        # recompute the closure from the SAME seed set with the order-
+        # independent fixpoint and diff it against the greedy closure.
+        self._seed_history: List[str] = []
         # Subset of selected_pkgs whose entries were pulled in via
         # depth-1 Recommends-of-selected (rather than the required/important/
         # manual closure).  Empty when [Build] IncludeRecommends is off.
@@ -231,6 +236,13 @@ class DependencyTree:
         by Pass VII to let `grub-pc` and `grub-efi-amd64` coexist in
         selected_pkgs.
         """
+        # SELECT-02: record the raw seeds (add_lookahead is the single seed
+        # entry point — the recursion goes through parse_dependency, not here).
+        # Lazily init so instances built via object.__new__ (tests) are safe.
+        if not hasattr(self, '_seed_history'):
+            self._seed_history = []
+        self._seed_history.extend(
+            _n.strip() for _n in lookahead if _n and not _n.isspace())
         for _pkg_name in lookahead:
             if not _pkg_name or _pkg_name.isspace():
                 continue
@@ -378,6 +390,53 @@ class DependencyTree:
             tui.console.print(f"WARNING: cannot resolve '{pkg}'")
             logger.error(f"parse_dependency({pkg}) returned None")
         return unresolved
+
+    def order_independence_report(self) -> 'Dict[str, list]':
+        """SELECT-02 shadow: recompute the closure over the SAME seeds with the
+        ORDER-INDEPENDENT fixpoint (``or_resolve.resolve_closure``) and diff it
+        against the live (order-sensitive greedy) closure.
+
+        Returns ``{'greedy_only': [...], 'fixpoint_only': [...]}``:
+          - ``greedy_only`` — names the greedy closure pulled that an
+            order-independent resolution over the SAME edges would NOT (the
+            order-pulled extras — e.g. ``xterm`` when ``x-terminal-emulator``
+            is satisfied by ``gnome-terminal``).  The primary signal.
+          - ``fixpoint_only`` — names the fixpoint would additionally pull;
+            usually a version/conflict drop the greedy path made that the
+            fixpoint doesn't model.  Secondary / informational.
+
+        NON-INVASIVE: does not touch ``selected_pkgs``; best-effort (never
+        raises — returns empty on any error).  This is the WARN-only "old-vs-new
+        closure diff on a real cache" that SELECT-02's Stage-2 cutover is gated
+        on; run it on a real cache to see the actual divergence set.
+        """
+        try:
+            import or_resolve
+            _greedy = set(self.canonical_pkgs.keys())
+            _deps: 'Dict[str, list]' = {}
+            _provides: 'Dict[str, list]' = {}
+            for _name, _p in self.canonical_pkgs.items():
+                _edges: 'list' = [
+                    _d[0] for _d in list(_p.depends) + list(_p.pre_depends)]
+                if self.__recommended:
+                    _edges += [_d[0] for _d in _p.recommends]
+                for _alt in list(_p.alt_depends) + list(_p.alt_pre_depends):
+                    _group = tuple(_ad[0] for _ad in _alt)
+                    if _group:
+                        _edges.append(_group)
+                _deps[_name] = _edges
+                # or_resolve wants {package: [virtual names it Provides]}.
+                for _vn, _ in _p.get_provides():
+                    _provides.setdefault(_name, []).append(_vn)
+            _fixpoint = or_resolve.resolve_closure(
+                self._seed_history, _deps, provides=_provides)
+            return {
+                'greedy_only': sorted(_greedy - _fixpoint),
+                'fixpoint_only': sorted(_fixpoint - _greedy),
+            }
+        except Exception as _e:                       # best-effort diagnostic
+            logger.warning(f"order_independence_report: {_e}")
+            return {'greedy_only': [], 'fixpoint_only': []}
 
 
     def parse_dependency(self, package_name: str,
