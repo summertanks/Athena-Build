@@ -942,8 +942,14 @@ def audit_nmu_residue(state: RepoState,
             _src_name = _src_field.split(' ', 1)[0]
             if _src_name in _tun:
                 continue
+        # An +asg<R>uK-anchored version is OUR normalized transpose form; its
+        # trailing +pP / +bN are legitimate patch/force layers, NOT upstream
+        # NMU residue (strip_nmu_suffix would wrongly strip the +bN).  Only
+        # un-anchored versions can carry the +debNuN residue this audit exists
+        # to catch (audit #169).
         _ver = _entry.get('Version', '')
-        if _ver and strip_nmu_suffix(_ver) != _ver:
+        if (_ver and utils.parse_asg_suffix(_ver) is None
+                and strip_nmu_suffix(_ver) != _ver):
             _findings.append((_pkg, 'Version', _ver, 'pkg own Version'))
         for _field in _NMU_STRIP_FIELDS:
             _raw = _entry.get(_field, '')
@@ -951,7 +957,8 @@ def audit_nmu_residue(state: RepoState,
                 continue
             for _m in _constraint_re.finditer(_raw):
                 _v = _m.group(1)
-                if strip_nmu_suffix(_v) != _v:
+                if (utils.parse_asg_suffix(_v) is None
+                        and strip_nmu_suffix(_v) != _v):
                     _findings.append(
                         (_pkg, _field, _m.group(0),
                          f'version constraint {_m.group(0)} has NMU layer')

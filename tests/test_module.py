@@ -41937,6 +41937,84 @@ def test_generate_repo_indexes_udeb_scan_allows_empty():
     assert 'debian-installer' in _src
 
 
+def test_remote_localmirror_download_resume_206_and_restart_200():
+    """Audit #164: _download resumes a partial via HTTP Range (206 → append
+    the remaining bytes) and restarts when the server ignores Range (200 →
+    truncate + rewrite); both verify the final sha256."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import hashlib as _hl
+    import urllib.request as _ur
+    import remote_localmirror as _rlm
+    _full = b'0123456789'
+    _sha = _hl.sha256(_full).hexdigest()
+
+    class _Resp:
+        def __init__(self, data, code):
+            self._d = data
+            self._c = code
+            self._i = 0
+
+        def getcode(self):
+            return self._c
+
+        def read(self, n=-1):
+            _c = self._d[self._i:self._i + n] if n and n > 0 \
+                else self._d[self._i:]
+            self._i += len(_c)
+            return _c
+
+        def close(self):
+            pass
+
+    _orig = _ur.urlopen
+    with tempfile.TemporaryDirectory() as _d:
+        _dest = os.path.join(_d, 'a')
+        with open(_dest, 'wb') as _fh:
+            _fh.write(_full[:5])                 # partial on disk
+        _ur.urlopen = lambda req, timeout=120: _Resp(_full[5:], 206)
+        try:
+            _ok, _det = _rlm._download('http://x/a', _dest, _sha, 10,
+                                       lambda _n: None)
+        finally:
+            _ur.urlopen = _orig
+        assert _ok, _det
+        with open(_dest, 'rb') as _fh:
+            assert _fh.read() == _full
+        _dest2 = os.path.join(_d, 'b')
+        with open(_dest2, 'wb') as _fh:
+            _fh.write(b'XXXXX')                   # stale partial
+        _ur.urlopen = lambda req, timeout=120: _Resp(_full, 200)
+        try:
+            _ok2, _det2 = _rlm._download('http://x/b', _dest2, _sha, 10,
+                                         lambda _n: None)
+        finally:
+            _ur.urlopen = _orig
+        assert _ok2, _det2
+        with open(_dest2, 'rb') as _fh:
+            assert _fh.read() == _full
+
+
+def test_repo_audit_nmu_residue_clean_on_anchored_asg():
+    """Audit #169: audit_nmu_residue does NOT flag our anchored +asg<R>uK+bN /
+    +asg<R>uK+pP+bN built versions (nor a sibling '(= ...+asg...+b1)' pin) as
+    residue — those +pP/+bN are legitimate transpose layers — while an
+    un-anchored upstream +debNuN version IS flagged."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import types
+    import repo_audit
+    _state = types.SimpleNamespace(packages={
+        'foo': {'Version': '1.2.3-4+asg1u0+b1',
+                'Depends': 'bar (= 1.2.3-4+asg1u3+b1)'},   # anchored → clean
+        'sig': {'Version': '1.2.3-4+asg1u3+p1+b1'},        # anchored → clean
+        'baz': {'Version': '0.8-10+deb12u1'},              # residue → flagged
+    })
+    _findings = repo_audit.audit_nmu_residue(_state)
+    _flagged = {_f[0] for _f in _findings}
+    assert 'foo' not in _flagged, _findings
+    assert 'sig' not in _flagged, _findings
+    assert 'baz' in _flagged, _findings
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -43437,6 +43515,8 @@ def main() -> int:
         test_tui_state_tabstate_eviction_and_cmdline_history,
         test_webapi_readers_flags_repo_phase_mirror,
         test_generate_repo_indexes_udeb_scan_allows_empty,
+        test_remote_localmirror_download_resume_206_and_restart_200,
+        test_repo_audit_nmu_residue_clean_on_anchored_asg,
         test_arch_filter_failsafe_keeps_on_uncertainty,
         test_generate_pending_claims_skips_foreign_target,
         test_scan_stale_files_buckets_foreign_keeps_native_sibling,
