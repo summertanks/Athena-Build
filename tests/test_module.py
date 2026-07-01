@@ -42015,6 +42015,122 @@ def test_repo_audit_nmu_residue_clean_on_anchored_asg():
     assert 'baz' in _flagged, _findings
 
 
+def test_run_remote_agent_partial_scp_and_abort_paths():
+    """Audit #167: a partial scp-down recovery (only some declared outputs
+    materialize) maps to exit 12 (re-queue), and an aborted phase maps to
+    exit 130 — neither returns the (misleading) success tuple."""
+    from unittest import mock
+    import types as _t
+    import json as _js
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_orchestrate as _ro
+
+    def _fakes(out_dir, phase_seq, outputs, scp_creates):
+        _calls = {'status': 0}
+
+        class _P:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        def _run(argv, **k):
+            _j = ' '.join(argv)
+            if 'agent.port' in _j:
+                return _t.SimpleNamespace(returncode=0, stdout='54321\n',
+                                          stderr='')
+            if 'out/*.deb' in _j:
+                for _f in scp_creates:
+                    open(os.path.join(out_dir, _f), 'w').close()
+            return _t.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+        def _req(port, path, token, method='GET', timeout=10):
+            if path == '/status':
+                _i = min(_calls['status'], len(phase_seq) - 1)
+                _calls['status'] += 1
+                _ph = phase_seq[_i]
+                return (200, _js.dumps({
+                    'phase': _ph, 'outputs': outputs,
+                    'exit_code': 0 if _ph == 'done' else None}).encode(), {})
+            if path.startswith('/logs'):
+                return (200, b'', {'X-Log-Next': '0'})
+            return (200, b'{}', {})
+
+        _sp = _t.SimpleNamespace(run=_run, Popen=lambda a, **k: _P(),
+                                 DEVNULL=-3, PIPE=-1, STDOUT=-2,
+                                 SubprocessError=Exception)
+        return _sp, _req
+
+    def _drive(phase_seq, outputs, scp_creates):
+        with tempfile.TemporaryDirectory() as _b, \
+                tempfile.TemporaryDirectory() as _o:
+            open(os.path.join(_b, 'Dockerfile'), 'w').write('FROM x\n')
+            _sp, _req = _fakes(_o, phase_seq, outputs, scp_creates)
+            with mock.patch.object(_ro, 'subprocess', _sp), \
+                    mock.patch.object(_ro, '_agent_request', _req), \
+                    mock.patch.object(_ro, 'AGENT_POLL_INTERVAL', 0):
+                return _ro.run_remote_agent('u@h', _b, '~/x', _o, token='t')
+
+    # partial recovery: 2 declared outputs, scp materializes only 1 → exit 12
+    assert _drive(['running', 'done'],
+                  ['a_1_amd64.deb', 'b_1_amd64.deb'],
+                  ['a_1_amd64.deb']) == (12, [])
+    # aborted phase → exit 130
+    assert _drive(['running', 'aborted'], [], []) == (130, [])
+
+
+def test_webapi_sse_stream_emits_all_lines_then_end():
+    """Audit #206: the SSE /jobs/{id}/stream endpoint streams every output
+    line of a finished job then a trailing `event: end`.  Skips when fastapi
+    isn't installed (as the other webapi HTTP tests do)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    try:
+        from fastapi.testclient import TestClient
+    except Exception:
+        print('  SKIP #206 — python3-fastapi/httpx not installed')
+        return
+    import tui
+    import webapi
+    from webapi.jobs import ApiBackend
+    from webapi import auth
+    _prev = tui.tui_instance
+    with tempfile.TemporaryDirectory() as _tmp:
+        try:
+            _b = ApiBackend()
+            _b.register_command(
+                'emit', lambda *a: (_b.print('line1'), _b.print('line2')),
+                'test')
+            _conf = os.path.join(_tmp, 'build.conf')
+            with open(_conf, 'w') as _fh:
+                _fh.write('[Repo]\nARCH = amd64\n')
+            _bl = os.path.join(_tmp, 'build')
+            os.makedirs(_bl)
+            _app = webapi.create_app(
+                buildlog_dir=_bl, flags_path=os.path.join(_tmp, 'f.json'),
+                api_key_path=os.path.join(_tmp, 'api.key'),
+                conf_path=_conf, backend=_b)
+            _h = {'X-Api-Key': auth.load_api_key(
+                os.path.join(_tmp, 'api.key'))}
+            _job = _b.submit('emit')
+            _b.shutdown()
+            _b.wait()                       # run the job to terminal state
+            assert _job.state == 'done', _job.as_dict()
+            _c = TestClient(_app)
+            _r = _c.get(f'/api/v1/jobs/{_job.id}/stream', headers=_h)
+            assert _r.status_code == 200
+            assert 'line1' in _r.text and 'line2' in _r.text
+            assert 'event: end' in _r.text
+        finally:
+            tui.tui_instance = _prev
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -43517,6 +43633,8 @@ def main() -> int:
         test_generate_repo_indexes_udeb_scan_allows_empty,
         test_remote_localmirror_download_resume_206_and_restart_200,
         test_repo_audit_nmu_residue_clean_on_anchored_asg,
+        test_run_remote_agent_partial_scp_and_abort_paths,
+        test_webapi_sse_stream_emits_all_lines_then_end,
         test_arch_filter_failsafe_keeps_on_uncertainty,
         test_generate_pending_claims_skips_foreign_target,
         test_scan_stale_files_buckets_foreign_keeps_native_sibling,
