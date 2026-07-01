@@ -8,16 +8,20 @@ severities, which differ from the raw audit where verification softened a claim.
 
 **Verdict tally (199 single-pass findings):** 141 confirmed · 48 partial · 10 refuted; 15 closed as not-a-defect (refuted or severity→none); 20 medium→low downgrades; 0 upgrades.
 
-**Remediation status (checkboxes below reflect GitHub issue state):**
-- **All confirmed correctness bugs fixed** — Tier 0 (4), Tier 0b (6), Tier 1 (8),
-  Tier 2 (32), Tier 3 (29) = **79 fixed, merged to `master`, and closed**, plus the
-  Tier-4 safe-cleanup subset (12). +58 regression tests; triad green at every merge.
-- **#6 + coverage gaps #15–#17** are fixed on `feat/update-mode-transpose` (ticked
-  here; the issues close when that branch merges, since their code isn't on master).
-- **Open / deferred:** the remaining Tier-4 refactors & judgment calls (~63), the
-  T5 test gaps, and **#80 / #92 / #98** (deferred — real but in delicate
-  federation/tunnel code with no integration harness here). **#160** was closed as
-  not-planned (verifier refuted the fix).
+**Remediation status: COMPLETE — all findings fixed, merged to `master`, and
+closed (2026-07-01).**
+- Tiers 0–3 correctness bugs, the full Tier-4 cleanup set (dead code, dedup,
+  optimization), and every Tier-5 test-coverage gap are done. The federation
+  items **#80 / #92 / #98** — previously deferred — are now implemented.
+- **#6 + coverage gaps #15–#17** landed with the `feat/update-mode-transpose`
+  merge. **#160** stays closed as not-planned (verifier refuted the fix).
+- Verification: `ruff` + `mypy` clean and **1397/1397** tests green at every
+  merge (started at 1363; +34 net new tests). Two of the new tests exposed and
+  then fixed genuine bugs (#169 audit_nmu_residue over-flagged anchored
+  +asg+bN; #103 canonicalize_neighbour_records now richer-wins).
+- **#20** rejected the audit's literal tupletable-parse suggestion (it
+  mismatched dpkg's own multiarch triplet for ~15/206 arches) and instead
+  caches the authoritative dpkg-architecture output to disk.
 
 > Order of work: **Tier 0 before the next build cycle.** Tiers 1–2 are real correctness
 > fixes; Tier 3 is real-but-low-reachability (do opportunistically); Tier 4 is cleanup;
@@ -43,7 +47,7 @@ found them not reachable on a live path):
   - _Fix:_ Materialize once at the top of resolve_closure: `_seeds = list(seeds)` and use `_seeds` for both _infer_real and the _pending comprehension (or narrow the annotation to Sequence[str]).
 - [x] **#23** `scripts/build.py:713` — patch_list sort key (x[:5]) diverges from buildcontainer's full-name sort feeding an order-sensitive hash _(partial: real but not reachable)_
   - _Fix:_ Sort by the full filename: `_src.patch_list = sorted(_patch_files)` (drop the key=lambda x: x[:5]) so build.py and buildcontainer.py:1052 produce identical ordering and matching hashes. Full-name sort still preserves the numeric-prefix orde
-- [ ] **#98** `scripts/coord/reconcile.py:130-203` — audit_local hash-verifies only ONE binary per multi-binary source (lossy projection) _(partial: real but not reachable)_
+- [x] **#98** `scripts/coord/reconcile.py:130-203` — audit_local hash-verifies only ONE binary per multi-binary source (lossy projection) _(partial: real but not reachable)_
   - _Fix:_ Drive C-1/C-2/C-3 from a filename-keyed live view (e.g. store.iter_live_claims_by_filename or project_owners filtered to builder_id) instead of project_live_claims, so every binary filename is hash-verified and accounted for.
 
 ## Tier 0b — Verified high/critical (the rest of the adversarially-verified set)
@@ -95,7 +99,7 @@ found them not reachable on a live path):
   - _Fix:_ Wrap the parse_build_pkg_list call (line 247) in try/except OSError mirroring lines 485-492: on error print a console error, log it, call _spiner.done() (or move the whole build-mode branch under the spinner's cleanup), set dep_check_ready 
 - [x] **#68** `scripts/commands/cmd_repo.py:866` — Cleanup report understates scanned components (omits main-udeb)
   - _Fix:_ Include `main-udeb` in the component list string (e.g. `{main,main-udeb,doc,dbgsym,tests}`), ideally derived from `utils._STALE_SCAN_SUBDIRS` so it can't drift again.
-- [ ] **#69** `scripts/commands/cmd_run.py:314` — cmd_set truncates multi-token values; `set signing-uid 'Name <email>'` is non-functional
+- [x] **#69** `scripts/commands/cmd_run.py:314` — cmd_set truncates multi-token values; `set signing-uid 'Name <email>'` is non-functional
   - _Fix:_ In cmd_set, build the value from the remaining tokens: `_value = ' '.join(args[1:])` (and strip surrounding quotes), so space-containing values like signing-uid reach the handler intact.
 - [x] **#71** `scripts/commands/cmd_run.py:185` — Machine-local setters mutate self.config before an unguarded write_local_conf, unlike _set_mode
   - _Fix:_ Mirror _set_mode: wrap each write_local_conf in try/except OSError and emit a 'could not persist to local.conf' warning rather than letting it bubble to the generic dispatcher handler.
@@ -117,7 +121,7 @@ found them not reachable on a live path):
   - _Fix:_ Treat the low bits explicitly: `if _fsck.returncode & 0b11 and _fsck.returncode < 4` (or `in (1,2,3)`) for the cleaned case before the `>= 4` serious check.
 - [x] **#126** `scripts/fork_mirror.py:942` — _write_release hardcodes 'Architectures: amd64 all' regardless of buildconfig.arch
   - _Fix:_ Pass build_arch into _write_release and emit f'Architectures: {build_arch} all'.
-- [ ] **#127** `scripts/identity_scan.py:270-283` — Redirect/pipe attached to a token without a space is treated as a package name
+- [x] **#127** `scripts/identity_scan.py:270-283` — Redirect/pipe attached to a token without a space is treated as a package name
   - _Fix:_ Strip leading redirect operators from each token (e.g. break when `_t` starts with any of < > | & after stripping leading digits), or split tokens on embedded redirect chars before the per-token classification.
 - [x] **#143** `scripts/mirror.py:729-735` — Read-only/status helpers trigger a file WRITE via the legacy-migration path
   - _Fix:_ Either document the one-time migration write explicitly at each read-named caller, or split migration into an explicit step invoked only from a write/setup path so status/read helpers never write.
@@ -141,7 +145,7 @@ found them not reachable on a live path):
   - _Fix:_ Return freshly constructed dicts with independent sets, e.g. `return ACTION_BOOTSTRAP, {'bins': set(), 'srcs': set()}, {'bins': set(), 'srcs': set()}` (or a `_fresh_empty()` helper), instead of two shallow copies of one shared template.
 - [x] **#186** `scripts/tui/dispatcher.py:238-243` — console_mark() can raise CancelledError on shutdown instead of returning 0
   - _Fix:_ Catch CancelledError alongside _FutureTimeout in the console_mark() loop and return 0 (and similarly decide/ document the request_prompt() cancel path).
-- [ ] **#189** `scripts/tui/facade.py:164-168` — PROMPT_OPTIONS under stdin EOF returns an unvalidated (empty) answer, crashing consumers that index by it
+- [x] **#189** `scripts/tui/facade.py:164-168` — PROMPT_OPTIONS under stdin EOF returns an unvalidated (empty) answer, crashing consumers that index by it
   - _Fix:_ On the EOF branch, treat PROMPT_OPTIONS like a hard abort: either raise a clean controlled error (e.g. Exit/abort) or return a sentinel the consumers check, rather than returning an out-of-range string that callers feed to int()/list-index.
 - [x] **#191** `scripts/tui/render.py:283-293` — Console widgets float under content instead of anchoring to bottom rows when buffer is short
   - _Fix:_ If widgets must occupy the bottom band, pad `row` up to max_y - widget_rows before drawing widget_strs (e.g. row = max(row, max_y - widget_rows)), or draw widgets at explicit rows max_y-widget_rows+i.
@@ -174,15 +178,15 @@ found them not reachable on a live path):
   - _Fix:_ Add the `f` prefix to the line 1416 fragment: `f'run `source fork {pkg} enabled` to '` (or make the whole write a single f-string / .format).
 - [x] **#78** `scripts/commands/cmd_supply_chain.py:242` — artifact lookup omits the `or {}` fallback used everywhere else → AttributeError on null artifact _(partial: real but not reachable)_
   - _Fix:_ Change line 242 to `len({(_m.get('artifact', {}) or {}).get('name', '') for _m in _matches})` to match the `or {}` idiom at lines 237/260/261.
-- [ ] **#80** `scripts/commands/cmd_tunnel.py:299-308, 354, 367, 449-452` — Non-integer [Build] VERSION fallback ships +deb-named debs but records pristine built_version (inconsistent record + misleading message) _(partial: real but overstated)_
+- [x] **#80** `scripts/commands/cmd_tunnel.py:299-308, 354, 367, 449-452` — Non-integer [Build] VERSION fallback ships +deb-named debs but records pristine built_version (inconsistent record + misleading message) _(partial: real but overstated)_
   - _Fix:_ In the `_release is None` branch, record built_version equal to the actual (un-transposed) upstream version and skip the '→ pristine' arrow, or hard-fail the tunnel when VERSION is not an integer rather than silently shipping upstream-named
 - [x] **#88** `scripts/coord/head.py:70-103` — write_coord_head is non-atomic: a transient gpg failure destroys the previously-valid signed head _(partial: real but overstated)_
   - _Fix:_ Write JSON to a temp file in coord_dir, sign the temp, then os.replace() both the .json and .sig into place only after the signature succeeds — so a sign failure leaves the prior good head untouched.
-- [ ] **#92** `scripts/coord/policy.py:32` — ORPHAN_WARN_AFTER_DAYS documents a 14-day INFO grace period that is never implemented; orphans always WARN immediately _(partial: real but overstated)_
+- [x] **#92** `scripts/coord/policy.py:32` — ORPHAN_WARN_AFTER_DAYS documents a 14-day INFO grace period that is never implemented; orphans always WARN immediately _(partial: real but overstated)_
   - _Fix:_ Either (a) implement the threshold in reconcile.py C-1: stat the claim/record mtime, emit INFO when age < ORPHAN_WARN_AFTER_DAYS*86400 and WARN otherwise, or (b) if immediate WARN is intended, delete the constant and rewrite the policy.py c
 - [x] **#95** `scripts/coord/publish.py:157-158` — Drift detection treats whole-binary pool absence as drift, bypassing the pulled_from no-reclaim guard _(partial: real but overstated)_
   - _Fix:_ Require actual presence before declaring drift: `_latest = _pool_latest.get(bn); _latest is not None and _fn != _latest`. A fully-absent declared binary then no longer flips drift (owned sources still drop it via the push-fail path), and a 
-- [ ] **#98** `scripts/coord/reconcile.py:130-203` — audit_local hash-verifies only ONE binary per multi-binary source (lossy projection) _(partial: real but not reachable)_
+- [x] **#98** `scripts/coord/reconcile.py:130-203` — audit_local hash-verifies only ONE binary per multi-binary source (lossy projection) _(partial: real but not reachable)_
   - _Fix:_ Drive C-1/C-2/C-3 from a filename-keyed live view (e.g. store.iter_live_claims_by_filename or project_owners filtered to builder_id) instead of project_live_claims, so every binary filename is hash-verified and accounted for.
 - [x] **#107** `scripts/coord/store.py:43-103` — No atomic seq allocation: concurrent same-builder appends can duplicate seq _(partial: real but not reachable)_
   - _Fix:_ Allocate seq under the same flock inside append_claim (re-read max_seq while holding LOCK_EX and stamp claim['seq']), or document that concurrent same-builder publish is unsupported and enforce a single-publisher lock at the command layer.
@@ -225,155 +229,155 @@ found them not reachable on a live path):
 
 ## Tier 4 — Cleanup (dead-code, redundancy, optimization)
 
-- [ ] **#20** `scripts/arch_filter.py:110-119` — Map build spawns 206 dpkg-architecture subprocesses (~4.4s) on first use, per process
+- [x] **#20** `scripts/arch_filter.py:110-119` — Map build spawns 206 dpkg-architecture subprocesses (~4.4s) on first use, per process
   - _Fix:_ Derive the triplet map by parsing /usr/share/dpkg/tupletable (joined with the already-read cputable) instead of forking dpkg-architecture once per arch; fall back to the subprocess path only if the table file is absent.
 - [x] **#24** `scripts/build.py:1125` — Redundant re-import of local_mirror inside cmd_init_remote_container
   - _Fix:_ Delete line 1125; the module-level import already binds the name.
-- [ ] **#25** `scripts/build.py:563` — cmd_clean_buildroot bypasses the documented sudo funnel and never scrubs the password
+- [x] **#25** `scripts/build.py:563` — cmd_clean_buildroot bypasses the documented sudo funnel and never scrubs the password
   - _Fix:_ Route cmd_clean_buildroot through _collect_validated_sudo_password (or at minimum scrub _password before return), and update the funnel docstring to reflect the two intentional bypasses.
-- [ ] **#28** `scripts/build_closure.py:187-195` — compute_build_closure ignores arch + build-profile restrictions that the cmd_cache resolver honours _(partial: real but overstated)_
+- [x] **#28** `scripts/build_closure.py:187-195` — compute_build_closure ignores arch + build-profile restrictions that the cmd_cache resolver honours _(partial: real but overstated)_
   - _Fix:_ Either have local_mirror feed compute_build_closure the already-arch/profile-filtered groups (reuse Source.build_depends output), or extend _pick/_rels to honour rel['arch'] against the target arch and rel['restrictions'] against active pro
-- [ ] **#31** `scripts/build_closure.py:106` — Provides set rebuilt per-relation inside the install-closure hot loop
+- [x] **#31** `scripts/build_closure.py:106` — Provides set rebuilt per-relation inside the install-closure hot loop
   - _Fix:_ Convert provides_index values to sets once at the top of compute_build_closure/_install_expand (or accept a pre-set-ified index), then intersect directly without per-iteration set() construction.
 - [x] **#33** `scripts/buildcontainer.py:142, 174-175` — self.build_path / self.build_profiles / self.build_options stored but never read
   - _Fix:_ Drop the three unused instance attributes (or, if kept for API symmetry, add a comment noting they are intentionally unused); self.repo_path is also only referenced in comments but is harmless to keep.
-- [ ] **#38** `scripts/buildsystem.py:83-104` — sudo env-var pickup + prompt + validation duplicated verbatim in __init__ and for_iso
+- [x] **#38** `scripts/buildsystem.py:83-104` — sudo env-var pickup + prompt + validation duplicated verbatim in __init__ and for_iso
   - _Fix:_ Extract a private staticmethod/helper on BuildSystem (e.g. `_collect_and_validate_sudo()`) and call it from both __init__ and for_iso so the env pickup, prompt, and validation live in one place.
 - [x] **#39** `scripts/buildsystem.py:83` — Redundant `import os as _os` shadows the module-level `os` import
   - _Fix:_ Drop the two `import os as _os` lines and call `os.environ.pop('ATHENA_SUDO_PASSWORD', None)` directly.
-- [ ] **#41** `scripts/bump.py:381-491, 812-887` — strip_nmu_from_control_text and transpose_control_text duplicate ~50 lines of field-walk/X-field/sibling-idiom logic _(partial: real but overstated)_
+- [x] **#41** `scripts/bump.py:381-491, 812-887` — strip_nmu_from_control_text and transpose_control_text duplicate ~50 lines of field-walk/X-field/sibling-idiom logic _(partial: real but overstated)_
   - _Fix:_ Extract the shared scaffold into one helper parameterized by the per-version rewrite callable (e.g. `_rewrite_control_text(content, version_op)`), and have both public functions pass strip_nmu_suffix / partial(transpose, prefix, release).
-- [ ] **#44** `scripts/cache.py:158, 161-162` — release_info / pkg_list / src_list initialised but never populated or read
+- [x] **#44** `scripts/cache.py:158, 161-162` — release_info / pkg_list / src_list initialised but never populated or read
   - _Fix:_ Delete the three unused attribute initialisations (and the corresponding test stub lines) to remove confusion about a cache 'package list' that is never built.
 - [x] **#45** `scripts/cache.py:86` — Cache._VALID_CONSTRAINTS class attribute is unused
   - _Fix:_ Remove the unused class attribute (and its comment), or have _lookup_packages reference it if a single source of truth on Cache is wanted.
-- [ ] **#46** `scripts/cache.py:854-893, 919-938` — Fork-source-drift audit duplicates the collision-gate comparison
+- [x] **#46** `scripts/cache.py:854-893, 919-938` — Fork-source-drift audit duplicates the collision-gate comparison
   - _Fix:_ Extract a single helper `_dropped_entries_at_or_above_fork(drops, fork_versions_for(name))` returning the offending tuples, and have both the advisory source audit and the fatal binary/udeb gate call it.
-- [ ] **#50** `scripts/chroot.py:486,570-576` — _configure_chroot is only ever called with is_final=True; the is_final=False branch and default are dead
+- [x] **#50** `scripts/chroot.py:486,570-576` — _configure_chroot is only ever called with is_final=True; the is_final=False branch and default are dead
   - _Fix:_ Either drop the is_final parameter and inline the final-pass behavior, or keep it but delete the unreachable else branch; if retained for symmetry add a test that exercises is_final=False.
-- [ ] **#51** `scripts/chroot.py:1139-1141` — _get_deb_files triggers a full repo os.listdir per +asg-stamped package on every unpack/retry pass
+- [x] **#51** `scripts/chroot.py:1139-1141` — _get_deb_files triggers a full repo os.listdir per +asg-stamped package on every unpack/retry pass
   - _Fix:_ Build a one-time {pristine_base: path} index of _main (and _doc) at the start of build_chroot and look up stamped variants from it, instead of re-listdir'ing the repo dir for every stamped package on every pass.
-- [ ] **#52** `scripts/chroot.py:526-583` — Command construction and 'Setting up' parse duplicated between _configure_chroot and _configure_packages
+- [x] **#52** `scripts/chroot.py:526-583` — Command construction and 'Setting up' parse duplicated between _configure_chroot and _configure_packages
   - _Fix:_ Extract a shared `_dpkg_configure_argv(named=None, force_deps=False)` builder and a `_parse_setting_up(stdout)` helper used by both methods.
-- [ ] **#56** `scripts/commands/cmd_audit.py:785` — audit stale-count includes foreign but preflight excludes it (sibling drift)
+- [x] **#56** `scripts/commands/cmd_audit.py:785` — audit stale-count includes foreign but preflight excludes it (sibling drift)
   - _Fix:_ Align the two: drop `len(_foreign)` from the audit row's gating _n_stale (keep it in the informational text/`_frn` suffix only), and add `len(_malformed)` so both functions use the same orphan+drift+malformed composition.
-- [ ] **#57** `scripts/commands/cmd_audit.py:943-944` — Unreachable final `else` branch in gap classification
+- [x] **#57** `scripts/commands/cmd_audit.py:943-944` — Unreachable final `else` branch in gap classification
   - _Fix:_ Drop the unreachable `else` (or fold branch4 into it as `else: _transitional`) and simplify branch3's condition to `elif _in_up:`.
-- [ ] **#58** `scripts/commands/cmd_audit.py:44-48` — Misleading 'tiebreak prefers consumer sorts first' comment in _dedupe_bidirectional_conflicts
+- [x] **#58** `scripts/commands/cmd_audit.py:44-48` — Misleading 'tiebreak prefers consumer sorts first' comment in _dedupe_bidirectional_conflicts
   - _Fix:_ Either implement the documented behavior (on collision, replace with the entry whose consumer sorts lexicographically first) or correct the comment/docstring to state it keeps the first-encountered entry.
-- [ ] **#62** `scripts/commands/cmd_cache.py:878` — `if self.config.build_mode != 'build'` guard is always true (unreachable in build mode)
+- [x] **#62** `scripts/commands/cmd_cache.py:878` — `if self.config.build_mode != 'build'` guard is always true (unreachable in build mode)
   - _Fix:_ Drop the redundant condition (de-indent the closure-guard block) or replace it with an `assert self.config.build_mode != 'build'` to document the invariant without implying a live alternative path.
-- [ ] **#66** `scripts/commands/cmd_mirror.py:1745-1801` — Four near-identical coord-fetch + head-verify + keyring-bind + read_all_claims blocks
+- [x] **#66** `scripts/commands/cmd_mirror.py:1745-1801` — Four near-identical coord-fetch + head-verify + keyring-bind + read_all_claims blocks
   - _Fix:_ Extract a helper e.g. `_fetch_and_verify(name, st) -> (head, by_builder, fetched) | None` and call it from all four commands so the FED-03-D keyring binding is applied uniformly.
-- [ ] **#67** `scripts/commands/cmd_repo.py:435` — Strip completion message points to removed `repo audit_nmu` command
+- [x] **#67** `scripts/commands/cmd_repo.py:435` — Strip completion message points to removed `repo audit_nmu` command
   - _Fix:_ Change the hint to `Run `repo audit` to confirm zero residue.` (NMU residue is now part of the unified audit).
-- [ ] **#70** `scripts/commands/cmd_run.py:116-205` — Boolean-parse block duplicated verbatim across three setters
+- [x] **#70** `scripts/commands/cmd_run.py:116-205` — Boolean-parse block duplicated verbatim across three setters
   - _Fix:_ Extract a `_parse_bool(value) -> Optional[bool]` helper returning None on invalid input and have all three call it, keeping their differing post-set side effects local.
-- [ ] **#73** `scripts/commands/cmd_snapshot.py:214-223` — Redundant double GET to snapshot_timestamp_api (latest + candidates) in list/interactive-select
+- [x] **#73** `scripts/commands/cmd_snapshot.py:214-223` — Redundant double GET to snapshot_timestamp_api (latest + candidates) in list/interactive-select
   - _Fix:_ Fetch the result once (or add a helper returning (latest, between)) and derive both `_latest` and the in-range candidates from a single response.
-- [ ] **#77** `scripts/commands/cmd_source.py:928-931` — cmd_source_audit recomputes update-pending + workload twice per run
+- [x] **#77** `scripts/commands/cmd_source.py:928-931` — cmd_source_audit recomputes update-pending + workload twice per run
   - _Fix:_ Compute `_update_build_pending()` and the floor workload once in cmd_source_audit and pass the results into `_print_next_run_build_queue` instead of recomputing.
-- [ ] **#82** `scripts/commands/cmd_tunnel.py:238-261` — Stale-file wipe calls os.listdir(_dst_dir) once per binary — quadratic for large firmware sources
+- [x] **#82** `scripts/commands/cmd_tunnel.py:238-261` — Stale-file wipe calls os.listdir(_dst_dir) once per binary — quadratic for large firmware sources
   - _Fix:_ Snapshot `os.listdir(_dst_dir)` per component dir once before the download loop (or memoize by dir), then filter from the cached list inside the loop.
-- [ ] **#84** `scripts/commands/cmd_virtual.py:369` — Redundant `if self.dep_tree is not None` guard
+- [x] **#84** `scripts/commands/cmd_virtual.py:369` — Redundant `if self.dep_tree is not None` guard
   - _Fix:_ Drop the guard (or merge with the udeb_dep_tree block) since the None case is already short-circuited at the top of the method.
-- [ ] **#87** `scripts/coord/head.py:156-206` — is_fresh has zero consumers — staleness/rollback policy is never enforced
+- [x] **#87** `scripts/coord/head.py:156-206` — is_fresh has zero consumers — staleness/rollback policy is never enforced
   - _Fix:_ Either wire is_fresh into the pull/publish read paths (call it right after read_coord_head with the freshly-fetched InRelease sha + Date), or, if the rollback defense is intentionally deferred, drop is_fresh and its docstring promise so it 
-- [ ] **#90** `scripts/coord/head.py:75-83` — homedir-missing branch leaves an orphan stale .sig, diverging from the mirrored repo_audit scrub pattern
+- [x] **#90** `scripts/coord/head.py:75-83` — homedir-missing branch leaves an orphan stale .sig, diverging from the mirrored repo_audit scrub pattern
   - _Fix:_ In the homedir-missing branch, also unlink the .sig (or factor a single _scrub() helper removing both _path and _sig, matching repo_audit) so failures never leave a dangling signature.
-- [ ] **#91** `scripts/coord/identity.py:217-235` — verify_claim_against_keyring is never called; real read-time verification reimplements it inline
+- [x] **#91** `scripts/coord/identity.py:217-235` — verify_claim_against_keyring is never called; real read-time verification reimplements it inline
   - _Fix:_ Either delete verify_claim_against_keyring (and fix the store.py:14 docstring to reference the inline read_all_claims path), or refactor read_all_claims/read_builder_claims to call it so the single keyring+revoked+verify policy lives in one
 - [x] **#93** `scripts/coord/policy.py:41` — TUNNEL_REPUBLISH_OK is an unconsumed constant; its documented 'audit should flag' safety belt does not exist
   - _Fix:_ Remove the constant and its comment, or wire it into the tunnel/republished_from audit path it claims to govern. At minimum stop documenting behavior that no code performs.
-- [ ] **#94** `scripts/coord/policy.py:10` — Module docstring references a COORD_HEAD_FRESHNESS knob that is not defined in the file _(partial: real but overstated)_
+- [x] **#94** `scripts/coord/policy.py:10` — Module docstring references a COORD_HEAD_FRESHNESS knob that is not defined in the file _(partial: real but overstated)_
   - _Fix:_ Update the docstring to name the real knob (COORD_HEAD_MAX_AGE_SECONDS) or drop the stale COORD_HEAD_FRESHNESS line.
-- [ ] **#97** `scripts/coord/publish.py:1223` — Redundant nested `pool_remote_spec is not None` checks
+- [x] **#97** `scripts/coord/publish.py:1223` — Redundant nested `pool_remote_spec is not None` checks
   - _Fix:_ Drop the inner `pool_remote_spec is not None` clauses (keep `_codename` on line 1275); they add no guard inside the enclosing block.
-- [ ] **#100** `scripts/coord/reconcile.py:104, 211, 386` — audit_local / audit_cross / audit_repo have no production caller
+- [x] **#100** `scripts/coord/reconcile.py:104, 211, 386` — audit_local / audit_cross / audit_repo have no production caller
   - _Fix:_ Either wire these three into a `coord audit` command (and fix finding #1 first) or mark them explicitly as staged-for-P3 primitives; correct the stale 'cmd_coord_audit (P1 wired)' docstring claim on line 24.
-- [ ] **#105** `scripts/coord/store.py:265-277` — Cross-builder merge + conflict-key branch in project_live_claims is never reached (only ever called single-builder) and is untested
+- [x] **#105** `scripts/coord/store.py:265-277` — Cross-builder merge + conflict-key branch in project_live_claims is never reached (only ever called single-builder) and is untested
   - _Fix:_ Either drop/guard the cross-builder branch with a comment that no caller passes >1 builder, or add a multi-builder test asserting the conflict-key shape so the documented behavior is pinned before any future multi-builder caller relies on i
 - [x] **#109** `scripts/dep_drift.py:13-14, 74-76` — Vestigial mixin type stubs and stale module docstring
   - _Fix:_ Drop the unused `_dir_repo`, `_config`, and `strip_build_version` stubs (or replace with `_dir_repo_main`/`normalize_repo_filename`, which are the real dependencies) and update the docstring lines 13-14 to name the attributes actually used.
-- [ ] **#112** `scripts/dependencytree.py:1229-1253` — __getstate__/__setstate__ pickle support is unreachable (resume layer removed)
+- [x] **#112** `scripts/dependencytree.py:1229-1253` — __getstate__/__setstate__ pickle support is unreachable (resume layer removed)
   - _Fix:_ Either delete __getstate__/__setstate__ and the pickle-safety comments, or add a regression test that round-trips a DependencyTree so the dormant code is exercised and stays correct if revived.
-- [ ] **#115** `scripts/diag_installer_status.py:92-93` — Unused lineno parameter in audit_stanza
+- [x] **#115** `scripts/diag_installer_status.py:92-93` — Unused lineno parameter in audit_stanza
   - _Fix:_ Drop the lineno parameter from audit_stanza and the call site, or actually use it in issue messages.
-- [ ] **#119** `scripts/disk_image.py:815-820` — _convert_to_qcow2 takes an unused password param with a stale chown docstring
+- [x] **#119** `scripts/disk_image.py:815-820` — _convert_to_qcow2 takes an unused password param with a stale chown docstring
   - _Fix:_ Drop the `password` parameter (and its argument at the call site) or, if kept for signature parity, replace the misleading 'see below' chown comment with a note that no privileged step is needed here.
-- [ ] **#122** `scripts/disk_image.py:423,453` — _has_bios_modules invoked twice (one os.path.isdir for the spinner label, one for the branch)
+- [x] **#122** `scripts/disk_image.py:423,453` — _has_bios_modules invoked twice (one os.path.isdir for the spinner label, one for the branch)
   - _Fix:_ Compute `_bios = _has_bios_modules(_mnt)` once before the spinner and reuse it at both sites.
-- [ ] **#124** `scripts/fork_mirror.py:804-805` — _SUBSTVAR_RE is recompiled on every binary stanza
+- [x] **#124** `scripts/fork_mirror.py:804-805` — _SUBSTVAR_RE is recompiled on every binary stanza
   - _Fix:_ Hoist `import re` to the module imports and define _SUBSTVAR_RE = re.compile(r'\$\{[^}]+\}') at module scope.
-- [ ] **#125** `scripts/fork_mirror.py:289-339, 358-377, 704-750` — debian/control is independently opened and parsed in three helpers
+- [x] **#125** `scripts/fork_mirror.py:289-339, 358-377, 704-750` — debian/control is independently opened and parsed in three helpers
   - _Fix:_ Factor a single `_parse_control(pkg_dir) -> list[Deb822]` helper and derive binary names / dep-hash / stanzas from it, removing the bespoke startswith parser.
-- [ ] **#128** `scripts/identity_scan.py:182` — UnicodeDecodeError except clause is unreachable
+- [x] **#128** `scripts/identity_scan.py:182` — UnicodeDecodeError except clause is unreachable
   - _Fix:_ Drop UnicodeDecodeError from the except tuple (cosmetic), leaving `except OSError`.
-- [ ] **#129** `scripts/installer_chroot.py:477-486` — _allow_path first computation is dead in the only live call path
+- [x] **#129** `scripts/installer_chroot.py:477-486` — _allow_path first computation is dead in the only live call path
   - _Fix:_ Drop the lines 477-478 pre-computation and just compute _allow_path = os.path.normpath(os.path.join(installer_dir, 'strip-hooks-allowlist')); keep the basename guard only if a non-'installer' caller is genuinely expected (none exists today)
-- [ ] **#131** `scripts/installer_chroot.py:291` — find_matching_artifact triggers an os.listdir per stamped/missing udeb
+- [x] **#131** `scripts/installer_chroot.py:291` — find_matching_artifact triggers an os.listdir per stamped/missing udeb
   - _Fix:_ If profiling shows it matters, build a single dirlist/base-index map once before the loop and look up stamped variants from it; otherwise leave as-is (correctness is fine).
-- [ ] **#132** `scripts/iso.py:151-152` — Quote-stripping is already done at config load — inline strip is dead-defensive
+- [x] **#132** `scripts/iso.py:151-152` — Quote-stripping is already done at config load — inline strip is dead-defensive
   - _Fix:_ Use `_name = cfg.build_distribution` / `_version = cfg.build_version` directly (they are already _strip_quotes'd at load), removing the inline strip; or if defensive stripping is desired, call the shared utils helper rather than re-implemen
-- [ ] **#136** `scripts/iso_installer.py:803-806` — _debian_version_cmp re-imports apt_pkg and calls init_system() on every comparison
+- [x] **#136** `scripts/iso_installer.py:803-806` — _debian_version_cmp re-imports apt_pkg and calls init_system() on every comparison
   - _Fix:_ Import apt_pkg once at module load (or memoize a module-level flag) and call init_system() a single time, then have _debian_version_cmp call version_compare directly.
-- [ ] **#137** `scripts/local_mirror.py:97-163` — plan() `config` parameter is never used
+- [x] **#137** `scripts/local_mirror.py:97-163` — plan() `config` parameter is never used
   - _Fix:_ Drop the `config` parameter (and update the three call sites + tests), or use it if an arch/suite was intended to come from config.
-- [ ] **#138** `scripts/local_mirror.py:355-361` — Final `return f'{_f:.1f}TB'` in human_size is unreachable
+- [x] **#138** `scripts/local_mirror.py:355-361` — Final `return f'{_f:.1f}TB'` in human_size is unreachable
   - _Fix:_ Remove line 361 (the post-loop return), or restructure the loop so the final fallthrough is the TB case.
-- [ ] **#140** `scripts/mirror.py:1042-1050` — apt_pkg import + init_system() called inside the per-claim collision loop
+- [x] **#140** `scripts/mirror.py:1042-1050` — apt_pkg import + init_system() called inside the per-claim collision loop
   - _Fix:_ Hoist `import apt_pkg` and a single `apt_pkg.init_system()` to the top of project_post_publish_state (before the builder/claims loops), matching the pattern already used in audit_closure_ledger.
-- [ ] **#141** `scripts/mirror.py:832-839` — read_mirror_state reloads + HMAC-verifies the entire mirror.conf on every call; callers invoke it in O(mirrors) loops
+- [x] **#141** `scripts/mirror.py:832-839` — read_mirror_state reloads + HMAC-verifies the entire mirror.conf on every call; callers invoke it in O(mirrors) loops
   - _Fix:_ Add a thin helper that calls load_mirror_conf once and iterates `_doc['mirrors']`, and have the loop-based functions (all_mirror_urls, all_mirror_neighbour_records, find_mirror_by_url, add_mirror's duplicate-URL scan) use it instead of per-
 - [x] **#146** `scripts/onboarding.py:172, 502` — Redundant local re-imports of already top-level modules
   - _Fix:_ Drop the local re-imports and use the module-level `os` / `utils`.
-- [ ] **#151** `scripts/or_resolve.py:121-134` — Pass B re-scans the whole closure and re-parses every package's OR groups on every outer iteration, pulling at most one group per iteration
+- [x] **#151** `scripts/or_resolve.py:121-134` — Pass B re-scans the whole closure and re-parses every package's OR groups on every outer iteration, pulling at most one group per iteration
   - _Fix:_ Cache per-package or_groups once, and either resolve all currently-unsatisfied groups whose chosen alt doesn't change others in a single pass, or track only groups touched by newly-added packages instead of rescanning the full closure each 
-- [ ] **#155** `scripts/print_commands.py:1159-1167` — `print provides` can never show multiple providers — always reports 'no contention'
+- [x] **#155** `scripts/print_commands.py:1159-1167` — `print provides` can never show multiple providers — always reports 'no contention'
   - _Fix:_ Source the providers from the APT cache's virtual/provides index (e.g. cache.package_hashtable / a provides map listing all candidates for a virtual name) rather than from selected_pkgs, which only retains the single resolved winner. Altern
-- [ ] **#156** `scripts/print_commands.py:695-722` — `_print_build_times` and `_summary_build_times_section` re-load and re-parse all build records independently _(partial: real but not reachable)_
+- [x] **#156** `scripts/print_commands.py:695-722` — `_print_build_times` and `_summary_build_times_section` re-load and re-parse all build records independently _(partial: real but not reachable)_
   - _Fix:_ Extract a single helper that returns normalized (elapsed, pkg, status, version) rows and have both call sites consume it, so coercion rules and the verified-record read are shared and consistent.
-- [ ] **#157** `scripts/release_index.py:96` — Unreachable fallback in _human_size
+- [x] **#157** `scripts/release_index.py:96` — Unreachable fallback in _human_size
   - _Fix:_ Drop the dead `return f"{n} B"` line (or keep only if you intend to defend against an empty units tuple, which is not the case here).
 - [x] **#161** `scripts/remote_agent.py:50` — _TERMINAL set is defined but never referenced
   - _Fix:_ Either delete `_TERMINAL`, or use it in run_build/elsewhere as the single source of terminal-phase truth (and reuse it for the duplicated literal tuples in callers).
-- [ ] **#163** `scripts/remote_build.py:172-175` — Artifact-collection glob duplicated verbatim in remote_agent.py
+- [x] **#163** `scripts/remote_build.py:172-175` — Artifact-collection glob duplicated verbatim in remote_agent.py
   - _Fix:_ Expose a shared helper in remote_build.py, e.g. `def collect_outputs(out_dir) -> list[str]` returning the sorted basenames, and call it from both main() and remote_agent.py's post-build block.
-- [ ] **#166** `scripts/remote_localmirror.py:98-99` — 416 'already complete' branch is unreachable given upstream guards
+- [x] **#166** `scripts/remote_localmirror.py:98-99` — 416 'already complete' branch is unreachable given upstream guards
   - _Fix:_ Either drop the dead sub-condition or document it as purely defensive; no functional change needed since the fall-through still returns a sane failure.
 - [x] **#170** `scripts/repo_audit.py:881, 1043, 1173` — PkgRelation re-imported locally three times despite module-level import
   - _Fix:_ Delete the three function-local 'from debian.deb822 import PkgRelation' lines; the module-level import already covers them.
-- [ ] **#175** `scripts/sbom.py:167-172` — _strip_quotes re-applied to values BuildConfig already quote-strips at load
+- [x] **#175** `scripts/sbom.py:167-172` — _strip_quotes re-applied to values BuildConfig already quote-strips at load
   - _Fix:_ Drop the redundant _strip_quotes wrapping here (use str()), or add a comment that it is defensive belt-and-suspenders; keep one canonical stripping site.
-- [ ] **#178** `scripts/select_packages.py:123-125, 350` — Redundant re-parsing/re-flattening on the render hot path
+- [x] **#178** `scripts/select_packages.py:123-125, 350` — Redundant re-parsing/re-flattening on the render hot path
   - _Fix:_ Cache the flattened rows and invalidate on model mutation (toggle/add/drop); pass the entry's selected flag into _Row so _format_pkg_row need not re-scan; share one file read between the two parse helpers.
 - [x] **#182** `scripts/signing.py:114-116` — Unreachable `if not parts: continue` guard in parse_secret_keys_colons
   - _Fix:_ Remove the dead `if not parts: continue` lines (cosmetic; no behavior change).
-- [ ] **#183** `scripts/surfaces.py:98-120` — Extras fixpoint rescans the entire closure every round instead of only newly added nodes
+- [x] **#183** `scripts/surfaces.py:98-120` — Extras fixpoint rescans the entire closure every round instead of only newly added nodes
   - _Fix:_ Track a `_frontier` of newly added nodes (the union of `_wanted` and the hard-deps added in the inner `while _stack` drain) and scan only `_frontier`'s recommends in the next round, instead of `for _n in _closure`. This is build-time, low-f
-- [ ] **#187** `scripts/tui/dispatcher.py:150-155` — IDLE_TIMEOUT / WIDGET_IDLE_TIMEOUT values never affect the actual loop wait _(partial: real but overstated)_
+- [x] **#187** `scripts/tui/dispatcher.py:150-155` — IDLE_TIMEOUT / WIDGET_IDLE_TIMEOUT values never affect the actual loop wait _(partial: real but overstated)_
   - _Fix:_ Either drop/relabel IDLE_TIMEOUT & WIDGET_IDLE_TIMEOUT (they no longer set the wait) or remove the INPUT_POLL_MS clamp if longer idle sleeps were intended; fix the '10 Hz' comment to 20 Hz.
-- [ ] **#188** `scripts/tui/events.py:173-178` — ALL_EVENT_TYPES is unused (no test or discovery consumer)
+- [x] **#188** `scripts/tui/events.py:173-178` — ALL_EVENT_TYPES is unused (no test or discovery consumer)
   - _Fix:_ Either add a test asserting ALL_EVENT_TYPES matches the dispatcher._handle isinstance chain (catching a forgotten handler when a new event is added), or drop the list if discovery is not actually needed.
-- [ ] **#190** `scripts/tui/logging_bridge.py:24-29` — _tab_for_logger ignores its `name` argument (always returns 'log')
+- [x] **#190** `scripts/tui/logging_bridge.py:24-29` — _tab_for_logger ignores its `name` argument (always returns 'log')
   - _Fix:_ Either keep the parameter as an intentional interface stub with a comment, or drop the param and inline a 'log' constant; update the stale routing language in the pinning test's docstring so it does not imply _tab_for_logger differentiates 
 - [x] **#195** `scripts/tui/tui.py:251` — Redundant local `import curses` inside attr_reverse
   - _Fix:_ Drop the local `import curses` on line 251 and reference the module-level import.
-- [ ] **#199** `scripts/utils.py:3943,4010` — parse_pkg_list_groups + parse_pkg_list_group_meta re-read the same file and recompute section detection
+- [x] **#199** `scripts/utils.py:3943,4010` — parse_pkg_list_groups + parse_pkg_list_group_meta re-read the same file and recompute section detection
   - _Fix:_ Either parse once into a combined (groups, meta) structure shared by both call sites, or have the meta parser accept already-read lines, so a single read/scan serves both.
-- [ ] **#200** `scripts/utils.py:1451-1457` — lifecycle_touch_selected create-path reads the build record twice
+- [x] **#200** `scripts/utils.py:1451-1457` — lifecycle_touch_selected create-path reads the build record twice
   - _Fix:_ For the create branch, construct + write via new_build_record/write_build_record directly (or have upsert accept an already-loaded record), avoiding the second read_build_record round-trip.
-- [ ] **#201** `scripts/virtual_build.py:855,877-886,898` — `was_patched`/`_at_build_delta` in validate are dead — always overridden by `override_patch_level`
+- [x] **#201** `scripts/virtual_build.py:855,877-886,898` — `was_patched`/`_at_build_delta` in validate are dead — always overridden by `override_patch_level`
   - _Fix:_ Drop `_was_patched`, the `_at_build_delta` accumulation, and the `was_patched=` argument; if validate should match buildcontainer's flooring, pass `override_patch_level=max(_rec_patch_level, 1 if _was_patched else 0)` instead.
-- [ ] **#202** `scripts/virtual_build.py:482,505,523-525` — `asg_ledger` parameter is fully vestigial and forces a wasted disk read at the call site
+- [x] **#202** `scripts/virtual_build.py:482,505,523-525` — `asg_ledger` parameter is fully vestigial and forces a wasted disk read at the call site
   - _Fix:_ Remove the `asg_ledger` parameter from both functions and delete the now-unnecessary published_ledger() call in cmd_virtual.py.
-- [ ] **#203** `scripts/virtual_build.py:265-267,1296-1303` — Each dep-relation field is PkgRelation-parsed/serialized up to three times in the full-repo audit
+- [x] **#203** `scripts/virtual_build.py:265-267,1296-1303` — Each dep-relation field is PkgRelation-parsed/serialized up to three times in the full-repo audit
   - _Fix:_ Merge _transpose_relation and _rewrite_sibling_pins into a single parse→mutate→serialize pass (the global pass must stay separate since it runs after dedup).
 - [x] **#204** `scripts/virtual_build.py:917-933` — `_strip_asg` applied on top of `pristine_base` is a no-op
   - _Fix:_ Drop the redundant `_strip_asg(...)` wrapper in _filename_signature; pristine_base already removes the asg layer.
-- [ ] **#209** `scripts/webapi/jobs.py:159-164` — except PromptRequired branch is unreachable; structured prompt_required contract is not delivered _(partial: real but overstated)_
+- [x] **#209** `scripts/webapi/jobs.py:159-164` — except PromptRequired branch is unreachable; structured prompt_required contract is not delivered _(partial: real but overstated)_
   - _Fix:_ Either re-raise PromptRequired out of _dispatch_one's generic handler (special-case it in cli.py before `except Exception`), or drop the dead except branch here and instead detect the prompt-required condition from the captured ERROR line /
-- [ ] **#212** `scripts/webapi/jobs.py:79-81` — known_command re-parses the command already split/validated at the route
+- [x] **#212** `scripts/webapi/jobs.py:79-81` — known_command re-parses the command already split/validated at the route
   - _Fix:_ Have the route pass the already-extracted first token, or expose known_command(first_token) taking the parsed verb, to avoid the second split.
 
 ## Tier 5 — Test coverage
@@ -386,67 +390,67 @@ Version-scheme coverage gaps (verified):
 
 Missing-test findings (medium/low):
 
-- [ ] **#19** `scripts/apt_repo.py:306` — No test exercises an empty-but-present debian-installer/ udeb dir in generate_repo_indexes
+- [x] **#19** `scripts/apt_repo.py:306` — No test exercises an empty-but-present debian-installer/ udeb dir in generate_repo_indexes
   - _Fix:_ Add a case: create dists/<suite>/main/debian-installer/binary-amd64/ with no .udeb, have the scan mock emit empty stdout for udeb argv, and assert generate_repo_indexes still returns True (or skips cleanly) rather than failing.
-- [ ] **#22** `scripts/arch_filter.py:152-162` — No test for the populated-map-but-no-arch-table degrade branch
+- [x] **#22** `scripts/arch_filter.py:152-162` — No test for the populated-map-but-no-arch-table degrade branch
   - _Fix:_ Add a test that patches _arch_table to return None while leaving _maps populated and asserts a known-foreign name (e.g. binutils-aarch64-linux-gnu) returns False (KEEP), documenting the degrade contract.
-- [ ] **#29** `scripts/build_closure.py:77-79, 105-108` — Provides-based resolution path has zero test coverage
+- [x] **#29** `scripts/build_closure.py:77-79, 105-108` — Provides-based resolution path has zero test coverage
   - _Fix:_ Add a compute_build_closure test with a non-empty provides_index where (a) a direct build-dep is a pure virtual satisfied only via a provider, and (b) a transitive Depends is already satisfied by a provider already in the set, asserting bot
-- [ ] **#30** `scripts/build_closure.py:145-149, 153` — classify_tiers transit-through-non-member and toolchain/language overlap untested
+- [x] **#30** `scripts/build_closure.py:145-149, 153` — classify_tiers transit-through-non-member and toolchain/language overlap untested
   - _Fix:_ Add an adjacency where a toolchain seed reaches a member only through a non-member intermediary, and a member reachable from both seed sets, asserting it lands in toolchain not language.
-- [ ] **#32** `scripts/buildcontainer.py:24422-24474` — Rollback test does not cover the dup-then-failure case that triggers the data-loss bug
+- [x] **#32** `scripts/buildcontainer.py:24422-24474` — Rollback test does not cover the dup-then-failure case that triggers the data-loss bug
   - _Fix:_ Add a test: pre-publish file A in dest, place rebuilt-dup A plus a second file B in scratch where B's dest forces an OSError; assert the published A still exists in its dest dir after the call (and is not relocated into scratch).
-- [ ] **#35** `scripts/buildlog.py:128-143` — No test exercises write() under a non-UTF-8 locale despite non-ASCII payload
+- [x] **#35** `scripts/buildlog.py:128-143` — No test exercises write() under a non-UTF-8 locale despite non-ASCII payload
   - _Fix:_ Add a test that monkeypatches locale.getpreferredencoding to return 'ascii' (or opens via a forced ascii encoder) and asserts the file with '→'/'…' content is still written and readable.
-- [ ] **#42** `scripts/bump_version.py:169-184` — No test covers the --freeze-stamp commit path
+- [x] **#42** `scripts/bump_version.py:169-184` — No test covers the --freeze-stamp commit path
   - _Fix:_ Add a test that runs main(['patch','--freeze-stamp']) against a temp git repo with scripts/_buildstamp.py gitignored and asserts the commit succeeds.
-- [ ] **#54** `scripts/cli.py:417-421` — command_gate refusal path has no test coverage
+- [x] **#54** `scripts/cli.py:417-421` — command_gate refusal path has no test coverage
   - _Fix:_ Add a test: construct a Cli via object.__new__, register a fake command, set command_gate=lambda c: c=='configure', assert dispatching the fake command returns False + emits the 'configure first' ERROR, while 'help' still runs and 'quit' st
-- [ ] **#63** `scripts/commands/cmd_cache.py:271` — No test covers highest-version pick across multiple cached versions in build mode
+- [x] **#63** `scripts/commands/cmd_cache.py:271` — No test covers highest-version pick across multiple cached versions in build mode
   - _Fix:_ Add a build-mode test that puts two versions of one package in the offline cache (e.g. 1.9-1 and 1.10-1) and asserts selected_pkgs holds the Debian-higher 1.10-1, locking in Version-object ordering against an accidental string-max regressio
-- [ ] **#65** `scripts/commands/cmd_mirror.py:36436` — Reclaim test asserts the buggy publish args, locking in the ISO-gate regression
+- [x] **#65** `scripts/commands/cmd_mirror.py:36436` — Reclaim test asserts the buggy publish args, locking in the ISO-gate regression
   - _Fix:_ Once line 2202 forwards `--no-iso`, update the assertion to `assert _a == ('m1', '--no-iso')` and add a case asserting reclaim still succeeds when _release_iso_descriptors reports missing ISOs.
-- [ ] **#74** `scripts/commands/cmd_snapshot.py:466-507` — `_cmd_snapshot_workload` has no test coverage
+- [x] **#74** `scripts/commands/cmd_snapshot.py:466-507` — `_cmd_snapshot_workload` has no test coverage
   - _Fix:_ Add a test stubbing `_workload_current_to_target`/`_preflight_stamp_invariant` to cover: dep_check_ready=False early-out, current==target short-circuit, malformed target rejection, and the names+guard rendering.
-- [ ] **#79** `scripts/commands/cmd_supply_chain.py:226-270` — grype JSON-render/severity-summary path has no test
+- [x] **#79** `scripts/commands/cmd_supply_chain.py:226-270` — grype JSON-render/severity-summary path has no test
   - _Fix:_ Factor lines 226-270 into a pure helper taking the parsed grype doc and add a unit test feeding a synthetic doc (one match with `"artifact": null`, one with missing `fix`) — testable without a grype binary.
-- [ ] **#81** `scripts/commands/cmd_tunnel.py:159-473` — No behavioral test exercises _do_tunnel; only a getsource string assertion
+- [x] **#81** `scripts/commands/cmd_tunnel.py:159-473` — No behavioral test exercises _do_tunnel; only a getsource string assertion
   - _Fix:_ Add a test that constructs a fake src_pkg + a tmp pool with a real dpkg-deb-built .deb, runs _do_tunnel, and asserts: transposed on-disk filename, republished_from provenance keyed by final name, and build-record outputs == on-disk names.
-- [ ] **#85** `scripts/commands/cohorts.py:25325-25383` — No test covers multi-version source_hashtable selection in _tunnel_filenames_for_source
+- [x] **#85** `scripts/commands/cohorts.py:25325-25383` — No test covers multi-version source_hashtable selection in _tunnel_filenames_for_source
   - _Fix:_ Add a test with `source_hashtable = {'x': [older_src, newer_src]}` (parse order older-first) where newer_src declares an extra/renamed binary, asserting the predicted filename set matches the selected/highest-version source, not _cands[0].
-- [ ] **#101** `scripts/coord/reconcile.py:139-194` — No test covers audit_local/audit_cross with a multi-binary source
+- [x] **#101** `scripts/coord/reconcile.py:139-194` — No test covers audit_local/audit_cross with a multi-binary source
   - _Fix:_ Add an audit_local test with two published claims (same package+built_version, distinct filenames, both present in pool with matching hashes) and assert BOTH are hash-verified and neither is reported as unclaimed_pool_file.
-- [ ] **#103** `scripts/coord/schema.py:597-617` — canonicalize_neighbour_records dedup is order-dependent first-wins; test claims (untested) dict-overrides-str
+- [x] **#103** `scripts/coord/schema.py:597-617` — canonicalize_neighbour_records dedup is order-dependent first-wins; test claims (untested) dict-overrides-str
   - _Fix:_ Either (a) add a test feeding ['ssh://b/p', {'url':'ssh://b/p','public_url':'https://b'}] and assert the intended winner, then make dedup prefer the record with non-empty public_url/public_proto on collision; or (b) correct the test docstri
-- [ ] **#110** `scripts/dep_drift.py:219-223` — Version-sync (the 144-spurious-mismatch fix) has no test
+- [x] **#110** `scripts/dep_drift.py:219-223` — Version-sync (the 144-spurious-mismatch fix) has no test
   - _Fix:_ Add a test that runs `_check_dep_drift` over a canonical pkg whose cache Version is unstripped (e.g. 0.8-10+deb12u1) and disk Version stripped (0.8-10), then asserts `_pkg_obj.version`/`_pkg_obj['Version']` equal the disk value.
-- [ ] **#118** `scripts/diag_installer_status.py:45-89` — Core parser parse_stanzas has no test
+- [x] **#118** `scripts/diag_installer_status.py:45-89` — Core parser parse_stanzas has no test
   - _Fix:_ Add a small tests fixture exercising: blank-line separation, leading-continuation-with-no-field (line 74), bad non-header line (line 83), and trailing stanza with no terminating newline (line 87).
-- [ ] **#135** `scripts/iso_installer.py:5563-5582 (tests/test_module.py)` — scripts/iso_installer.py:5563-5582 (tests/test_module.py) — No test covers exclude_names combined with deb_whitelist=None
+- [x] **#135** `scripts/iso_installer.py:5563-5582 (tests/test_module.py)` — scripts/iso_installer.py:5563-5582 (tests/test_module.py) — No test covers exclude_names combined with deb_whitelist=None
   - _Fix:_ Add a test calling _select_pool_files([repo], deb_whitelist=None, exclude_names={'apt-setup-udeb'}) and assert the excluded binary is dropped (or, if bypass is intended, assert+document that it is kept).
-- [ ] **#147** `scripts/onboarding.py:188-191` — No test covers jobs out-of-range / non-numeric clamp behavior
+- [x] **#147** `scripts/onboarding.py:188-191` — No test covers jobs out-of-range / non-numeric clamp behavior
   - _Fix:_ Add a wizard test that scripts a jobs answer of e.g. '16' and 'abc' and asserts the persisted MaxParallelBuilds is 8 / default respectively.
-- [ ] **#152** `scripts/or_resolve.py:37649-37673` — No test exercises multi-group / non-minimal OR interaction or generator seeds _(partial: real but overstated)_
+- [x] **#152** `scripts/or_resolve.py:37649-37673` — No test exercises multi-group / non-minimal OR interaction or generator seeds _(partial: real but overstated)_
   - _Fix:_ Add a test with deps {'p':[('a','b')],'q':[('b','c')],...} asserting the documented invariant, and a test calling resolve_closure((s for s in ['xorg']), ...) to pin generator behavior.
-- [ ] **#153** `scripts/package.py:385-446` — add_constraint conflict-resolution matrix and VersionConstraint have no real unit test
+- [x] **#153** `scripts/package.py:385-446` — add_constraint conflict-resolution matrix and VersionConstraint have no real unit test
   - _Fix:_ Add a parametrized test over representative (new,old) operator pairs asserting the resulting stored constraint (nc/xg/eq/err semantics), plus a `constraints_satisfied` test covering the Provides-version satisfaction path (lines 364-382).
-- [ ] **#158** `scripts/release_index.py:127-130` — Empty-ISO HTML branch untested
+- [x] **#158** `scripts/release_index.py:127-130` — Empty-ISO HTML branch untested
   - _Fix:_ Add an assertion that render_index_html(manifest with isos=[]) contains the 'No ISO images published' placeholder and no <table>.
-- [ ] **#162** `scripts/remote_agent.py:106-124` — No test covers read_log under concurrent file growth (the offset bug above)
+- [x] **#162** `scripts/remote_agent.py:106-124` — No test covers read_log under concurrent file growth (the offset bug above)
   - _Fix:_ Add a case that writes N bytes, monkeypatches/forces a larger read window, and asserts the returned next-offset equals frm + len(returned_bytes) (no overlap on the subsequent poll).
-- [ ] **#164** `scripts/remote_localmirror.py:225-257` — Range-resume / 200-restart byte accounting is untested
+- [x] **#164** `scripts/remote_localmirror.py:225-257` — Range-resume / 200-restart byte accounting is untested
   - _Fix:_ Add a test that pre-writes a truncated partial of one entry (via a file:// or mocked urlopen returning 206), asserts the download completes and result counts are correct; and a second mocked case where the server returns 200 to a Range requ
-- [ ] **#167** `scripts/remote_orchestrate.py:463-472` — Partial scp-down recovery (exit 12) and SIGINT abort (130) paths are untested
+- [x] **#167** `scripts/remote_orchestrate.py:463-472` — Partial scp-down recovery (exit 12) and SIGINT abort (130) paths are untested
   - _Fix:_ Add a test where /status reports outputs=['a.deb','b.deb'] but the out/*.deb scp materializes only one file, asserting (12, [...]) ; and a test driving _AgentHandle.terminate()/abort to assert (130, []).
-- [ ] **#169** `scripts/repo_audit.py:900-959` — No test covers audit_nmu_residue on an anchored +asg<R>uK+bN built package _(partial: real but not reachable)_
+- [x] **#169** `scripts/repo_audit.py:900-959` — No test covers audit_nmu_residue on an anchored +asg<R>uK+bN built package _(partial: real but not reachable)_
   - _Fix:_ Add a RepoState case with a built pkg at '1.2.3-4+asg1u0+b1' and '1.2.3-4+asg1u3+p1+b1' (no tunnel set) and assert audit_nmu_residue returns no finding for it, plus a sibling Depends '(= 1.2.3-4+asg1u3+b1)' likewise clean, while a real '...
-- [ ] **#185** `scripts/tasksel_desc.py:55` — No test covers meta value being None or a group present in groups but absent from meta with empty seeds _(partial: real but not reachable)_
+- [x] **#185** `scripts/tasksel_desc.py:55` — No test covers meta value being None or a group present in groups but absent from meta with empty seeds _(partial: real but not reachable)_
   - _Fix:_ Add a case with `_meta={'gnome-desktop': None}` asserting it falls back to the title without raising, locking in the `or {}` guard.
-- [ ] **#192** `scripts/tui/state.py:54-97, 161-187` — TabState eviction/scroll bookkeeping and CmdLine history have no test coverage _(partial: real but overstated)_
+- [x] **#192** `scripts/tui/state.py:54-97, 161-187` — TabState eviction/scroll bookkeeping and CmdLine history have no test coverage _(partial: real but overstated)_
   - _Fix:_ Add unit tests: (a) append past MAX_BUFFER_LINES with scroll_offset>0 asserting offset decremented by evicted display rows and clamped at 0; (b) history Up/Up/Down/Down sequence asserting hist_draft is stashed on first Up and restored exact
-- [ ] **#206** `scripts/webapi/__init__.py:206-227` — SSE /jobs/{job_id}/stream endpoint has no test
+- [x] **#206** `scripts/webapi/__init__.py:206-227` — SSE /jobs/{job_id}/stream endpoint has no test
   - _Fix:_ Add a TestClient test that submits a job whose handler emits several lines then finishes, opens the stream, and asserts every emitted line plus the trailing `event: end` are received (covers both ordering and the end sentinel).
-- [ ] **#216** `scripts/webapi/readers.py:206-254, 372-389` — mirror_state(), repo_summary(), phase_counts() and read_flags() have no direct tests
+- [x] **#216** `scripts/webapi/readers.py:206-254, 372-389` — mirror_state(), repo_summary(), phase_counts() and read_flags() have no direct tests
   - _Fix:_ Add tests covering mirror_state against a mirror.conf-backed registry (including a mirror with no legacy .state file), plus repo_summary/phase_counts/read_flags happy + empty-dir paths.
 
 ## Appendix — Closed (refuted or corrected to severity none)
