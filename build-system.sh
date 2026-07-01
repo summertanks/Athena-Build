@@ -293,7 +293,8 @@ fi
 # the ISO tools section above.
 echo "Checking disk image build tools..."
 DISK_TOOLS_OK=1
-DISK_MISSING_PKGS=()
+DISK_MISSING=()          # "tool (pkg)" pairs — names the actual missing tool
+DISK_MISSING_PKGS=()     # bare package names — for the apt-install hint
 
 # tool → providing package map.  When the tool is missing, the
 # matching package name gets appended to DISK_MISSING_PKGS for the
@@ -303,7 +304,7 @@ declare -A _DISK_TOOL_PKG=(
     [qemu-img]=qemu-utils
     [mkfs.fat]=dosfstools
     [losetup]=util-linux
-    [sfdisk]=util-linux
+    [sfdisk]=fdisk
     [mkfs.ext4]=e2fsprogs
     [grub-install]=grub-common
     [blkid]=util-linux
@@ -321,18 +322,24 @@ for _t in rsync qemu-img mkfs.fat losetup sfdisk mkfs.ext4 grub-install blkid; d
     else
         echo "W: $_t not found"
         DISK_TOOLS_OK=0
-        DISK_MISSING_PKGS+=("${_DISK_TOOL_PKG[$_t]}")
+        _pkg="${_DISK_TOOL_PKG[$_t]}"
+        DISK_MISSING+=("$_t ($_pkg)")
+        DISK_MISSING_PKGS+=("$_pkg")
     fi
 done
 
 if [[ $DISK_TOOLS_OK -eq 0 ]]; then
-    # Dedupe (util-linux covers losetup+sfdisk+blkid; would otherwise
-    # appear 3× in the message).
+    # List the actual missing tools with their providing package, e.g.
+    # "sfdisk (fdisk)" — so the operator knows what's absent, not just an
+    # opaque package name.  The install hint dedupes packages (util-linux
+    # covers losetup+blkid; would otherwise repeat).
+    _MISSING_TOOLS=$(printf '%s, ' "${DISK_MISSING[@]}"); _MISSING_TOOLS=${_MISSING_TOOLS%, }
     _UNIQ_PKGS=$(printf '%s\n' "${DISK_MISSING_PKGS[@]}" | sort -u | tr '\n' ' ')
     if [[ "$BUILD_MODE" == "build" ]]; then
-        echo "Note: disk image build tools missing — skipped (Mode = build): $_UNIQ_PKGS"
+        echo "Note: disk image build tools missing — skipped (Mode = build): $_MISSING_TOOLS"
     else
-        echo "E: one or more disk image build tools missing: $_UNIQ_PKGS" >&2
+        echo "E: one or more disk image build tools missing: $_MISSING_TOOLS" >&2
+        echo "E:   install with: sudo apt install${_UNIQ_PKGS:+ }${_UNIQ_PKGS% }" >&2
         exit 1
     fi
 else
