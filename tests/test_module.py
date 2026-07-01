@@ -41815,6 +41815,61 @@ def test_coord_reconcile_audit_local_multi_binary_all_verified():
         assert 'live_claims=2' in _summary.message, _summary.message
 
 
+def test_render_grype_summary_tolerates_null_artifact_and_missing_fix():
+    """Audit #79: the extracted grype summary renderer handles a match with a
+    null artifact and one with no fix versions without crashing, and reports
+    the finding + severity counts."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from commands import cmd_supply_chain as _sc
+    _printed: list = []
+    _orig = _sc.console.print
+    _sc.console.print = lambda *a, **k: _printed.append(a[0] if a else '')
+    try:
+        _self = object.__new__(_sc.SupplyChainCommandsMixin)
+        _doc = {'matches': [
+            {'vulnerability': {'id': 'CVE-1', 'severity': 'Critical'},
+             'artifact': None},                           # null artifact
+            {'vulnerability': {'id': 'CVE-2', 'severity': 'High', 'fix': {}},
+             'artifact': {'name': 'foo', 'version': '1.0'}},   # no fix versions
+        ]}
+        _self._render_grype_summary(_doc, '/tmp/report.json')
+    finally:
+        _sc.console.print = _orig
+    _joined = '\n'.join(str(_x) for _x in _printed)
+    assert '2 finding(s)' in _joined, _joined
+    assert 'Critical' in _joined and 'High' in _joined
+    assert 'CVE-1' in _joined and 'CVE-2' in _joined
+    assert 'fix: —' in _joined                            # missing fix rendered
+
+
+def test_tui_state_tabstate_eviction_and_cmdline_history():
+    """Audit #192: TabState.append evicts oldest entries past MAX_BUFFER_LINES
+    and decrements scroll_offset by the evicted display rows (clamped at 0);
+    CmdLine Up/Up/Down/Down stashes the in-progress draft on first Up and
+    restores it past the newest entry."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui import state as _state
+    _ts = _state.TabState()
+    _ts.buffer = [('x', 0)] * 5           # already over the (patched) cap
+    _ts.scroll_offset = 1                  # user scrolled up
+    _orig = _state.MAX_BUFFER_LINES
+    _state.MAX_BUFFER_LINES = 3
+    try:
+        _ts.append([('x', 0)], width=80)   # len→6, drop 3 oldest
+    finally:
+        _state.MAX_BUFFER_LINES = _orig
+    assert len(_ts.buffer) == 3
+    assert _ts.scroll_offset == 0          # decremented past 0 → clamped
+    _cl = _state.CmdLine()
+    _cl.history = ['cmd1', 'cmd2']
+    _cl.set_text('draft')
+    assert _cl.history_prev()              # first Up stashes the draft
+    assert _cl.text == 'cmd2' and _cl.hist_draft == 'draft'
+    assert _cl.history_prev() and _cl.text == 'cmd1'
+    assert _cl.history_next() and _cl.text == 'cmd2'
+    assert _cl.history_next() and _cl.text == 'draft' and _cl.hist_idx is None
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -43311,6 +43366,8 @@ def main() -> int:
         test_remote_agent_read_log_offset_survives_concurrent_growth,
         test_cmd_mirror_reclaim_forwards_no_iso_to_publish,
         test_coord_reconcile_audit_local_multi_binary_all_verified,
+        test_render_grype_summary_tolerates_null_artifact_and_missing_fix,
+        test_tui_state_tabstate_eviction_and_cmdline_history,
         test_arch_filter_failsafe_keeps_on_uncertainty,
         test_generate_pending_claims_skips_foreign_target,
         test_scan_stale_files_buckets_foreign_keeps_native_sibling,

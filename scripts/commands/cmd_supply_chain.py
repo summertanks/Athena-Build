@@ -131,7 +131,6 @@ class SupplyChainCommandsMixin(SessionState):
         import shlex as _shlex
         import shutil as _shutil
         import subprocess as _subprocess
-        from collections import Counter as _Counter
 
         _grype = _shutil.which('grype')
         if not _grype:
@@ -223,6 +222,14 @@ class SupplyChainCommandsMixin(SessionState):
             logger.warning(f"cve: could not write report sidecar {_report_path}: {_e}")
 
         # Render severity summary on console.
+        self._render_grype_summary(_doc, _report_path)
+
+    def _render_grype_summary(self, _doc: dict, _report_path: str) -> None:
+        """Render the grype scan summary (counts by severity + top
+        Critical/High findings) to the console.  Pure with respect to the
+        parsed grype doc, so it is unit-testable without a grype binary — the
+        `or {}` guards tolerate a null artifact / missing fix (audit #79)."""
+        from collections import Counter as _Counter
         _matches = _doc.get('matches', []) or []
         if not _matches:
             console.print(
