@@ -366,6 +366,25 @@ class MirrorCommandsMixin(SessionState):
                 tui.COLOR_WARNING)
             _proto = None
 
+        # ── Step 2b: ssh publish URLs must carry the remote pool path ──
+        # A path-less URL (`ssh://user@host`) has no directory to publish
+        # into: coord_root_for() appends `-coord` to the HOST, and
+        # rsync_spec_for_url() then reads `user@host-coord` as a LOCAL path
+        # (no colon) — the sidecar pull dies with a cryptic
+        # change_dir "<cwd>/user@host-coord" error.  Require the path up
+        # front and point at prep-mirror.sh, which resolves the remote root
+        # and prints the exact path-bearing `mirror add` command.
+        if _is_ssh and not (_mirror._extract_path_from_ssh_url(_normalised)):
+            console.print(
+                "mirror add: ssh:// publish URLs must include the remote "
+                f"pool path (got {_normalised!r}) — a path-less URL has no "
+                "directory to publish into.  Use the full form, e.g. "
+                "ssh://user@host/home/user/asgard.  Run "
+                "`./prep-mirror.sh <ssh-url> <ssh-key>`; it resolves the "
+                "remote root and prints the exact `mirror add` command.",
+                tui.COLOR_ERROR)
+            return False
+
         # ── Step 3: derive name + public_url + host ────────────────
         _name = _parsed['name'] or _mirror.derive_name_from_url(
             _normalised, _host_type)

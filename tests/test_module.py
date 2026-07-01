@@ -36721,6 +36721,17 @@ def test_rsync_spec_for_url_handles_every_form():
         pass
     else:
         raise AssertionError("ssh:// URL with a port must raise ValueError")
+    # A path-less ssh URL (or a coord form derived from one) has no remote
+    # directory to sync — must raise, NOT return a bare `user@host` spec that
+    # rsync would silently treat as a local CWD-relative path.
+    for _bad in ('ssh://ubuntu@host', 'ssh://ubuntu@host-coord'):
+        try:
+            _m.rsync_spec_for_url(_bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"path-less ssh URL must raise ValueError: {_bad!r}")
 
 
 def test_all_mirror_urls_returns_every_registered_url():

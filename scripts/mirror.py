@@ -2178,7 +2178,15 @@ def rsync_spec_for_url(url: str) -> 'tuple[str, Optional[str]]':
         if '/' in _path:
             _host, _rest = _path.split('/', 1)
             return (f"{_host}:/{_rest}", _host)
-        return (_path, _path)
+        # No path component: `ssh://user@host` (or a coord form derived from
+        # one, `ssh://user@host-coord`).  There is no remote directory to
+        # sync — and returning bare `user@host` here is a TRAP: rsync sees no
+        # colon and treats it as a LOCAL path, silently resolving it against
+        # the CWD (the origin of the cryptic change_dir "<cwd>/user@host-coord"
+        # failure).  Fail loudly instead; callers must supply the remote path.
+        raise ValueError(
+            f"ssh URL has no remote path to rsync: {url!r} "
+            "(expected ssh://user@host/abs/path)")
     if isinstance(url, str) and url.startswith('file://'):
         return (url[len('file://'):], None)
     if isinstance(url, str) and '@' in url and ':' in url and not url.startswith('/'):
