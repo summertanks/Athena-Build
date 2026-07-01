@@ -137,9 +137,7 @@ _All architecture & coding-practice tickets are closed — see [`docs/done.md`](
 
 ## 6. Documentation — P1 / P2
 
-| ID    | Sev | Status | Title |
-|-------|-----|--------|-------|
-| DOC-06 | P2 | BLOCKED (README under active work 2026-06-26) | Keep `README.md` in sync with the code as the project evolves.  When a pipeline stage is added/renamed, a default in `config/build.conf` changes, a new common failure mode appears (or an old one is fixed), or the operator workflow shifts — update the README in the same PR.  Periodic audit: when closing each ticket touching `scripts/` or `config/`, scan README §Building Image and amend if the change is operator-visible.  Footer note in the README points future-me here. |
+_All documentation tickets are closed — see [`docs/done.md`](docs/done.md) § 6.  Keeping docs in sync is now a standing WORKING PRACTICE, not a ticket: inline comments + type hints ride with every code change; prose docs (`docs/*.md`, README) are updated only on LARGE changes, on a SEPARATE branch, with heavy user validation before merge._
 
 ## 7. Security & supply-chain — P0 / P1
 
