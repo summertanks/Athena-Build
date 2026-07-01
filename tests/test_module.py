@@ -688,6 +688,40 @@ def _onboarding_patched(answers, *, verify_ok):
          onboarding.console.print) = _saved
 
 
+def test_onboarding_origin_completes_pathless_ssh_url():
+    """Origin mirror-add wizard: a path-less ssh:// Publish URL gets a
+    `Remote repo path` prompt (default ~<user>/<dist-id>) and the path is
+    appended before `mirror add` sees it — so the operator can't trip the
+    path-less rejection.  An explicit path passes straight through with no
+    extra prompt."""
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    # path-less URL → blank path answer takes the /home/ubuntu/asgard default
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess = _FakeOnbSession(_tmp)
+        _sess.config.build_distribution = 'Asgard'
+        _answers = ['master', 'ip', 'ssh://ubuntu@140.245.198.222',
+                    '', '~/mirror.key', 'http']
+        with _onboarding_patched(_answers, verify_ok=True):
+            _name = onboarding._add_mirror_interactive(_sess)
+        assert _name == 'master', _name
+        assert _sess.mirror_calls, "cmd_mirror was not called"
+        assert 'ssh://ubuntu@140.245.198.222/home/ubuntu/asgard' \
+            in _sess.mirror_calls[0], _sess.mirror_calls[0]
+    # explicit path → passed through untouched, no Remote-repo-path prompt
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess = _FakeOnbSession(_tmp)
+        _sess.config.build_distribution = 'Asgard'
+        _answers = ['origin', 'ip', 'ssh://ubuntu@host/srv/asgard',
+                    '~/mirror.key', 'http']
+        with _onboarding_patched(_answers, verify_ok=True):
+            onboarding._add_mirror_interactive(_sess)
+        assert 'ssh://ubuntu@host/srv/asgard' in _sess.mirror_calls[0], \
+            _sess.mirror_calls[0]
+
+
 def test_command_allowed_gates_until_configured():
     """CONFIGURE: before setup_complete only the allowlist runs; after, all
     commands are allowed."""
@@ -42463,6 +42497,7 @@ def main() -> int:
         test_remote_conf_helpers_round_trip,
         test_remote_token_generate_and_path,
         test_write_local_conf_round_trips,
+        test_onboarding_origin_completes_pathless_ssh_url,
         test_command_allowed_gates_until_configured,
         test_configured_summary_reports_state_and_warns_unregistered,
         test_onboarding_first_system_declines_mirror,

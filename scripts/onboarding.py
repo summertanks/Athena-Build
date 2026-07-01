@@ -468,6 +468,30 @@ def _add_mirror_interactive(session) -> str:
     _url = _ask(PROMPT_INPUT, "Publish URL (ssh://user@host/path or file://):")
     if not _url:
         return ''
+    # An ssh publish URL needs the remote pool path (the repo's filesystem
+    # dir on the mirror).  If the operator gave a path-less ssh://user@host,
+    # prompt for it here — same as the federation flow — with the
+    # prep-mirror.sh default (~<user>/<dist-id>), rather than letting
+    # `mirror add` reject it downstream with a bare-URL error.
+    if _url.startswith('ssh://'):
+        import mirror as _mirror
+        if not _mirror._extract_path_from_ssh_url(_url):
+            _user = _mirror._extract_user_from_ssh_url(_url) or ''
+            _dist_id = _dist_id_of(session.config)
+            _default_path = (f"/home/{_user}/{_dist_id}"
+                             if _user and _dist_id
+                             else (f"/home/{_user}" if _user else ''))
+            _rpath = _ask(PROMPT_INPUT,
+                          f"Remote repo path [{_default_path}]:")
+            if _rpath is None:
+                return ''
+            _rpath = _rpath or _default_path
+            if not _rpath:
+                console.print(
+                    "✗ an ssh publish mirror needs a remote repo path",
+                    tui.COLOR_ERROR)
+                return ''
+            _url = _url.rstrip('/') + '/' + _rpath.lstrip('/')
     _args = [_host_type, _url, '--name', _name]
     if _host_type != 'local' and not _url.startswith('file://'):
         _key = _ask(PROMPT_INPUT, "SSH key path:")
