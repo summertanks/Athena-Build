@@ -28,7 +28,7 @@ import sys
 # Mirrors pyproject.toml [project].version.  Bumped ONLY by
 # scripts/bump_version.py (which rewrites pyproject in the same commit);
 # test_version_base_matches_pyproject fails the suite if the two drift.
-_BASE_VERSION = "0.1.2"
+_BASE_VERSION = "0.1.3"
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
