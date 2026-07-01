@@ -2274,6 +2274,10 @@ if __name__ == '__main__':
     if {'--version', '-V'} & set(sys.argv):
         print(_version.version_line(verbose='--verbose' in sys.argv))
         sys.exit(0)
-    build_banner = f"Athena Build System {_version.get_version()}"
+    # Status-bar banner shows just the SemVer base (e.g. "0.1.3") — the full
+    # git-describe provenance (`0.1.3-1-gSHA-dirty`) is noise in a 50-char
+    # footer.  The exact version is still one keystroke away via `--version`
+    # and is stamped verbatim into build records / ISOs / the repo Release.
+    build_banner = f"Athena Build System {_version.base_version()}"
     print(asciiart_logo)
     main(build_banner)
