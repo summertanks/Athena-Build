@@ -53,9 +53,14 @@ else
     _B=''; _D=''; _R=''; _G=''; _Y=''; _E=''; _C=''
 fi
 banner() {
-    printf '%s\n' "${_C}${_B}┌──────────────────────────────────────────────┐${_R}"
-    printf '%s\n' "${_C}${_B}│  Asgard mirror preparation                   │${_R}"
-    printf '%s\n' "${_C}${_B}└──────────────────────────────────────────────┘${_R}"
+    # Same ATHENA BUILD SYSTEM logo the TUI shows (scripts/build.py), so the
+    # mirror-prep tool reads as part of the same product.
+    printf '%s\n' "${_C}${_B}╭─╮╶┬╴╷ ╷╭─╴╭╮╷╭─╮   ╭╮ ╷ ╷╷╷  ╶┬╮   ╭─╮╷ ╷╭─╮╶┬╴╭─╴╭┬╮${_R}"
+    printf '%s\n' "${_C}${_B}├─┤ │ ├─┤├╴ │╰┤├─┤   ├┴╮│ │││   ││   ╰─╮╰┬╯╰─╮ │ ├╴ │││${_R}"
+    printf '%s\n' "${_C}${_B}╵ ╵ ╵ ╵ ╵╰─╴╵ ╵╵ ╵   ╰─╯╰─╯╵╰─╴╶┴╯   ╰─╯ ╵ ╰─╯ ╵ ╰─╴╵ ╵${_R}"
+    printf '%s\n' "${_D}(c) Harkirat S Virk${_R}"
+    printf '%s\n' "${_D}https://github.com/summertanks/Athena-Build${_R}"
+    printf '%s\n' "${_B}Asgard mirror preparation${_R}"
 }
 step()  { printf '%s\n' "${_C}${_B}▸ ${1}${_R}"; }
 info()  { printf '   %s\n' "${1}"; }
