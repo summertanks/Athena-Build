@@ -111,6 +111,12 @@ class SelectPackages:
         self._closure_inflight: set = set()
         self._closure_lock = threading.Lock()
 
+        # Flattened display-row cache (audit #178): _rows() rebuilds the whole
+        # header+entry list every keystroke otherwise.  _Row carries no selected
+        # flag, so toggle/drop (which only flip flags) don't invalidate it —
+        # only a structural change (add / model reload) does.
+        self._rows_cache: 'Optional[List[_Row]]' = None
+
         # Save&quit handoff.  cmd_cache_select blocks on wait_for_done() (shell
         # thread) while this selector runs on the dispatcher thread; an exit
         # path sets _intent + _done, so the shell thread resumes and runs the
@@ -123,6 +129,7 @@ class SelectPackages:
 
     # ─── Model load / build ──────────────────────────────────────────────
     def _load_model(self) -> None:
+        self._rows_cache = None          # structure rebuilt below
         _lines = utils.readfile(self._path).splitlines()
         groups = utils.parse_pkg_list_groups(self._path, lines=_lines)
         self._meta = utils.parse_pkg_list_group_meta(self._path, lines=_lines)
@@ -143,13 +150,18 @@ class SelectPackages:
                            'never installed in a chroot'}
 
     def _rows(self) -> List[_Row]:
-        """Flatten the model into display rows (header + entries)."""
-        rows: List[_Row] = []
-        for gname, entries in self._groups.items():
-            rows.append(_Row(_HEADER, gname))
-            for name, _sel in entries:
-                rows.append(_Row(_PKG, gname, name))
-        return rows
+        """Flatten the model into display rows (header + entries).  Cached and
+        rebuilt only when the model STRUCTURE changes (add / reload); the
+        selected flag lives on the entry, not the _Row, so toggle/drop reuse
+        the cache (audit #178)."""
+        if self._rows_cache is None:
+            rows: List[_Row] = []
+            for gname, entries in self._groups.items():
+                rows.append(_Row(_HEADER, gname))
+                for name, _sel in entries:
+                    rows.append(_Row(_PKG, gname, name))
+            self._rows_cache = rows
+        return self._rows_cache
 
     def _entry(self, group: str, name: str) -> Optional[List]:
         for e in self._groups.get(group, []):
@@ -498,6 +510,7 @@ class SelectPackages:
             return
         if self._entry(group, name) is None:
             self._groups.setdefault(group, []).append([name, True])
+            self._rows_cache = None       # structural change → rebuild rows
             self._unsaved = True
         self._render()
 

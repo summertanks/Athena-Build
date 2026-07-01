@@ -42,7 +42,9 @@ harmless (the existing closure/cleanup gates handle it), under-keeping
 would break closure.
 """
 
+import json
 import logging
+import os
 import subprocess
 from typing import Any, Dict, Optional, Set, Tuple
 
@@ -101,7 +103,66 @@ def _read_cputable_aliases() -> 'Dict[str, Set[str]]':
     return alias
 
 
+_DPKG_TABLES = ('/usr/share/dpkg/tupletable', '/usr/share/dpkg/cputable',
+                '/usr/share/dpkg/ostable')
+
+
+def _tables_fingerprint() -> str:
+    """A cheap fingerprint of the dpkg architecture tables (mtime + size), so a
+    cached triplet map is invalidated when dpkg is upgraded."""
+    _parts = []
+    for _f in _DPKG_TABLES:
+        try:
+            _st = os.stat(_f)
+            _parts.append(f'{_f}:{int(_st.st_mtime)}:{_st.st_size}')
+        except OSError:
+            _parts.append(f'{_f}:missing')
+    return '|'.join(_parts)
+
+
+def _cache_path() -> str:
+    _base = (os.environ.get('XDG_CACHE_HOME')
+             or os.path.join(os.path.expanduser('~'), '.cache'))
+    return os.path.join(_base, 'athena-build', 'arch_triplets.json')
+
+
 def _build_maps() -> 'Tuple[Dict[str, str], Set[str]]':
+    """(triplet_map, arch_set), cached on disk to avoid re-forking
+    dpkg-architecture ~200x on EVERY process (audit #20).
+
+    NOTE: the map is derived from dpkg-architecture (authoritative), NOT from a
+    hand-rolled parse of tupletable — the multiarch triplet has dpkg-internal
+    special cases (e.g. i386 stays ``i386`` though its GNU CPU is ``i686``;
+    mips64 uses ``gnuabi64``) that a naive table join gets wrong for ~15 of the
+    ~206 arches.  So the FIRST process still forks dpkg once per arch, then
+    caches the result keyed by the tables' fingerprint; later processes (and
+    later cache/build runs) read the cache instead of re-forking."""
+    _fp = _tables_fingerprint()
+    _cp = _cache_path()
+    try:
+        with open(_cp) as _fh:
+            _doc = json.load(_fh)
+        if (isinstance(_doc, dict) and _doc.get('fingerprint') == _fp
+                and isinstance(_doc.get('triplets'), dict)
+                and isinstance(_doc.get('arches'), list)):
+            return dict(_doc['triplets']), set(_doc['arches'])
+    except (OSError, ValueError):
+        pass
+    _triplets, _arches = _build_maps_from_dpkg()
+    if _triplets or _arches:
+        try:
+            os.makedirs(os.path.dirname(_cp), exist_ok=True)
+            _tmp = _cp + '.tmp'
+            with open(_tmp, 'w') as _fh:
+                json.dump({'fingerprint': _fp, 'triplets': _triplets,
+                           'arches': sorted(_arches)}, _fh)
+            os.replace(_tmp, _cp)          # atomic; concurrent builders are safe
+        except OSError as _e:
+            logger.warning(f"arch_filter: could not cache triplet map: {_e}")
+    return _triplets, _arches
+
+
+def _build_maps_from_dpkg() -> 'Tuple[Dict[str, str], Set[str]]':
     """Build (triplet_map, arch_set) from dpkg.  NEVER raises — any
     failure yields empty structures so the detector keeps everything."""
     triplets: 'Dict[str, str]' = {}
