@@ -589,11 +589,14 @@ def canonicalize_neighbour_records(items: 'list') -> 'list':
 
     Output rules:
       - dedup by canonical url (lowercased, trailing-slash stripped)
+      - on collision, the RICHER record wins: a later record carrying a
+        non-empty ``public_url`` upgrades an earlier one that lacks it
+        (so a v3 dict overrides a bare v2 str for the same url regardless of
+        order — audit #103); otherwise first-seen is kept
       - sort ascending by url for stable JSON diff
       - empty / non-string urls dropped silently
     """
-    _out: 'list[Dict[str, str]]' = []
-    _seen: 'set[str]' = set()
+    _by_url: 'Dict[str, Dict[str, str]]' = {}
     for _it in items:
         if isinstance(_it, str):
             _u = _it.strip().rstrip('/').lower()
@@ -606,16 +609,13 @@ def canonicalize_neighbour_records(items: 'list') -> 'list':
             _pub_proto = (_it.get('public_proto') or '').strip().lower() if isinstance(_it.get('public_proto'), str) else ''
         else:
             continue
-        if not _u or _u in _seen:
+        if not _u:
             continue
-        _seen.add(_u)
-        _out.append({
-            'url':           _u,
-            'public_url':    _pub_url,
-            'public_proto':  _pub_proto,
-        })
-    _out.sort(key=lambda _r: _r['url'])
-    return _out
+        _rec = {'url': _u, 'public_url': _pub_url, 'public_proto': _pub_proto}
+        _existing = _by_url.get(_u)
+        if _existing is None or (not _existing['public_url'] and _pub_url):
+            _by_url[_u] = _rec
+    return sorted(_by_url.values(), key=lambda _r: _r['url'])
 
 
 def neighbour_urls(items: 'list') -> 'list':

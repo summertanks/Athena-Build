@@ -41380,6 +41380,100 @@ def test_local_mirror_is_valid_for_keys_to_snapshot_marker():
         assert local_mirror.status(d)['snapshot'] == '20260621T135952Z'
 
 
+def test_release_index_html_empty_iso_branch():
+    """Audit #158: render_index_html with no ISOs shows the 'No ISO images
+    published' placeholder and emits no <table>; a non-empty manifest does
+    render a table."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import release_index
+    _empty = release_index.render_index_html({
+        'distribution': 'Asgard', 'version': '1', 'snapshot': 'S',
+        'apt': {'deb_line': 'deb [signed] file:/// thor main'}, 'isos': []})
+    assert 'No ISO images published' in _empty
+    assert '<table>' not in _empty
+    _full = release_index.render_index_html({
+        'distribution': 'Asgard', 'version': '1', 'isos': [
+            {'kind': 'live', 'url': 'u', 'file': 'thor.iso', 'size': 10,
+             'sha256': 'a' * 64}]})
+    assert '<table>' in _full and 'thor.iso' in _full
+
+
+def test_tasksel_desc_meta_none_and_empty_seeds():
+    """Audit #185: a group whose meta value is None (or is absent from meta)
+    falls back to the title without raising; a group with empty seeds is
+    skipped entirely."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tasksel_desc
+    _out = tasksel_desc.generate_desc(
+        {'gnome-desktop': ['gnome-core'], 'empty-grp': []},
+        {'gnome-desktop': None})          # None meta → title fallback, no raise
+    assert 'Task: gnome-desktop' in _out
+    assert 'Description: Gnome Desktop' in _out   # _title fallback
+    assert 'empty-grp' not in _out               # empty seeds skipped
+    # meta entirely None is tolerated too
+    _out2 = tasksel_desc.generate_desc({'web': ['nginx']}, None)
+    assert 'Task: web' in _out2 and 'Description: Web' in _out2
+
+
+def test_diag_parse_stanzas_covers_all_branches():
+    """Audit #118: parse_stanzas handles blank-line separation, folded
+    continuation, a continuation with no preceding field (malformed), a bad
+    non-header line (malformed), and a trailing stanza with no final newline."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import diag_installer_status as _d
+    _content = (
+        "Package: foo\n"
+        "Description: a\n"
+        " continued\n"
+        "\n"
+        "Package: bar\n"
+        "Status: install ok installed")   # trailing stanza, no final newline
+    _st = _d.parse_stanzas(_content)
+    assert len(_st) == 2, _st
+    assert _st[0][1]['Package'] == 'foo'
+    assert _st[0][1]['Description'] == 'a\n continued'
+    assert _st[1][1]['Package'] == 'bar'
+    assert '__MALFORMED__' not in _st[1][1]
+    # continuation with no preceding field → malformed
+    _bad = _d.parse_stanzas(" orphan\nPackage: x")
+    assert '__MALFORMED__' in _bad[0][1]
+    # a non-header, non-continuation line → malformed
+    _bad2 = _d.parse_stanzas("Package: x\nnot-a-header-line")
+    assert '__MALFORMED__' in _bad2[0][1]
+
+
+def test_canonicalize_neighbour_records_richer_wins_regardless_of_order():
+    """Audit #103: when the same URL appears as a bare v2 str AND a v3 dict
+    carrying public_url, the richer dict record wins in EITHER order."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sc
+    for _items in (
+        ['ssh://b/p', {'url': 'ssh://b/p', 'public_url': 'https://b',
+                       'public_proto': 'https'}],
+        [{'url': 'ssh://b/p', 'public_url': 'https://b',
+          'public_proto': 'https'}, 'ssh://b/p'],       # reversed order
+    ):
+        _recs = _sc.canonicalize_neighbour_records(_items)
+        assert len(_recs) == 1, _recs
+        assert _recs[0] == {'url': 'ssh://b/p', 'public_url': 'https://b',
+                            'public_proto': 'https'}, _recs
+
+
+def test_arch_filter_degrades_to_keep_when_arch_table_missing():
+    """Audit #22: with the triplet map populated but _arch_table() None (dpkg
+    tables unreadable), is_foreign_target_binary degrades to KEEP (False)
+    rather than dropping a foreign-looking cross-toolchain binary."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import arch_filter as _af
+    _orig = _af._arch_table
+    _af._arch_table = lambda: None
+    try:
+        assert _af.is_foreign_target_binary(
+            'binutils-aarch64-linux-gnu', 'amd64') is False
+    finally:
+        _af._arch_table = _orig
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -42858,6 +42952,11 @@ def main() -> int:
         test_arch_filter_native_and_dev_kept,
         test_arch_filter_foreign_dropped,
         test_arch_filter_no_false_positives,
+        test_release_index_html_empty_iso_branch,
+        test_tasksel_desc_meta_none_and_empty_seeds,
+        test_diag_parse_stanzas_covers_all_branches,
+        test_canonicalize_neighbour_records_richer_wins_regardless_of_order,
+        test_arch_filter_degrades_to_keep_when_arch_table_missing,
         test_arch_filter_failsafe_keeps_on_uncertainty,
         test_generate_pending_claims_skips_foreign_target,
         test_scan_stale_files_buckets_foreign_keeps_native_sibling,
