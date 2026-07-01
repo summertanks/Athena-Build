@@ -41870,6 +41870,73 @@ def test_tui_state_tabstate_eviction_and_cmdline_history():
     assert _cl.history_next() and _cl.text == 'draft' and _cl.hist_idx is None
 
 
+def test_webapi_readers_flags_repo_phase_mirror():
+    """Audit #216: read_flags / repo_summary / phase_counts / mirror_state
+    across happy + empty-dir paths (previously undirect-tested)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import json as _json
+    from webapi import readers as _rd
+    with tempfile.TemporaryDirectory() as _d:
+        # read_flags: happy, malformed, missing
+        _fp = os.path.join(_d, 'flags.json')
+        with open(_fp, 'w') as _fh:
+            _json.dump({'flags': {'cache_ready': True}}, _fh)
+        assert _rd.read_flags(_fp) == {'flags': {'cache_ready': True}}
+        with open(_fp, 'w') as _fh:
+            _fh.write('{not json')
+        assert _rd.read_flags(_fp) == {'flags': {}}
+        assert _rd.read_flags(os.path.join(_d, 'nope.json')) == {'flags': {}}
+
+        # repo_summary: a .deb under dists, plus an empty repo
+        _bindir = os.path.join(_d, 'repo', 'dists', 'thor', 'main',
+                               'binary-amd64')
+        os.makedirs(_bindir)
+        with open(os.path.join(_bindir, 'foo_1.0_amd64.deb'), 'wb') as _fh:
+            _fh.write(b'0123456789')
+        _rs = _rd.repo_summary(os.path.join(_d, 'repo'))
+        assert _rs['total_files'] == 1 and _rs['total_bytes'] == 10
+        assert _rd.repo_summary(os.path.join(_d, 'empty'))['total_files'] == 0
+
+        # phase_counts: two records + one non-record + empty dir
+        _blog = os.path.join(_d, 'buildlog')
+        os.makedirs(_blog)
+        for _n, _ph in (('a', 'done'), ('b', 'done'), ('c', 'failed')):
+            with open(os.path.join(_blog, f'{_n}.build.json'), 'w') as _fh:
+                _json.dump({'phase': _ph}, _fh)
+        with open(os.path.join(_blog, 'notarecord.txt'), 'w') as _fh:
+            _fh.write('x')
+        _pc = _rd.phase_counts(_blog)
+        assert _pc == {'done': 2, 'failed': 1}, _pc
+        assert _rd.phase_counts(os.path.join(_d, 'noblog')) == {}
+
+        # mirror_state: empty dirs → sane defaults; coord-head.json present
+        _ms = _rd.mirror_state(os.path.join(_d, 'cfg'), os.path.join(_d, 'crd'))
+        assert _ms['mirrors'] == {} and _ms['coord_head'] is None
+        _crd = os.path.join(_d, 'coord')
+        os.makedirs(_crd)
+        with open(os.path.join(_crd, 'coord-head.json'), 'w') as _fh:
+            _json.dump({'head_time': 'T'}, _fh)
+        _ms2 = _rd.mirror_state(os.path.join(_d, 'cfg'), _crd)
+        assert _ms2['coord_head'] == {'head_time': 'T'}
+
+
+def test_generate_repo_indexes_udeb_scan_allows_empty():
+    """Audit #19/#18: the udeb (debian-installer) component scan is invoked
+    with allow_empty=True, so a present-but-empty debian-installer/binary-<arch>
+    dir (a repo with .debs but no udebs) doesn't abort the whole publish.
+    (Full behavioural coverage needs sudo + dpkg-scanpackages + gpg, so this
+    pins the fix at the source + signature level.)"""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import apt_repo
+    _src = inspect.getsource(apt_repo.generate_repo_indexes)
+    assert 'allow_empty=True' in _src, "udeb scan must pass allow_empty=True"
+    assert 'allow_empty' in inspect.signature(
+        apt_repo._scan_packages_to).parameters
+    # the empty-udeb comment is anchored to the debian-installer path
+    assert 'debian-installer' in _src
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -43368,6 +43435,8 @@ def main() -> int:
         test_coord_reconcile_audit_local_multi_binary_all_verified,
         test_render_grype_summary_tolerates_null_artifact_and_missing_fix,
         test_tui_state_tabstate_eviction_and_cmdline_history,
+        test_webapi_readers_flags_repo_phase_mirror,
+        test_generate_repo_indexes_udeb_scan_allows_empty,
         test_arch_filter_failsafe_keeps_on_uncertainty,
         test_generate_pending_claims_skips_foreign_target,
         test_scan_stale_files_buckets_foreign_keeps_native_sibling,
