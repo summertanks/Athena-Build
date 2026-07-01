@@ -41474,6 +41474,147 @@ def test_arch_filter_degrades_to_keep_when_arch_table_missing():
         _af._arch_table = _orig
 
 
+def test_all_event_types_are_dispatcher_handled():
+    """Audit #188: every type in events.ALL_EVENT_TYPES must appear in the
+    dispatcher's isinstance handler chain (giving the list a real consumer),
+    and each entry is a frozen dataclass event — so a newly-added event can't
+    be silently unhandled."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import re as _re
+    import dataclasses
+    from tui import events as _ev
+    from tui import dispatcher as _dp
+    _handled = set(_re.findall(
+        r'isinstance\(\s*\w+\s*,\s*(\w+)\)', inspect.getsource(_dp)))
+    _listed = {_t.__name__ for _t in _ev.ALL_EVENT_TYPES}
+    assert _listed, "ALL_EVENT_TYPES must not be empty"
+    assert not (_listed - _handled), (
+        f"ALL_EVENT_TYPES entries with no dispatcher isinstance handler: "
+        f"{_listed - _handled}")
+    for _t in _ev.ALL_EVENT_TYPES:
+        assert dataclasses.is_dataclass(_t), _t
+
+
+def test_select_pool_files_excludes_on_legacy_whitelist_none_path():
+    """Audit #135: exclude_names applies on the legacy deb_whitelist=None
+    blanket-copy path too — a superseded udeb (apt-setup-udeb) is dropped,
+    siblings kept."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import iso_installer
+    with tempfile.TemporaryDirectory() as _d:
+        for _f in ('apt-setup-udeb_1.0_all.udeb',
+                   'anna_1.0_amd64.udeb',
+                   'busybox-udeb_1.0_amd64.udeb'):
+            with open(os.path.join(_d, _f), 'w') as _fh:
+                _fh.write('x')
+        _kept, _skipped = iso_installer._select_pool_files(
+            [_d], deb_whitelist=None, exclude_names={'apt-setup-udeb'})
+        _names = {_n for _, _n in _kept}
+        assert 'apt-setup-udeb_1.0_all.udeb' not in _names
+        assert 'anna_1.0_amd64.udeb' in _names
+        assert 'busybox-udeb_1.0_amd64.udeb' in _names
+
+
+def test_resolve_closure_multi_group_and_generator_seeds():
+    """Audit #152: multiple interacting OR groups resolve deterministically
+    (a function of the graph, not seed order) and generator seeds are
+    consumed correctly."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from or_resolve import resolve_closure
+    _deps = {'p': [('a', 'b')], 'q': [('b', 'c')],
+             'a': [], 'b': [], 'c': []}
+    _r1 = resolve_closure(['p', 'q'], _deps)
+    _r2 = resolve_closure(['q', 'p'], _deps)          # order-independent
+    assert _r1 == _r2, (_r1, _r2)
+    assert {'p', 'q'} <= _r1
+    assert ('a' in _r1 or 'b' in _r1)                 # p's group satisfied
+    assert ('b' in _r1 or 'c' in _r1)                 # q's group satisfied
+    _r3 = resolve_closure((_s for _s in ['p', 'q']), _deps)   # generator seeds
+    assert _r3 == _r1
+
+
+def test_package_add_constraint_conflict_matrix():
+    """Audit #153: add_constraint's (new,old) conflict matrix — nc keeps old,
+    xg replaces with the stricter, eq collapses to '=', err keeps old +
+    returns False; an invalid operator string is rejected."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import package as _pkgmod
+    from debian.debian_support import Version
+
+    def _mk():
+        _p = object.__new__(_pkgmod.Package)
+        _p._constraints = {}
+        _p.package = 'x'
+        _p.version = Version('1.0')
+        return _p
+
+    _v = Version('2.0')
+    # first add stores it verbatim
+    _p = _mk()
+    assert _p.add_constraint(_v, '>=') is True
+    assert _p._constraints[_v].constraint == '>='
+    # xg: >= then >> → stored becomes the stricter >>
+    assert _p.add_constraint(_v, '>>') is True
+    assert _p._constraints[_v].constraint == '>>'
+    # eq: >= then <= → collapses to '='
+    _p2 = _mk(); _p2.add_constraint(_v, '>=')
+    assert _p2.add_constraint(_v, '<=') is True
+    assert _p2._constraints[_v].constraint == '='
+    # nc: = then >= keeps '='
+    _p3 = _mk(); _p3.add_constraint(_v, '=')
+    assert _p3.add_constraint(_v, '>=') is True
+    assert _p3._constraints[_v].constraint == '='
+    # err: = then >> is unresolvable → keeps old, returns False
+    _p4 = _mk(); _p4.add_constraint(_v, '=')
+    assert _p4.add_constraint(_v, '>>') is False
+    assert _p4._constraints[_v].constraint == '='
+    # invalid operator string → rejected
+    assert _mk().add_constraint(_v, '~=') is False
+
+
+def test_compute_build_closure_provides_resolution_path():
+    """Audit #29: a build-dep that is a pure VIRTUAL name resolves via
+    provides_index to its provider (which lands in the closure), and a
+    transitive Depends is satisfied by a provider pulled in the same way."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build_closure as bc
+    _bin = {
+        'realprovider':  {'Depends': 'virtdep2', 'Pre-Depends': ''},
+        'realprovider2': {'Depends': '', 'Pre-Depends': ''},
+        'build-essential': {'Depends': '', 'Pre-Depends': ''},
+        'dpkg-dev':        {'Depends': '', 'Pre-Depends': ''},
+    }
+    _prov = {'virtdep': ['realprovider'], 'virtdep2': ['realprovider2']}
+    _r = bc.compute_build_closure(['s'], {'s': 'virtdep'}, _bin, _prov)
+    _all = _r['all']
+    assert 'realprovider' in _all      # direct virtual build-dep → provider
+    assert 'realprovider2' in _all     # transitive Depends → provider
+    assert not _r['unsatisfiable']
+
+
+def test_classify_tiers_transit_through_non_member_and_overlap():
+    """Audit #30: classify_tiers reaches a member THROUGH a non-member
+    intermediary, and a member reachable from BOTH seed sets lands in
+    toolchain (toolchain wins over language)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build_closure as bc
+    _members = {'M1', 'M2'}
+    _adj = {
+        'TC':   ['mid'],          # non-member intermediary
+        'mid':  ['M1'],           # reach M1 only through it
+        'LANG': ['M1', 'M2'],     # M1 reachable from lang too; M2 lang-only
+    }
+    _tiers = bc.classify_tiers(
+        _members, _adj,
+        toolchain_seeds=frozenset({'TC'}),
+        language_seeds=frozenset({'LANG'}))
+    assert 'M1' in _tiers['toolchain']    # toolchain wins the overlap
+    assert 'M1' not in _tiers['language']
+    assert 'M2' in _tiers['language']
+    assert not _tiers['leaf']
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -42957,6 +43098,12 @@ def main() -> int:
         test_diag_parse_stanzas_covers_all_branches,
         test_canonicalize_neighbour_records_richer_wins_regardless_of_order,
         test_arch_filter_degrades_to_keep_when_arch_table_missing,
+        test_all_event_types_are_dispatcher_handled,
+        test_select_pool_files_excludes_on_legacy_whitelist_none_path,
+        test_resolve_closure_multi_group_and_generator_seeds,
+        test_package_add_constraint_conflict_matrix,
+        test_compute_build_closure_provides_resolution_path,
+        test_classify_tiers_transit_through_non_member_and_overlap,
         test_arch_filter_failsafe_keeps_on_uncertainty,
         test_generate_pending_claims_skips_foreign_target,
         test_scan_stale_files_buckets_foreign_keeps_native_sibling,
