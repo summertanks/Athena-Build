@@ -35877,6 +35877,10 @@ def test_prep_mirror_script_contract():
     # permission gate: needs sudo to install the web server, write perms to
     # the root — and we run non-interactively
     assert 'SUDO' in _src and 'WRITABLE' in _src, _src
+    # every prep run is logged: a timestamped transcript under the config's
+    # log dir, output tee'd (colour stripped) so it matches the build log.
+    assert 'LOGFILE' in _src and 'prep-mirror-' in _src, _src
+    assert 'tee' in _src and 'Directories' in _src, _src
 
 
 def test_cmd_mirror_add_new_mirror_empty_config():

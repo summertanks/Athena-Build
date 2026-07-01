@@ -138,6 +138,23 @@ PUBLIC_URL="${PROTO}://${_urlhost}/${DIST_ID}"
 SSH_TARGET="${SSH_USER:+${SSH_USER}@}${SSH_HOST}"
 SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o BatchMode=yes)
 
+# ── logging — record every prep run under log/ (same as the build) ───────
+# The log dir comes from [Directories] Log in config/distro.conf (default:
+# log/).  From here on, everything printed — banner, steps, the remote
+# REMOTE: lines, warnings, and the final die — is tee'd to a timestamped
+# transcript with ANSI colour stripped, so mirror prep leaves the same
+# auditable record as a build run.  sed -u keeps the log line-flushed so a
+# fast die/exit can't truncate it.
+LOG_DIR_NAME="$(awk '
+    /^[[:space:]]*\[/ { insec = ($0 ~ /^[[:space:]]*\[Directories\]/) }
+    insec && /^[[:space:]]*Log[[:space:]]*=/ {
+        sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit
+    }' "$CONF")"
+LOG_DIR="${_SELF_DIR}/${LOG_DIR_NAME:-log}"
+mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="${_SELF_DIR}"
+LOGFILE="${LOG_DIR}/prep-mirror-$(date -u +%Y-%m-%dT%H-%M-%S).log"
+exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >> "$LOGFILE")) 2>&1
+
 banner
 step "Target"
 info "ssh-url      ${SSH_URL}"
@@ -145,6 +162,7 @@ info "host         ${SSH_HOST}   user ${SSH_USER:-<default>}"
 info "dist-id      ${DIST_ID}   (from ${CONF#"${_SELF_DIR}/"})"
 info "root         ${EXPLICIT_ROOT:-~/${DIST_ID}  (derived; resolved over SSH)}"
 info "served at    ${PUBLIC_URL}/   (location ${URL_PATH}/)"
+info "log          ${LOGFILE#"${_SELF_DIR}/"}"
 [ "$DRY" -eq 1 ] && warn "--check: DRY RUN — nothing on the remote will change"
 
 # ── connectivity ────────────────────────────────────────────────────────
