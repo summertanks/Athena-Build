@@ -41732,6 +41732,89 @@ def test_bump_version_freeze_stamp_commits_without_gitignored_stamp():
             assert 'version = "0.1.1"' in _fh.read()
 
 
+def test_remote_agent_read_log_offset_survives_concurrent_growth():
+    """Audit #162: read_log's next-offset is frm + bytes-actually-read, not the
+    stale pre-read getsize — so a file that grows between getsize() and read()
+    yields a lossless, overlap-free next offset (no duplicate bytes on the
+    following poll)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_agent as _ra
+    with tempfile.TemporaryDirectory() as _d:
+        _p = os.path.join(_d, 'log')
+        with open(_p, 'wb') as _fh:
+            _fh.write(b'0123456789')          # 10 bytes on disk
+        _orig = _ra.os.path.getsize
+        _ra.os.path.getsize = lambda _x: 5    # STALE smaller size (grew after)
+        try:
+            _data, _next, _size = _ra.read_log(_p, 0)
+        finally:
+            _ra.os.path.getsize = _orig
+        assert _data == b'0123456789'
+        assert _next == 10                    # frm + len(data), not stale 5
+        _d2, _n2, _ = _ra.read_log(_p, _next)  # next poll → nothing, no dup
+        assert _d2 == b'' and _n2 == _next
+
+
+def test_cmd_mirror_reclaim_forwards_no_iso_to_publish():
+    """Audit #65: reclaim publishes with --no-iso so the ISO release-media
+    gate can't block a repo/claims reclaim when current-snapshot install media
+    is absent (the earlier test asserted the buggy args that omitted it)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import re as _re
+    from commands import cmd_mirror
+    _src = inspect.getsource(cmd_mirror)
+    assert _re.search(
+        r"cmd_mirror_publish\([^)]*'--no-iso'[^)]*reclaim_intents",
+        _src, _re.DOTALL), "reclaim must forward --no-iso to cmd_mirror_publish"
+
+
+def test_coord_reconcile_audit_local_multi_binary_all_verified():
+    """Audit #101: audit_local hash-verifies EVERY binary of a multi-binary
+    source (two published claims share package + built_version but have
+    distinct filenames, both present in the pool with matching hashes) and
+    reports neither as orphan / hash_mismatch / unclaimed (validates #98)."""
+    if not _openssl_available():
+        return
+    import hashlib as _hl
+    _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _id_dir = os.path.join(_td, 'identity')
+        _claims_dir = os.path.join(_td, 'claims')
+        _pool = os.path.join(_td, 'repo')
+        os.makedirs(_id_dir)
+        os.makedirs(_pool)
+        _priv, _pub = _i.generate_keypair(_id_dir, 'alice')
+
+        def _sha(_path):
+            with open(_path, 'rb') as _fh:
+                return _hl.sha256(_fh.read()).hexdigest()
+
+        _seq = 0
+        for _fn in ('libfoo_1.0_amd64.deb', 'libfoo-dev_1.0_amd64.deb'):
+            _fp = os.path.join(_pool, _fn)
+            with open(_fp, 'wb') as _fh:
+                _fh.write(_fn.encode())
+            _seq += 1
+            _claim = _s.new_claim(
+                builder='alice', seq=_seq, package='foo',
+                intended_version='1.0', built_version='1.0',
+                filename=_fn, sha256=_sha(_fp), size=1, snapshot='S',
+                built_at='T', claim_state=_s.CLAIM_STATE_PUBLISHED)
+            _st.append_claim(_claims_dir, 'alice', _claim, _priv)
+
+        _report = _r.audit_local(
+            repo_root=_pool, claims_dir=_claims_dir, builder_id='alice',
+            public_key_path=_pub, get_sha256=_sha)
+        _kinds = [_f.kind for _f in _report.findings]
+        assert 'orphan' not in _kinds, _kinds
+        assert 'hash_mismatch' not in _kinds, _kinds
+        assert 'unclaimed_pool_file' not in _kinds, _kinds
+        # both filenames counted as live-claimed (the #98 filename-keyed view)
+        _summary = next(_f for _f in _report.findings if _f.kind == 'summary')
+        assert 'live_claims=2' in _summary.message, _summary.message
+
+
 def main() -> int:
     tests = [
         test_build_closure_compute_returns_all_and_unsatisfiable,
@@ -43225,6 +43308,9 @@ def main() -> int:
         test_dependencytree_pickle_roundtrip,
         test_buildlog_write_survives_ascii_locale,
         test_bump_version_freeze_stamp_commits_without_gitignored_stamp,
+        test_remote_agent_read_log_offset_survives_concurrent_growth,
+        test_cmd_mirror_reclaim_forwards_no_iso_to_publish,
+        test_coord_reconcile_audit_local_multi_binary_all_verified,
         test_arch_filter_failsafe_keeps_on_uncertainty,
         test_generate_pending_claims_skips_foreign_target,
         test_scan_stale_files_buckets_foreign_keeps_native_sibling,
