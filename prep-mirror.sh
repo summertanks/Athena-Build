@@ -8,26 +8,12 @@
 # /<dist-id>/.  This script connects over SSH with the given key and brings
 # the host to that state idempotently:
 #
-#   PREPARED   marker present + ours        → no-op (report + exit 0)
-#   ADOPT      no marker, but our layout (or part of it) already lives
-#              there → verify, FILL ONLY THE GAPS, write marker
-#   FRESH      empty / absent root          → install web server, create
-#              the dir tree, configure serving, write marker
-#   UNEXPECTED foreign content / bad marker → dump details, change NOTHING,
-#              exit loudly
 #
-# It NEVER clobbers content it didn't create: anything it doesn't
-# recognise is an UNEXPECTED hard stop, not a silent overwrite.
-#
-# The remote root + served path are DERIVED, not typed:
+# The remote root + served path are DERIVED, from config file
 #   * the served path is /<dist-id> where <dist-id> = [Build] DISTRIBUTION
-#     (config/distro.conf) lowercased — the SAME value `mirror add` derives
-#     via derive_public_url(), so the two can't disagree.
-#   * the remote root defaults to <remote-$HOME>/<dist-id> (resolved over
-#     SSH), matching `repo publish ssh`.  Pass an explicit path in the
-#     ssh-url to override it.
-# So `ssh://ubuntu@host` is enough; the script resolves the rest and prints
-# the full path-bearing url for `mirror add` (whose rsync push needs it).
+#     (config/distro.conf) lowercased
+#   * the remote root defaults to <remote-$HOME>/<dist-id> Pass an explicit 
+#     path in the ssh-url to override it.
 #
 # Usage:
 #   ./prep-mirror.sh <ssh-url> <ssh-key> [--check] [--proto http|https]
@@ -71,18 +57,18 @@ mark()  { case "$1" in
             *)                printf '%s✗%s' "$_Y" "$_R" ;;
           esac; }
 
-# ── argument parsing ────────────────────────────────────────────────────
+#  argument parsing
 SSH_URL=''; SSH_KEY=''; DRY=0; PROTO='http'
 _pos=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --check)  DRY=1; shift ;;
-        --proto)  PROTO="${2:-}"; shift 2 ;;
-        -h|--help)
-            # Print the leading comment block (skip the shebang, stop at the
-            # first non-comment line) with the '# ' prefix stripped — robust to
-            # the header changing length, unlike a hardcoded line range.
-            awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
+        --proto)
+            # Need a value; without this guard `shift 2` on a trailing
+            # `--proto` returns non-zero and set -e aborts with no message.
+            [ $# -ge 2 ] || die "--proto needs a value (http|https)" 2
+            PROTO="$2"; shift 2 ;;
+        -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
             exit 0 ;;
         --*) die "unknown flag: $1" 2 ;;
         *) _pos+=("$1"); shift ;;
