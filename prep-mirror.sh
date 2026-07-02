@@ -42,7 +42,9 @@
 #   ./prep-mirror.sh ssh://ubuntu@140.245.198.222 ~/.ssh/asgard_mirror --check
 #
 set -euo pipefail
-_SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve the script's own dir symlink-safely (readlink -f) so config/ + log/
+# are found even when invoked through a symlink (e.g. from ~/bin).
+_SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CONF="${_SELF_DIR}/config/distro.conf"
 
 # ── presentation ────────────────────────────────────────────────────────
