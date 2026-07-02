@@ -2,7 +2,7 @@
 
 `iso build disk [size_gb]` packs the live chroot into a sparse qcow2
 disk image that boots directly into the running OS (no installer
-step).  Output: image/asgard-<ver>-amd64.qcow2.
+step).  Output: image/<distro>-<ver>-amd64.qcow2.
 
 Pipeline (all on host, under sudo):
   1. Allocate a sparse raw image of size N GB
@@ -98,11 +98,25 @@ def _wait_partitions(loop_dev: str, password: str,
     return all(os.path.exists(_p) for _p in _expected)
 
 
+def _distro_account(dist_id: str) -> str:
+    """Cloud-style default login user derived from the distribution id
+    (e.g. 'valhalla'), the way cloud images name theirs 'ubuntu'/'debian'.
+    Sanitised to a valid Linux username — starts with a letter/underscore,
+    only [a-z0-9_-], <=32 chars — with 'admin' as the fallback when the id
+    yields nothing usable."""
+    import re
+    _u = re.sub(r'[^a-z0-9_-]', '', (dist_id or '').lower())
+    if not re.match(r'[a-z_]', _u or ''):
+        _u = 'admin'
+    return _u[:32]
+
+
 def build_disk_image(
     dir_chroot: str,
     output_qcow2: str,
     size_gb: int,
     password: str,
+    dist_id: str,
     container: Optional['BuildContainer'] = None,
 ) -> bool:
     """Build a bootable qcow2 disk image from the live chroot.
@@ -110,6 +124,9 @@ def build_disk_image(
     Returns True on success, False on any error (full transcript in
     the run log; operator-facing failure messages printed via tui).
 
+    dist_id: distribution id ([Build] DISTRIBUTION lowercased) — the
+    default login user and the ext4 root label derive from it, so the
+    image isn't branded with a hardcoded distro name.
     container: accepted but unused — kept for signature parity with the
     ISO builders (grub-install already chroots, so nothing routes through
     a container here).
@@ -118,6 +135,9 @@ def build_disk_image(
     logger.info(
         f"build_disk_image: {dir_chroot} → {output_qcow2} ({size_gb}G)"
     )
+    # Derived, distro-neutral identity for the image (no hardcoded distro name).
+    _acct  = _distro_account(dist_id)          # cloud-style default login user
+    _label = f'{_acct}-root'[:16]              # ext4 volume label (max 16 chars)
     if not os.path.isdir(dir_chroot):
         tui.console.print(f"ERROR: chroot dir not found: {dir_chroot}")
         return False
@@ -225,7 +245,7 @@ def build_disk_image(
                     f"ERROR: mkfs.fat failed: {_r.stderr.strip()[:200]}"
                 )
                 return False
-            _r = _sudo(['mkfs.ext4', '-F', '-L', 'asgard-root', _root_part],
+            _r = _sudo(['mkfs.ext4', '-F', '-L', _label, _root_part],
                        password)
             if _r.returncode != 0:
                 tui.console.print(
@@ -352,26 +372,27 @@ def build_disk_image(
 
         # ── Step 8a: lock root + add a cloud-style passwordless-sudo user ──
         # MAT-09: the disk image must not ship the base chroot's root account
-        # as a login.  Lock root and add `asgard` (in the `sudo` group → the
-        # %sudo NOPASSWD rule baked into the chroot gives it passwordless sudo,
-        # like a cloud image's default user).  asgard gets a per-build RANDOM
-        # console password (printed + written) so the VM is still loginnable.
-        _asgard_pw = secrets.token_urlsafe(12)
+        # as a login.  Lock root and add the distro's default user `_acct` (in
+        # the `sudo` group → the %sudo NOPASSWD rule baked into the chroot gives
+        # it passwordless sudo, like a cloud image's default user).  It gets a
+        # per-build RANDOM console password (printed + written) so the VM is
+        # still loginnable.
+        _acct_pw = secrets.token_urlsafe(12)
         _r = _sudo(['env', _chroot_env, 'chroot', _mnt, 'useradd', '-m',
-                    '-s', '/bin/bash', '-G', 'sudo', 'asgard'], password)
+                    '-s', '/bin/bash', '-G', 'sudo', _acct], password)
         if _r.returncode not in (0, 9):     # 9 = already exists (idempotent)
-            tui.console.print(f"WARNING: useradd asgard rc={_r.returncode}: "
+            tui.console.print(f"WARNING: useradd {_acct} rc={_r.returncode}: "
                               f"{_r.stderr.strip()[:160]}")
         # chpasswd reads the credential on stdin → askpass keeps sudo's stdin
         # free (no password/credential mixing).
         with utils.sudo_askpass_env(password) as _env:
             _cp = subprocess.run(
                 ['sudo', '-A', 'env', _chroot_env, 'chroot', _mnt, 'chpasswd'],
-                input=f'asgard:{_asgard_pw}\n', env=_env,
+                input=f'{_acct}:{_acct_pw}\n', env=_env,
                 capture_output=True, text=True)
         if _cp.returncode != 0:
             tui.console.print(
-                f"WARNING: set asgard password rc={_cp.returncode}: "
+                f"WARNING: set {_acct} password rc={_cp.returncode}: "
                 f"{(_cp.stderr or '').strip()[:160]}")
         _r = _sudo(['env', _chroot_env, 'chroot', _mnt,
                     'passwd', '-l', 'root'], password)
@@ -380,12 +401,12 @@ def build_disk_image(
                               f"{_r.stderr.strip()[:160]}")
         else:
             tui.console.print(
-                f"disk image: root LOCKED; login asgard / {_asgard_pw} "
+                f"disk image: root LOCKED; login {_acct} / {_acct_pw} "
                 "(passwordless sudo)")
         try:
             _cred = os.path.join(_img_dir, 'disk-credentials.txt')
             with open(_cred, 'w') as _fh:
-                _fh.write(f"# root: LOCKED\nasgard:{_asgard_pw}\n")
+                _fh.write(f"# root: LOCKED\n{_acct}:{_acct_pw}\n")
             os.chmod(_cred, 0o600)
         except OSError as _e:
             logger.warning(f"disk-credentials.txt write failed: {_e}")

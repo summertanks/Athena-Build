@@ -7566,14 +7566,35 @@ def test_mat09_live_root_password_randomized_and_sudo_guaranteed():
 
 def test_mat09_disk_image_locks_root_and_adds_sudo_user():
     """MAT-09: the disk image LOCKS root and adds a cloud-style passwordless-sudo
-    user (asgard, in the sudo group) with a per-build random console password —
-    so the qcow2 ships no default credential and stays loginnable."""
+    user (in the sudo group) with a per-build random console password — so the
+    qcow2 ships no default credential and stays loginnable.  The user + ext4
+    label DERIVE from the distribution id, not a hardcoded 'asgard'."""
     _src = open(os.path.join(_ROOT, 'scripts', 'disk_image.py')).read()
     assert "'passwd', '-l', 'root'" in _src, "disk image must lock root"
-    assert "'useradd'" in _src and "'-G', 'sudo'" in _src, "asgard in sudo group"
+    assert "'useradd'" in _src and "'-G', 'sudo'" in _src, "user in sudo group"
     assert 'chpasswd' in _src and 'secrets.token_urlsafe' in _src, \
-        "asgard needs a random console password"
-    assert "'asgard'" in _src
+        "default user needs a random console password"
+    # distro-derived, not a hardcoded distro name
+    assert '_distro_account(' in _src and 'dist_id' in _src, \
+        "default user must derive from the distribution id"
+    assert "'asgard'" not in _src, \
+        "disk image must not hardcode the 'asgard' account/label"
+
+
+def test_distro_account_derives_valid_username():
+    """disk_image._distro_account: a valid Linux username from the distro id —
+    sanitises invalid chars, requires a letter/underscore start (else falls
+    back to 'admin'), and caps to 32 chars."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    assert disk_image._distro_account('Asgard') == 'asgard'
+    assert disk_image._distro_account('valhalla') == 'valhalla'
+    assert disk_image._distro_account('My Distro!') == 'mydistro'   # stripped
+    assert disk_image._distro_account('123') == 'admin'             # digit start
+    assert disk_image._distro_account('-x') == 'admin'              # dash start
+    assert disk_image._distro_account('') == 'admin'                # empty
+    assert len(disk_image._distro_account('a' * 50)) == 32          # capped
 
 
 def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
@@ -42857,6 +42878,7 @@ def main() -> int:
         test_iso_builders_write_md5sum_manifest_mat08,
         test_mat09_live_root_password_randomized_and_sudo_guaranteed,
         test_mat09_disk_image_locks_root_and_adds_sudo_user,
+        test_distro_account_derives_valid_username,
         test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
         test_sta40_no_shell_interpolation_in_sudo_sites,
         test_sta44_index_verified_against_release_sha,

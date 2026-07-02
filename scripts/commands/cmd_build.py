@@ -978,6 +978,7 @@ class BuildCommandsMixin(SessionState):
                 output_qcow2=_out_path,
                 size_gb=_size_gb,
                 password=_password,
+                dist_id=self.config.build_base_id,
                 container=self.container,
             )
             if not _ok:
