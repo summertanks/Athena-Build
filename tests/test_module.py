@@ -688,6 +688,46 @@ def _onboarding_patched(answers, *, verify_ok):
          onboarding.console.print) = _saved
 
 
+def test_onboarding_logs_configure_actions():
+    """configure must leave an audit trail: prompts + state-changing actions
+    log to the 'athena.build' logger (→ the session build-<ts>.log), so a run
+    is reconstructable.  Guards against onboarding reverting to print-only."""
+    import logging as _logging
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import onboarding
+    _records: 'list[str]' = []
+
+    class _CapH(_logging.Handler):
+        def emit(self, _r):
+            _records.append(_r.getMessage())
+
+    _lg = _logging.getLogger('athena.build')
+    _h = _CapH()
+    _lg.addHandler(_h)
+    _old_level = _lg.level
+    _lg.setLevel(_logging.INFO)
+    try:
+        with tempfile.TemporaryDirectory() as _tmp:
+            _sess = _FakeOnbSession(_tmp)
+            _sess.config.build_distribution = 'Asgard'
+            _answers = ['master', 'ip', 'ssh://ubuntu@1.2.3.4',
+                        '', '~/mirror.key', 'http']
+            with _onboarding_patched(_answers, verify_ok=True):
+                onboarding._add_mirror_interactive(_sess)
+    finally:
+        _lg.removeHandler(_h)
+        _lg.setLevel(_old_level)
+    _joined = '\n'.join(_records)
+    # prompts are logged (the operator's input trail)
+    assert any('prompt' in _m and 'Publish URL' in _m for _m in _records), \
+        _joined
+    # the state-changing mirror-add action is logged, with its result
+    assert any('mirror add' in _m for _m in _records), _joined
+    assert any("mirror 'master' added" in _m for _m in _records), _joined
+
+
 def test_onboarding_origin_completes_pathless_ssh_url():
     """Origin mirror-add wizard: a path-less ssh:// Publish URL gets a
     `Remote repo path` prompt (default ~<user>/<dist-id>) and the path is
@@ -42497,6 +42537,7 @@ def main() -> int:
         test_remote_conf_helpers_round_trip,
         test_remote_token_generate_and_path,
         test_write_local_conf_round_trips,
+        test_onboarding_logs_configure_actions,
         test_onboarding_origin_completes_pathless_ssh_url,
         test_command_allowed_gates_until_configured,
         test_configured_summary_reports_state_and_warns_unregistered,

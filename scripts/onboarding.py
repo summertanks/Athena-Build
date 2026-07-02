@@ -23,12 +23,20 @@ registration marker), so the wizard never re-prompts and a peer never has to
 re-register.  Hooked from build.py:main() before the banner; skipped entirely
 for headless / --cmd / --api / --yes runs and for an already-set-up box.
 """
+import logging
 import os
 
 import signing
 import tui
 import utils
 from tui import console, Prompt, PROMPT_INPUT, PROMPT_OPTIONS
+
+# Configure runs inside the TUI session, whose FileHandler is already on the
+# 'athena' logger (tui.setup_file_logging) — so these records land in the
+# session transcript (log/build-<ts>.log).  Every prompt+answer and every
+# state-changing action below is logged, so `configure` leaves an auditable
+# trail the same way a build or a mirror-prep run does.
+logger = logging.getLogger('athena.build')
 
 
 # Commands allowed before the box is configured.  `configure` itself, the
@@ -74,7 +82,9 @@ def _ask(ptype, message, options=None):
         _resp = Prompt(ptype, message).get_response()
     _resp = (_resp or '').strip()
     if _resp.lower() in ('cancel', 'q'):
+        logger.info('configure: prompt %r → cancelled', message)
         return None
+    logger.info('configure: prompt %r → %r', message, _resp or '(default)')
     return _resp
 
 
@@ -105,6 +115,7 @@ def run_onboarding(session) -> None:
     (file + in-memory) only on full success; a cancelled/failed branch leaves
     the box un-configured so the gate keeps refusing until `configure` wins."""
     config = session.config
+    logger.info('configure: onboarding wizard started')
     console.print("")
     console.print("── Athena setup ──", tui.COLOR_HIGHLIGHT)
 
@@ -117,6 +128,8 @@ def run_onboarding(session) -> None:
         _ok = False                       # cancel / no backend
 
     if not _ok:
+        logger.warning('configure: aborted in role flow (%s) — not configured',
+                       _role or 'cancel')
         console.print("Not configured. Run `configure` to retry.",
                       tui.COLOR_WARNING)
         return
@@ -125,6 +138,7 @@ def run_onboarding(session) -> None:
     # Name, parallel Jobs, signing UID.  Lean: each is a single Enter-to-accept
     # prompt with a sensible default.  Change any later with `set <key>`.
     if not _prompt_machine_settings(session):
+        logger.warning('configure: aborted in machine-settings — not configured')
         console.print("Not configured. Run `configure` to retry.",
                       tui.COLOR_WARNING)
         return
@@ -140,6 +154,11 @@ def run_onboarding(session) -> None:
 
     utils.write_local_conf(config, setup_complete=True)
     config.setup_complete = True          # in-memory: opens the command gate
+    logger.info(
+        'configure: setup complete — role=%s mode=%s name=%s',
+        getattr(config, 'system_role', '?'),
+        getattr(config, 'build_mode', '?'),
+        getattr(config, 'system_name', '?'))
     console.print("✓ setup complete — all commands enabled.",
                   tui.COLOR_HIGHLIGHT)
 
@@ -212,6 +231,8 @@ def _prompt_machine_settings(session) -> bool:
         config.system_name = _name
     config.max_parallel_builds = _jobs
     config.signing_key_uid = _uid
+    logger.info('configure: machine settings written — name=%s jobs=%s '
+                'signing=%s', _name or '(builder id)', _jobs, _uid)
     console.print(
         f"  machine: name={_name or '(builder id)'}, jobs={_jobs}, "
         f"signing={_uid}", tui.COLOR_INFO)
@@ -222,6 +243,7 @@ def _onboard_first(session) -> bool:
     """Origin/owner branch.  Role=first, mode forced to distribution; an
     optional publish mirror."""
     config = session.config
+    logger.info('configure: origin/first system — mode forced to distribution')
     console.print("First/origin system — mode forced to distribution.",
                   tui.COLOR_INFO)
     config.build_mode = 'distribution'
@@ -233,6 +255,8 @@ def _onboard_first(session) -> bool:
     if _enable is None:
         return False
     if _enable != 'yes':
+        logger.info('configure: publish mirror declined — add later via '
+                    '`mirror add`')
         console.print("No mirror — add one later with `mirror add`.",
                       tui.COLOR_INFO)
         return True
@@ -250,10 +274,16 @@ def _onboard_first(session) -> bool:
         if _uid:
             config.signing_key_uid = _uid
             utils.write_local_conf(config, signing_key_uid=_uid)
+        logger.info('configure: generating tier-1 signing key (uid=%s)',
+                    config.signing_key_uid)
         console.print("Generating tier-1 signing key…", tui.COLOR_INFO)
         if session.cmd_key('generate') is False:
+            logger.error('configure: tier-1 signing key generation failed')
             console.print("✗ key generation failed", tui.COLOR_ERROR)
             return False
+        logger.info('configure: tier-1 signing key generated')
+    else:
+        logger.info('configure: tier-1 signing key already present — reused')
     if not _ensure_builder_identity(session):
         return False
     # Origin uses the legacy explicit add (no mirror to validate against yet).
@@ -322,8 +352,11 @@ def _onboard_federation(session) -> bool:
     if _ok:
         _ok, _det = _m.probe_remote_writable(_sshhost, _user, _keydst, _rpath)
     if not _ok:
+        logger.error('configure: federation ssh check failed for %s (%s)',
+                     _sshhost, _det)
         console.print(f"✗ ssh check failed ({_det})", tui.COLOR_ERROR)
         return False
+    logger.info('configure: federation ssh access + write to %s ok', _sshhost)
     console.print("✓ ssh access + write", tui.COLOR_INFO)
 
     # 3. GPG key → import + verify against the mirror's signed head.
@@ -332,7 +365,9 @@ def _onboard_federation(session) -> bool:
         return False
     _ssh_url = f"ssh://{_user}@{_sshhost}/{_rpath.lstrip('/')}"
     if not _validate_and_install_gpg(session, _gpgsrc, _ssh_url, _keydst):
+        logger.error('configure: tier-1 gpg key rejected (no match to mirror)')
         return False
+    logger.info('configure: tier-1 gpg key installed + verified against mirror')
     console.print("✓ gpg key matches the mirror (can publish)", tui.COLOR_INFO)
     console.print(f"keys installed: {_keydst} + signing keyring",
                   tui.COLOR_INFO)
@@ -348,24 +383,33 @@ def _onboard_federation(session) -> bool:
         if _bid is None:
             return False
         _bid = _bid or _default
+        logger.info('configure: initialising builder identity %s', _bid)
         if session.cmd_mirror('init', _bid) is False:
+            logger.error('configure: builder init failed (%s)', _bid)
             console.print("✗ builder init failed", tui.COLOR_ERROR)
             return False
+        logger.info('configure: builder identity %s created', _bid)
 
     # 5. Persist + register (we already probed → --no-probe).
     _host_type = 'ip' if _is_ip(_sshhost) else 'fqdn'
+    logger.info('configure: mirror add (federation) %s %s --name %s',
+                _host_type, _ssh_url, _name)
     if session.cmd_mirror('add', _host_type, _ssh_url, '--ssh-key', _keydst,
                           '--proto', _proto, '--name', _name,
                           '--no-probe') is False:
+        logger.error('configure: mirror add failed (%s)', _name)
         console.print("✗ mirror add failed", tui.COLOR_ERROR)
         return False
     if session.cmd_mirror('builders', 'register', _name) is False:
+        logger.error('configure: builder registration failed on %s', _name)
         console.print("✗ registration failed", tui.COLOR_ERROR)
         return False
+    logger.info('configure: registered builder on %s', _name)
     console.print(f"✓ registered on {_name}", tui.COLOR_HIGHLIGHT)
     _keys = session._coord_self_keys()
     config.system_role = 'federation'
     utils.write_local_conf(config, role='federation')
+    logger.info('configure: role set to federation')
     # Registration marker now lives in the signed mirror.conf, not local.conf.
     import mirror as _mirror
     if not _mirror.set_registration(config, _name, _keys[0] if _keys else ''):
@@ -449,9 +493,12 @@ def _ensure_builder_identity(session) -> bool:
     if _bid is None:
         return False
     _bid = _bid or _default
+    logger.info('configure: initialising builder identity %s', _bid)
     if session.cmd_mirror('init', _bid) is False:
+        logger.error('configure: builder init failed (%s)', _bid)
         console.print("✗ builder init failed", tui.COLOR_ERROR)
         return False
+    logger.info('configure: builder identity %s created', _bid)
     return True
 
 
@@ -501,9 +548,13 @@ def _add_mirror_interactive(session) -> str:
         if _proto is None:
             return ''
         _args += ['--proto', _proto]
+    logger.info('configure: mirror add %s',
+                ' '.join(str(_a) for _a in _args))
     if session.cmd_mirror('add', *_args) is False:
+        logger.error("configure: mirror add failed (%s)", _name)
         console.print("✗ mirror add failed", tui.COLOR_ERROR)
         return ''
+    logger.info("configure: mirror '%s' added (%s)", _name, _url)
     console.print(f"✓ mirror '{_name}' added", tui.COLOR_HIGHLIGHT)
     return _name
 
