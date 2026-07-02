@@ -35953,7 +35953,7 @@ def test_prep_mirror_script_contract():
     _r = _sub.run(['bash', '-n', _p], capture_output=True, text=True)
     assert _r.returncode == 0, _r.stderr
     _src = open(_p).read()
-    for _tok in ('mirror-info.json', 'asgard-mirror', '--check',
+    for _tok in ('mirror-info.json', 'athena-mirror', '--check',
                  'PREPARED', 'ADOPT', 'FRESH', 'UNEXPECTED',
                  'StrictHostKeyChecking'):
         assert _tok in _src, f"prep-mirror.sh missing {_tok!r}"
@@ -35968,7 +35968,7 @@ def test_prep_mirror_script_contract():
     # Q2 — reports a per-component inventory (fills only the gaps)
     assert 'Inventory' in _src and 'INV_dists' in _src and 'INV_marker' in _src, _src
     # Q3 — nginx serves the release index at root, detected by its marker
-    assert 'index index.html;' in _src and 'asgard-release-index' in _src, _src
+    assert 'index index.html;' in _src and 'athena-release-index' in _src, _src
     # permission gate: needs sudo to install the web server, write perms to
     # the root — and we run non-interactively
     assert 'SUDO' in _src and 'WRITABLE' in _src, _src

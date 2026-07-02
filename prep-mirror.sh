@@ -192,13 +192,13 @@ inv "${ROOT}/iso"              INV_iso
 inv "${COORD}/claims"          INV_claims
 inv "${COORD}/keyring/builders" INV_keyring
 if [ -f "$MARKER" ]; then
-    if grep -q '"marker"[[:space:]]*:[[:space:]]*"asgard-mirror"' "$MARKER" 2>/dev/null; then echo "INV_marker=present"
+    if grep -q '"marker"[[:space:]]*:[[:space:]]*"athena-mirror"' "$MARKER" 2>/dev/null; then echo "INV_marker=present"
     else echo "INV_marker=foreign"; fi
 else echo "INV_marker=absent"; fi
 # serving + whether the SERVED root is the release index page (vs a listing)
 if curl -fsS "http://localhost${URL_PATH}/" >/dev/null 2>&1; then
     echo "INV_serving=yes"
-    if curl -fsS "http://localhost${URL_PATH}/" 2>/dev/null | grep -q 'asgard-release-index'; then echo "INV_index=yes"; else echo "INV_index=no"; fi
+    if curl -fsS "http://localhost${URL_PATH}/" 2>/dev/null | grep -q 'athena-release-index'; then echo "INV_index=yes"; else echo "INV_index=no"; fi
 else echo "INV_serving=no"; echo "INV_index=no"; fi
 REMOTE
 )"
@@ -256,9 +256,9 @@ for _c in "$INV_dists" "$INV_iso" "$INV_claims" "$INV_keyring"; do
     [ "$_c" = present ] && _our_any=yes
 done
 if   [ "$ROOT_NOTDIR" = yes ]; then STATE_KIND=UNEXPECTED; STATE_DETAIL="root exists but is not a directory: ${ROOT}"
-elif [ "$INV_marker" = foreign ]; then STATE_KIND=UNEXPECTED; STATE_DETAIL="${ROOT}/mirror-info.json exists but is not an asgard-mirror marker"
+elif [ "$INV_marker" = foreign ]; then STATE_KIND=UNEXPECTED; STATE_DETAIL="${ROOT}/mirror-info.json exists but is not an athena-mirror marker"
 elif [ "$INV_marker" = present ]; then STATE_KIND=PREPARED; STATE_DETAIL="marker present"
-elif [ "$_our_any" = yes ]; then STATE_KIND=ADOPT; STATE_DETAIL="partial/existing asgard layout — will fill the gaps"
+elif [ "$_our_any" = yes ]; then STATE_KIND=ADOPT; STATE_DETAIL="partial/existing athena layout — will fill the gaps"
 elif [ "$ROOT_NONEMPTY" = yes ]; then STATE_KIND=UNEXPECTED; STATE_DETAIL="${ROOT} is non-empty but has none of our components — refusing to touch it"
 else STATE_KIND=FRESH; STATE_DETAIL="${ROOT} absent or empty"
 fi
@@ -329,7 +329,7 @@ ensure "${COORD}/keyring/builders"
 
 # 2. web server
 serves_ok()  { curl -fsS "http://localhost${URL_PATH}/" >/dev/null 2>&1; }
-serves_idx() { curl -fsS "http://localhost${URL_PATH}/" 2>/dev/null | grep -q 'asgard-release-index'; }
+serves_idx() { curl -fsS "http://localhost${URL_PATH}/" 2>/dev/null | grep -q 'athena-release-index'; }
 if serves_ok; then
     if serves_idx; then
         say "web server serves the release index at ${URL_PATH}/ — config untouched"
@@ -380,7 +380,7 @@ fi
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$MARKER" <<JSON
 {
-  "marker": "asgard-mirror",
+  "marker": "athena-mirror",
   "schema": 1,
   "prepared_at": "${NOW}",
   "dist_id": "$(basename "$ROOT")",
@@ -404,7 +404,7 @@ if ! curl -fsS "${PUBLIC_URL}/mirror-info.json" >/dev/null 2>&1; then
     exit 1
 fi
 ok "${PUBLIC_URL}/mirror-info.json is HTTP-reachable"
-if curl -fsS "${PUBLIC_URL}/" 2>/dev/null | grep -q 'asgard-release-index'; then
+if curl -fsS "${PUBLIC_URL}/" 2>/dev/null | grep -q 'athena-release-index'; then
     ok "${PUBLIC_URL}/ serves the release index page"
 else
     warn "${PUBLIC_URL}/ does not yet serve the release index (publish a release so index.html exists)"

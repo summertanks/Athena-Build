@@ -8,7 +8,7 @@ the first interactive launch and establishes:
   - system Role: ``first`` (origin/owner — bootstraps the federation, always
     distribution mode) vs ``federation`` (a peer joining an existing mirror).
   - the federation registration handshake for a peer (MANDATORY): a guided,
-    validate-as-you-go flow — public URL (probed for the asgard-mirror marker),
+    validate-as-you-go flow — public URL (probed for the athena-mirror marker),
     SSH login/path/key (auth + write probed, key copied into config/), tier-1
     GPG private key (imported + verified against the mirror's signed coord-head),
     builder identity, ``mirror add`` + ``mirror builders register``.  Typing

@@ -1038,8 +1038,8 @@ class MirrorCommandsMixin(SessionState):
             _m = _json.loads(_r.text)
         except ValueError:
             return False, "mirror-info.json is not valid JSON"
-        if not (isinstance(_m, dict) and _m.get('marker') == 'asgard-mirror'):
-            return False, "mirror-info.json is not an asgard-mirror marker"
+        if not (isinstance(_m, dict) and _m.get('marker') == 'athena-mirror'):
+            return False, "mirror-info.json is not an athena-mirror marker"
         return True, str(_m.get('prepared_at') or '')
 
     def _release_iso_descriptors(self) -> 'tuple[list[dict], list[str]]':
