@@ -48,7 +48,12 @@ _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CONF="${_SELF_DIR}/config/distro.conf"
 
 # ── presentation ────────────────────────────────────────────────────────
-if [ -t 1 ]; then
+# Colour only on a real terminal AND when NO_COLOR is unset.  Per no-color.org
+# NO_COLOR suppresses colour when PRESENT regardless of value (even empty), so
+# test set-ness via ${NO_COLOR+x} (→ 'x' iff set), not emptiness.  Evaluated
+# BEFORE the tee/log redirect below, so the decision sees the true terminal;
+# the log file gets colour stripped separately by the sed in that redirect.
+if [ -t 1 ] && [ -z "${NO_COLOR+x}" ]; then
     _B=$'\033[1m'; _D=$'\033[2m'; _R=$'\033[0m'
     _G=$'\033[32m'; _Y=$'\033[33m'; _E=$'\033[31m'; _C=$'\033[36m'
 else
