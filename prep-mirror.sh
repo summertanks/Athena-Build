@@ -42,17 +42,10 @@
 #   ./prep-mirror.sh ssh://ubuntu@140.245.198.222 ~/.ssh/asgard_mirror --check
 #
 set -euo pipefail
-# Resolve the script's own dir symlink-safely (readlink -f) so config/ + log/
-# are found even when invoked through a symlink (e.g. from ~/bin).
 _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CONF="${_SELF_DIR}/config/distro.conf"
 
-# ── presentation ────────────────────────────────────────────────────────
-# Colour only on a real terminal AND when NO_COLOR is unset.  Per no-color.org
-# NO_COLOR suppresses colour when PRESENT regardless of value (even empty), so
-# test set-ness via ${NO_COLOR+x} (→ 'x' iff set), not emptiness.  Evaluated
-# BEFORE the tee/log redirect below, so the decision sees the true terminal;
-# the log file gets colour stripped separately by the sed in that redirect.
+# Colour only on a real terminal AND when NO_COLOR is unset.
 if [ -t 1 ] && [ -z "${NO_COLOR+x}" ]; then
     _B=$'\033[1m'; _D=$'\033[2m'; _R=$'\033[0m'
     _G=$'\033[32m'; _Y=$'\033[33m'; _E=$'\033[31m'; _C=$'\033[36m'
@@ -60,8 +53,6 @@ else
     _B=''; _D=''; _R=''; _G=''; _Y=''; _E=''; _C=''
 fi
 banner() {
-    # Same ATHENA BUILD SYSTEM logo the TUI shows (scripts/build.py), so the
-    # mirror-prep tool reads as part of the same product.
     printf '%s\n' "${_C}${_B}╭─╮╶┬╴╷ ╷╭─╴╭╮╷╭─╮   ╭╮ ╷ ╷╷╷  ╶┬╮   ╭─╮╷ ╷╭─╮╶┬╴╭─╴╭┬╮${_R}"
     printf '%s\n' "${_C}${_B}├─┤ │ ├─┤├╴ │╰┤├─┤   ├┴╮│ │││   ││   ╰─╮╰┬╯╰─╮ │ ├╴ │││${_R}"
     printf '%s\n' "${_C}${_B}╵ ╵ ╵ ╵ ╵╰─╴╵ ╵╵ ╵   ╰─╯╰─╯╵╰─╴╶┴╯   ╰─╯ ╵ ╰─╯ ╵ ╰─╴╵ ╵${_R}"
@@ -87,8 +78,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --check)  DRY=1; shift ;;
         --proto)  PROTO="${2:-}"; shift 2 ;;
-        -h|--help)
-            sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --*) die "unknown flag: $1" 2 ;;
         *) _pos+=("$1"); shift ;;
     esac
@@ -249,10 +239,16 @@ ADD_CMD="mirror add ${HOST_TYPE} ${CANON_URL} --ssh-key ${SSH_KEY} --proto ${PRO
 ok "user ${WHOAMI}   home ${REMOTE_HOME}"
 info "resolved root  ${ROOT}"
 info "coord root     ${COORD}"
-[ "$WRITABLE" = yes ] && ok "${WHOAMI} can write the root" \
-                      || warn "${WHOAMI} may NOT be able to write ${ROOT} (check ownership/permissions)"
-[ "$SUDO" = yes ] && info "passwordless sudo available" \
-                  || info "no passwordless sudo (only needed to install/configure the web server)"
+if [ "$WRITABLE" = yes ]; then
+    ok "${WHOAMI} can write the root"
+else
+    warn "${WHOAMI} may NOT be able to write ${ROOT} (check ownership/permissions)"
+fi
+if [ "$SUDO" = yes ]; then
+    info "passwordless sudo available"
+else
+    info "no passwordless sudo (only needed to install/configure the web server)"
+fi
 
 step "Inventory"
 printf '   %s  repo dists/            %s\n' "$(mark "$INV_dists")"   "$INV_dists"
