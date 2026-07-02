@@ -78,7 +78,12 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --check)  DRY=1; shift ;;
         --proto)  PROTO="${2:-}"; shift 2 ;;
-        -h|--help) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)
+            # Print the leading comment block (skip the shebang, stop at the
+            # first non-comment line) with the '# ' prefix stripped — robust to
+            # the header changing length, unlike a hardcoded line range.
+            awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
+            exit 0 ;;
         --*) die "unknown flag: $1" 2 ;;
         *) _pos+=("$1"); shift ;;
     esac
