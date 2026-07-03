@@ -209,28 +209,75 @@ configure
 ```
 
 It's an ordinary command (so its prompts behave like any other), and it
-establishes the box's identity so you don't have to wire it up by hand:
+establishes the box's identity — including, if you want, the publish
+mirror — so you don't have to wire anything up by hand.  Type **`cancel`**
+at any prompt to abort; nothing durable is committed, and re-running
+`configure` restarts cleanly.
 
-1. **Role** — *first/origin* (bootstraps the federation; always distribution
-   mode) or *federation peer* (joins an existing mirror).
-2. **First system**: mode is forced to `distribution`; optionally enables a
-   publish mirror (generates the tier-1 key, `mirror init`, `mirror add`).
-3. **Federation peer** — a guided, **validate-as-you-go** join. Each input is
-   checked against the live mirror before the next, and the keys are installed
-   for you. Type **`cancel`** at any prompt to abort (nothing is committed; just
-   re-run `configure` to restart):
-   - **Mirror URL** (`https://host/path`) → probed for the `asgard-mirror`
-     marker (`✓ working mirror`).
-   - **SSH login / remote path / key path** → SSH auth + write are probed and
-     the key is copied to `config/<name>.key` (0600) (`✓ ssh access + write`).
-   - **Tier-1 GPG private key path** → imported and validated by verifying the
-     mirror's *signed coord-head* (`✓ gpg key matches the mirror`). You supply
-     the **private** key (copied off the origin) so this peer can publish; the
-     wizard installs it into the signing keyring itself.
-   - **Builder identity** (defaults to the hostname), then `mirror add` +
-     `mirror builders register`, then **build vs distribution** mode.
-4. **Snapshot pin** — a peer adopts the mirror's pin automatically during
-   registration; an origin is prompted.
+**Do this first: prepare the mirror host.**  The wizard registers a
+mirror; it does not build one.  Run the prep script from "Preparing a
+fresh host" above against the target host *before* `configure`, and keep
+three answers ready — they are exactly what the wizard will ask for:
+
+- the SSH login and remote repo path (the prep script prints both — the
+  path defaults to `/home/<user>/<dist-id>`),
+- the path to the SSH private key,
+- whether clients will read the repo over `http` or `https`.
+
+The wizard's first question is the box's **role**, and the mirror flow
+differs by answer:
+
+**Role = first / origin** — this box bootstraps the federation.  Mode is
+forced to `distribution`, and the mirror prompts run in this order:
+
+1. `Enable a publish mirror now?` — answer `yes`.  (`no` is fine too;
+   register later with `mirror add` exactly as in "Adding a mirror"
+   below — the wizard is a convenience wrapper around the same command.)
+2. `Repo signing identity [<default>]` — the UID for the **tier-1 GPG
+   key**.  Asked only when no key exists yet; the key is generated
+   immediately after, under this name (it must be named *before*
+   generation — the UID is baked into the key).  An existing key is
+   reused silently.
+3. **Builder identity** — the Ed25519 keypair that signs this box's
+   claims (defaults to the hostname).
+4. `Mirror name (e.g. 'origin')` — the local nickname used in every
+   later command (`mirror publish origin`, `mirror audit origin`).
+5. `Host type` — `ip`, `fqdn`, or `local` (must match the URL: literal
+   address → `ip`, DNS name → `fqdn`, `file://` → `local`).
+6. `Publish URL` — `ssh://user@host/path` or `file:///abs/path`.  If you
+   give a path-less `ssh://user@host`, the wizard asks for the
+   `Remote repo path` with the prep-script default
+   (`/home/<user>/<dist-id>`) offered — accept it if you prepared the
+   host with defaults.
+7. `SSH key path` and `Apt URL scheme` (`http`/`https`) — skipped for
+   `local`/`file://` mirrors.
+
+The wizard then runs the registration (the same probes and preview as
+`mirror add` — see below) and reports `✓ mirror 'origin' added`.  Two
+Enter-to-accept prompts follow the role flow — the parallel-build count,
+and (origin only) the **archive snapshot pin** — then the wizard marks
+setup complete and finishes with an automatic `config check` that probes
+the mirror's reachability, so a mis-registered mirror is visible
+immediately.  The mirror is registered but still empty: the first
+`mirror publish` will bootstrap it (see "First publish" below).
+
+**Role = federation peer** — this box joins an existing mirror.  The
+join is guided and **validate-as-you-go**: each input is checked against
+the live mirror before the next one is asked, so a typo fails
+immediately, not at the end:
+
+- **Mirror URL** (`https://host/path`) → probed for the `asgard-mirror`
+  marker (`✓ working mirror`).
+- **SSH login / remote path / key path** → SSH auth + write are probed and
+  the key is copied to `config/<name>.key` (0600) (`✓ ssh access + write`).
+- **Tier-1 GPG private key path** → imported and validated by verifying the
+  mirror's *signed coord-head* (`✓ gpg key matches the mirror`). You supply
+  the **private** key (copied off the origin) so this peer can publish; the
+  wizard installs it into the signing keyring itself.
+- **Builder identity** (defaults to the hostname), then `mirror add` +
+  `mirror builders register`, then **build vs distribution** mode.
+- **Snapshot pin** — a peer adopts the mirror's pin automatically during
+  registration.
 
 The result is recorded in **`config/local.conf`** — an **untracked,
 machine-local** sidecar holding `[Local] Mode/Role/SetupComplete` and a
