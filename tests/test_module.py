@@ -15846,17 +15846,16 @@ def test_install_signing_keyring_warns_on_cp_failure():
 
 # ─── CONF-02: network apt source (sources.list.d/athena.list) ────────────────
 
-def _stub_chroot_mixin_for_apt_source(*, apt_source_url, build_codename='thor',
+def _stub_chroot_mixin_for_apt_source(*, build_codename='thor',
                                        dir_config=None):
     """_ChrootMixin wired only enough to exercise _write_athena_apt_sources:
-    a _config carrying apt_source_url + build_codename (and dir_config so
-    the MIRROR-01 mirror lookup can find state files), and a recording
-    stub in place of _write_chroot_file."""
+    a _config carrying build_codename (and dir_config so the MIRROR-01
+    mirror lookup can find state files), and a recording stub in place
+    of _write_chroot_file."""
     import chroot
     class _Cfg:
         pass
     cfg = _Cfg()
-    cfg.apt_source_url = apt_source_url
     cfg.build_codename = build_codename
     # MIRROR-01 Phase 5: mirror.list_mirrors walks config.dir_config for
     # mirror.<name>.state files.  Default to a fresh tmpdir so tests that
@@ -15877,12 +15876,11 @@ def test_write_athena_apt_sources_emits_one_file_per_mirror():
     """MIRROR-01 Phase 6: with two ssh:// mirrors registered (each
     carrying a derived `public_url`), the chroot gets one
     /etc/apt/sources.list.d/athena-<name>.list per mirror, signed-by
-    the project keyring, AND the legacy
-    /etc/apt/sources.list.d/athena.list is NOT written."""
+    the project keyring, and no aggregate
+    /etc/apt/sources.list.d/athena.list is written."""
     import mirror as _mirror
     with tempfile.TemporaryDirectory() as _cfg_dir:
         inst, writes = _stub_chroot_mixin_for_apt_source(
-            apt_source_url='https://legacy.example.org/asgard',  # ignored
             build_codename='thor',
             dir_config=_cfg_dir,
         )
@@ -15906,7 +15904,7 @@ def test_write_athena_apt_sources_emits_one_file_per_mirror():
             '/etc/apt/sources.list.d/athena-alpha.list',
             '/etc/apt/sources.list.d/athena-beta.list',
         ], _paths
-        # Legacy single file is NOT produced when mirrors are registered.
+        # No aggregate single file — strictly one file per mirror.
         assert '/etc/apt/sources.list.d/athena.list' not in _paths
         # Each line carries the signed-by pin + public_url + codename + main.
         for _path, _content in writes:
@@ -15925,10 +15923,10 @@ def test_write_athena_apt_sources_skips_ssh_url_without_public_url():
     import mirror as _mirror
     with tempfile.TemporaryDirectory() as _cfg_dir:
         inst, writes = _stub_chroot_mixin_for_apt_source(
-            apt_source_url='', build_codename='thor', dir_config=_cfg_dir)
-        # Legacy-shaped ssh mirror — no public_url derived.
+            build_codename='thor', dir_config=_cfg_dir)
+        # ssh mirror with no public_url recorded — apt can't read it.
         _mirror.add_mirror(
-            inst._config, name='legacy',
+            inst._config, name='bare',
             url='ssh://ubuntu@host/srv/asgard', seed_pin='')
         # New-shape ssh mirror — carries the derived public_url.
         _mirror.add_mirror(
@@ -15940,7 +15938,7 @@ def test_write_athena_apt_sources_skips_ssh_url_without_public_url():
             seed_pin='')
         inst._write_athena_apt_sources()
         _paths = [_p for _p, _ in writes]
-        # legacy ssh-only mirror skipped; new-shape mirror written.
+        # public_url-less ssh mirror skipped; the other mirror written.
         assert _paths == ['/etc/apt/sources.list.d/athena-primary.list'], _paths
         assert 'http://host2/asgard thor main' in writes[0][1]
 
@@ -15951,7 +15949,7 @@ def test_write_athena_apt_sources_accepts_file_scheme():
     import mirror as _mirror
     with tempfile.TemporaryDirectory() as _cfg_dir:
         inst, writes = _stub_chroot_mixin_for_apt_source(
-            apt_source_url='', build_codename='thor', dir_config=_cfg_dir)
+            build_codename='thor', dir_config=_cfg_dir)
         _mirror.add_mirror(
             inst._config, name='local',
             url='file:///srv/asgard', seed_pin='')
@@ -15962,11 +15960,10 @@ def test_write_athena_apt_sources_accepts_file_scheme():
 
 
 
-def test_write_athena_apt_sources_noop_when_no_mirrors_and_no_url():
-    """No mirrors AND no AptSourceURL → no apt source file (target relies
-    on /cdrom/pool added at install time)."""
-    inst, writes = _stub_chroot_mixin_for_apt_source(
-        apt_source_url='', build_codename='thor')
+def test_write_athena_apt_sources_noop_when_no_mirrors():
+    """No mirrors registered → no apt source file (target relies on
+    /cdrom/pool added at install time)."""
+    inst, writes = _stub_chroot_mixin_for_apt_source(build_codename='thor')
     inst._write_athena_apt_sources()
     assert writes == []
 
@@ -15976,8 +15973,8 @@ def test_live_chroot_sources_list_is_self_contained():
     /etc/apt/sources.list must NOT carry active `deb` lines pointing
     at upstream mirrors.  The header is a comment-only template;
     reference lines are commented; the network apt-source path goes
-    through sources.list.d/athena.list when [Repo] AptSourceURL is
-    set.
+    through per-mirror sources.list.d/athena-<name>.list files written
+    from the registered-mirror state.
 
     Caught 2026-06-01 live ISO test: every cfg.mirrors entry was
     being written as an active `deb` line → apt-update on the
@@ -43070,7 +43067,7 @@ def main() -> int:
         test_write_athena_apt_sources_emits_one_file_per_mirror,
         test_write_athena_apt_sources_skips_ssh_url_without_public_url,
         test_write_athena_apt_sources_accepts_file_scheme,
-        test_write_athena_apt_sources_noop_when_no_mirrors_and_no_url,
+        test_write_athena_apt_sources_noop_when_no_mirrors,
         test_live_chroot_sources_list_is_self_contained,
         test_generate_system_configs_machine_id_stays_empty_for_first_boot,
         # UX-05 Path B: headless CLI backend
