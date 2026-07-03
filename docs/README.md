@@ -27,8 +27,7 @@ New here? Read [config.md](config.md) to shape your own distribution, and keep [
 | Doc | What it's for |
 |---|---|
 | [patching.md](patching.md) | Patching upstream source at the source, pre-install, and post-install stages. |
-| [mirror-setup.md](mirror-setup.md) | Setting up and publishing to mirrors, including multi-builder federation. |
-| [mirror-host-layout.md](mirror-host-layout.md) | What lives on a mirror host — the directory tree, who writes it, and what's safe to change by hand. |
+| [mirror-setup.md](mirror-setup.md) | Everything about publish mirrors: what lives on the host, setup and registration, publishing, federation, audit and recovery. |
 | [remote-build.md](remote-build.md) | Spreading builds across remote machines, plus the local build mirror. |
 | [release.md](release.md) | The checklist for cutting a numbered release. |
 | [cve-tracking.md](cve-tracking.md) | Tracking security advisories against what you've built. |
