@@ -16,7 +16,7 @@ New here? Read [config.md](config.md) to shape your own distribution, and keep [
 | Doc | What it's for |
 |---|---|
 | [architecture.md](architecture.md) | How the build pipeline fits together, stage by stage. |
-| [bump-mechanics.md](bump-mechanics.md) | The version-numbering rules — what gets bumped, and when. |
+| [versioning-mechanics.md](versioning-mechanics.md) | The version-numbering rules — what gets translated, patched and bumped, and when; includes the sibling-constraint deep dive. |
 | [branding-methodology.md](branding-methodology.md) | How your identity (name, codename, logos) is applied and enforced. |
 | [collision-gate.md](collision-gate.md) | How Athena stops an upstream version from silently overriding one of your forks. |
 | [security.md](security.md) | The security model — what gets signed and verified, and how. |
@@ -27,7 +27,7 @@ New here? Read [config.md](config.md) to shape your own distribution, and keep [
 | Doc | What it's for |
 |---|---|
 | [patching.md](patching.md) | Patching upstream source at the source, pre-install, and post-install stages. |
-| [mirror-setup.md](mirror-setup.md) | Setting up and publishing to mirrors, including multi-builder federation. |
+| [mirror-setup.md](mirror-setup.md) | Everything about publish mirrors: what lives on the host, setup and registration, publishing, federation, audit and recovery. |
 | [remote-build.md](remote-build.md) | Spreading builds across remote machines, plus the local build mirror. |
 | [release.md](release.md) | The checklist for cutting a numbered release. |
 | [cve-tracking.md](cve-tracking.md) | Tracking security advisories against what you've built. |
@@ -52,6 +52,5 @@ New here? Read [config.md](config.md) to shape your own distribution, and keep [
 | Doc | What it's for |
 |---|---|
 | [pseudocode.md](pseudocode.md) | A natural-English walkthrough of every module. |
-| [strip-nmu-sibling-constraint-idiom.md](strip-nmu-sibling-constraint-idiom.md) | Deep dive: how upstream version suffixes are normalized across sibling packages. |
 | [plans/](plans/) | Design documents for in-progress and upcoming features. |
 | [diagrams/](diagrams/) | The build state-machine diagram (`build-fsm`). |
