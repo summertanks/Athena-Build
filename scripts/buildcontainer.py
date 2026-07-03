@@ -2183,8 +2183,8 @@ class BuildContainer:
             per Debian Policy §7.5 via
             `repo_audit._rel_satisfied_in_scope`.
           - When `repo_state` is None, falls back to
-            `self.cache.package_hashtable` / `udeb_hashtable` (legacy
-            path).  Skipped when both are None (no scope to verify
+            `self.cache.package_hashtable` / `udeb_hashtable` (cache
+            scope).  Skipped when both are None (no scope to verify
             against; returns 'ok-nocache').
 
         Returns (True, 'ok') on full pass; (False, diagnostic) on
@@ -2262,8 +2262,9 @@ class BuildContainer:
                         return (False, f'unsatisfied-{_field}:{_names}')
             return (True, 'ok')
 
-        # Legacy cache-based path — preserved for callers that don't
-        # have a RepoState handy (test fixtures + back-compat).
+        # Cache-scope fallback — dep availability checked against the
+        # apt cache when no RepoState is supplied.  Production passes
+        # repo_state (authoritative); unit fixtures exercise this scope.
         if self.cache is None:
             return (True, 'ok-nocache')
 
@@ -2307,9 +2308,8 @@ class BuildContainer:
         version constraint.
 
         lookup_table picks the namespace: pass cache.package_hashtable
-        for .deb deps, cache.udeb_hashtable for .udeb deps.  None →
-        fall back to package_hashtable (backwards-compat for the few
-        callers that don't specify).
+        for .deb deps, cache.udeb_hashtable for .udeb deps.  None
+        defaults to package_hashtable.
         """
         if not self.cache:
             return True

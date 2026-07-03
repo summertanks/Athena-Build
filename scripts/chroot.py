@@ -52,8 +52,8 @@ class _ChrootMixin:
     strip_build_version: Callable[[str], str]
     normalize_repo_filename: Callable[[str], str]
 
-    def build_chroot(self, debug: bool = False,
-                     install_set: 'Optional[set]' = None,
+    def build_chroot(self, debug: bool = False, *,
+                     install_set: set,
                      gate_complete: bool = True) -> bool:
         """Install all selected packages into the chroot in dependency order.
 
@@ -70,11 +70,10 @@ class _ChrootMixin:
             debug: When True, generate_system_configs() also writes a
                 journald drop-in to forward all entries to /dev/console.
                 Off by default — opt in for serial-debug builds only.
-            install_set: — explicit canonical package set for
-                THIS surface (a surfaces.surface_closure result).  When
-                given it replaces the legacy internal exclusion math in
-                _compute_install_batches; None keeps the historic
-                "[base]-only" behavior.
+            install_set: REQUIRED — explicit canonical package set for
+                THIS surface (a surfaces.surface_closure result).  The
+                surface closure is the sole authority on what installs;
+                every caller composes its own set (SURFACES-01).
 
         Returns:
             True on completion, False on a fatal error during install
@@ -88,8 +87,7 @@ class _ChrootMixin:
         all_pkgs = [p for p in selected if p == selected[p]['Package']]
         logger.info(
             f"build_chroot: {self._dir_chroot} ← {len(all_pkgs)} pkgs "
-            f"(debug={debug}, install_set="
-            f"{len(install_set) if install_set is not None else 'legacy'})"
+            f"(debug={debug}, install_set={len(install_set)})"
         )
 
         # gcc-NN-base bootstrap: libc6 → libgcc-s1 → gcc-NN-base forms a
@@ -145,8 +143,7 @@ class _ChrootMixin:
             # Batch 0: libc circular-dep bootstrap.  Subprocess output
             # from each batch is now routed through logger.debug — the
             # file handler attached by setup_file_logging() captures it
-            # alongside INFO/WARNING/ERROR records, so the unified run
-            # log replaces the legacy chroot-install.log.
+            # alongside INFO/WARNING/ERROR records in the unified run log.
             tui.console.print(f"Batch 0 (bootstrap): {libc_seed}")
             logger.info(f"batch 0 (libc bootstrap): {libc_seed}")
             self._unpack_packages(libc_seed)
@@ -735,55 +732,23 @@ class _ChrootMixin:
         this always returns a batch list.
         """
         selected = self._dependencytree.selected_pkgs
-        # Depth-1 Recommends pulled into selected_pkgs for the repo (and
-        # downloaded by source_download) but NOT meant for chroot install
-        # — filter them out here so the live ISO stays minimal.  Empty
-        # set when [Build] IncludeRecommends is off, in which case
-        # the filter is a no-op.
-        _extras = self._dependencytree.extras_pkg_names
-
-        # Non-[base] pkg.list groups — packages defined in named
-        # groups other than [base] ship in /cdrom/pool but are NOT
-        # installed in the live chroot (live = [base] only).  The
-        # installer's tasksel step apt-installs operator-chosen groups
-        # at install time.  Empty set when pkg.list is flat (legacy
-        # mode — entire file becomes implicit [base]).
-        _group_extras: set = getattr(
-            self._dependencytree, 'pkg_group_extras_pkg_names', set())
-
-        # Pool extras — `config/pool.list` packages that ship in the
-        # cdrom pool but are never installed in any chroot.  Same
-        # exclusion shape as group extras.
-        _pool_extras: set = getattr(
-            self._dependencytree, 'pool_extras_pkg_names', set())
-
         # Restrict the graph to canonical (non-virtual) names that are NOT
-        # part of the libc seed AND NOT in any of the exclusion sets
-        # above.  Aliases would inflate the graph with redundant nodes
-        # and Kahn would never be able to retire them.
+        # part of the libc seed.  Aliases would inflate the graph with
+        # redundant nodes and Kahn would never be able to retire them.
         #
-        # when `install_set` is given (a surfaces.
-        # surface_closure result — e.g. live = closure(base ∪ gnome-desktop
-        # ∪ live.list, +extras)), it REPLACES the legacy exclusion math:
-        # the graph is exactly canonical ∩ install_set − libc_seed.  The
-        # closure already decided extras/group membership per surface, so
-        # the historic filters must not re-subtract from it.
-        if install_set is not None:
-            all_pkgs = [
-                p for p in selected
-                if p == selected[p]['Package']
-                and p in install_set
-                and p not in libc_seed_set
-            ]
-        else:
-            all_pkgs = [
-                p for p in selected
-                if p == selected[p]['Package']
-                and p not in libc_seed_set
-                and p not in _extras
-                and p not in _group_extras
-                and p not in _pool_extras
-            ]
+        # `install_set` (a surfaces.surface_closure result — e.g. live =
+        # closure(base ∪ gnome-desktop ∪ live.list, +extras)) scopes the
+        # graph to exactly canonical ∩ install_set − libc_seed.  The
+        # closure already decided extras/group membership per surface —
+        # nothing is re-subtracted here.  None (unit tests only; every
+        # production caller passes a surface) leaves the graph
+        # unrestricted over the selected set.
+        all_pkgs = [
+            p for p in selected
+            if p == selected[p]['Package']
+            and p not in libc_seed_set
+            and (install_set is None or p in install_set)
+        ]
         in_scope = set(all_pkgs)
 
         # deps[pkg] = set of canonical names that pkg depends on AND are

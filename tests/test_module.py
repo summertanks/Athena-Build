@@ -2316,10 +2316,6 @@ class _StubDepTree:
         self.selected_pkgs = {
             spec[0]: _Pkg(*spec) for spec in pkg_specs
         }
-        # chroot install filter reads dep_tree.extras_pkg_names;
-        # default empty so existing tests behave as before.
-        self.extras_pkg_names: set = set()
-        self.extras_src_names: set = set()
 
 
 class _StubConsole:
@@ -2629,7 +2625,8 @@ def test_sta37_build_chroot_gates_on_incomplete_set():
         chroot_module.subprocess = types.SimpleNamespace(
             run=lambda *a, **k: _QProc())
         try:
-            return bs.build_chroot(gate_complete=gate_complete)
+            return bs.build_chroot(install_set={'A', 'B'},
+                                   gate_complete=gate_complete)
         finally:
             chroot_module.subprocess = _orig
 
@@ -2726,7 +2723,7 @@ def test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds():
     chroot_module.subprocess = types.SimpleNamespace(
         run=lambda *a, **k: _QProc())
     try:
-        _ok = bs.build_chroot()
+        _ok = bs.build_chroot(install_set={'A', 'B', 'C'})
     finally:
         chroot_module.subprocess = _orig_subprocess
 
@@ -5765,28 +5762,6 @@ def test_iso_installer_select_pool_files_uses_debian_version_order():
         _kept = [_fn for _, _fn in _kept]
         assert _kept == ['pkg_6.1.170-10_amd64.deb'], _kept
         assert _skipped == 1
-
-
-def test_iso_installer_select_pool_files_legacy_mode_keeps_everything():
-    """When deb_whitelist is None, the helper keeps every regular
-    file — preserves the previous blanket-copy behaviour for callers
-    that don't have a dep tree."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _select_pool_files
-    with tempfile.TemporaryDirectory() as _repo:
-        for _name in (
-            'foo_1_amd64.deb', 'bar-dbgsym_1_amd64.deb',
-            'baz_1_amd64.udeb', 'random.txt',
-        ):
-            with open(os.path.join(_repo, _name), 'w') as fh:
-                fh.write('')
-        _kept, _skipped = _select_pool_files([_repo], deb_whitelist=None)
-        _kept = [_fn for _, _fn in _kept]
-        assert sorted(_kept) == [
-            'bar-dbgsym_1_amd64.deb', 'baz_1_amd64.udeb',
-            'foo_1_amd64.deb', 'random.txt',
-        ], _kept
 
 
 def test_iso_installer_base_include_and_pool_filter_agree():
@@ -14424,23 +14399,6 @@ def test_print_udebs_lists_udeb_closure_when_tree_populated():
     assert '1.136' in joined
 
 
-def test_compute_install_batches_excludes_extras_pkg_names():
-    """chroot install path skips packages in
-    dependencytree.extras_pkg_names so they never enter a batch."""
-    bs = _bare_buildsystem_with_deps([
-        ('foo', [], []),
-        ('bar', [], ['foo']),       # bar depends on foo
-        ('extra-y', [], ['foo']),   # an extra that also depends on foo
-    ])
-    bs._dependencytree.extras_pkg_names = {'extra-y'}
-    batches = bs._compute_install_batches(libc_seed_set=set())
-    _all_named = {p for batch_pkgs, _force in batches for p in batch_pkgs}
-    assert 'foo' in _all_named
-    assert 'bar' in _all_named
-    assert 'extra-y' not in _all_named, \
-        ": extras must be filtered out of install batches"
-
-
 def test_verify_dep_resolution_skips_extras():
     """REGRESSION: _verify_dep_resolution walked canonical_pkgs
     including extras and demanded their (often-not-in-our-install-set)
@@ -17094,10 +17052,11 @@ def test_tier3_misc_source_pins():
         arch_filter), '#21'
     # #159: next-offset is frm + bytes read, not the stale size
     assert 'frm + len(_data)' in inspect.getsource(remote_agent), '#159'
-    # #133: exclude_names applied on the legacy (deb_whitelist is None) path
+    # #133: fork-superseded exclusion applies to the pool selection
+    # (the whitelist-less blanket-copy path it originally guarded was
+    # removed — deb_whitelist is required now)
     _isrc = inspect.getsource(iso_installer)
-    assert ('if deb_whitelist is None:' in _isrc
-            and '_excl = exclude_names or set()' in _isrc), '#133'
+    assert '_exclude = exclude_names or set()' in _isrc, '#133'
     # #95: drift requires the binary to actually be present in the pool
     assert '_latest is not None and _fn != _latest' in inspect.getsource(
         _pub), '#95'
@@ -20945,7 +20904,7 @@ def test_verify_pkg_artifact_repo_state_overrides_cache_resolution():
         _ok, _why = _bc.verify_pkg_artifact(_path, 'foo_1.0_amd64.deb')
         assert not _ok and 'unsatisfied-Depends' in _why, (
             f"cache-only path should over-report; got ({_ok}, {_why}).  "
-            "If this passes, the legacy cache-resolution path is doing "
+            "If this passes, the cache-resolution path is doing "
             "something other than the documented strict-equal lookup."
         )
 
@@ -40542,9 +40501,10 @@ def test_buildconfig_surface_group_knobs():
 
 
 def test_compute_install_batches_install_set_param():
-    """SURFACES-01 Chunk 3: install_set REPLACES the legacy exclusion math
-    (a group-extras member inside the set IS installed; one outside is not);
-    None keeps the historic [base]-only behavior."""
+    """SURFACES-01: the surface closure (install_set) is the sole scoping
+    authority — a member inside the set IS installed; one outside is not.
+    None (unit-test convenience; every production caller passes a surface)
+    leaves the graph unrestricted over the selected set."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import types
     from chroot import _ChrootMixin
@@ -40553,19 +40513,14 @@ def test_compute_install_batches_install_set_param():
         'gnome-b':  _SurfPkg('gnome-b', depends=['base-a']),
         'pool-c':   _SurfPkg('pool-c'),
     }
-    _dt = types.SimpleNamespace(
-        selected_pkgs=_pkgs,
-        extras_pkg_names=set(),
-        pkg_group_extras_pkg_names={'gnome-b'},
-        pool_extras_pkg_names={'pool-c'},
-    )
+    _dt = types.SimpleNamespace(selected_pkgs=_pkgs)
     _mix = _ChrootMixin.__new__(_ChrootMixin)
     _mix._dependencytree = _dt
-    # legacy (None): group/pool extras excluded → base-a only
-    _legacy = [p for batch, _f in
-               _mix._compute_install_batches(set()) for p in batch]
-    assert _legacy == ['base-a'], _legacy
-    # surface set including the gnome member: installed, pool-c still out
+    # None: unrestricted — every canonical selected package batches
+    _all = [p for batch, _f in
+            _mix._compute_install_batches(set()) for p in batch]
+    assert set(_all) == {'base-a', 'gnome-b', 'pool-c'}, _all
+    # surface set: pool-c outside the closure stays out
     _surface = {'base-a', 'gnome-b'}
     _batches = _mix._compute_install_batches(set(), install_set=_surface)
     _flat = [p for batch, _f in _batches for p in batch]
@@ -42719,7 +42674,6 @@ def main() -> int:
         test_iso_installer_select_pool_files_filters_by_whitelist,
         test_iso_installer_select_pool_files_keeps_highest_version_per_name,
         test_iso_installer_select_pool_files_uses_debian_version_order,
-        test_iso_installer_select_pool_files_legacy_mode_keeps_everything,
         test_iso_installer_base_include_and_pool_filter_agree,
         test_iso_installer_build_iso_installer_passes_pool_whitelist,
         # COMP-02 phase C — sign Release + ship + install pubkey
@@ -42982,7 +42936,6 @@ def main() -> int:
         test_dependency_tree_constructor_accepts_auto_pick_flag,
         test_print_udebs_handles_no_udeb_tree_gracefully,
         test_print_udebs_lists_udeb_closure_when_tree_populated,
-        test_compute_install_batches_excludes_extras_pkg_names,
         test_verify_dep_resolution_skips_extras,
         test_verify_dep_resolution_still_catches_real_violations,
         test_sta24_dep_target_names_extracts_all_fields_names_only,

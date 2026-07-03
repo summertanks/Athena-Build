@@ -72,13 +72,14 @@ def build_installer_iso(
     version: str = '0.1',
     snapshot: str = '',
     base_include_pkgs: Optional[list] = None,
-    deb_whitelist: 'Optional[set[str]]' = None,
+    *,
+    deb_whitelist: 'set[str]',
     signing_homedir: Optional[str] = None,
     signing_pubkey_path: Optional[str] = None,
     pkg_groups: Optional['dict[str, set]'] = None,
     group_meta: Optional['dict[str, dict[str, str]]'] = None,
     expected_kernel_pkg: Optional[str] = None,
-    dir_repo_main_udeb: Optional[str] = None,   # D
+    dir_repo_main_udeb: str,                    # D
     exclude_names: Optional[set] = None,        # fork-superseded upstream bins
     dir_repo_extras: Optional['list[str]'] = None,  # non-main component dirs
     audit_identity_scan: bool = True,            # [Audit] IdentityScan
@@ -95,13 +96,12 @@ def build_installer_iso(
                               binary-<arch>/) — the dir holding regular
                               .debs.  Used for kernel lookup + as the
                               first source dir for pool staging.
-        dir_repo_main_udeb:   Path to repo/dists/<codename>/main/
-                              debian-installer/binary-<arch>/ — udebs
-                              live here post. Optional for
-                              backwards-compat; when omitted, udebs are
-                              not staged to the ISO pool (legacy code
-                              expected them colocated with .debs in
-                              repo/main/, which no longer holds).
+        dir_repo_main_udeb:   REQUIRED — path to repo/dists/<codename>/
+                              main/debian-installer/binary-<arch>/,
+                              where the udebs live in the unified
+                              layout.  The installer ramdisk is a pure
+                              udeb closure; an ISO staged without this
+                              dir would have no udebs in its pool.
         dir_image:            Output directory for the ISO.
         installer_dir:        Path to the installer/ data-layer tree
                               (grub.cfg + future boot assets live here).
@@ -169,9 +169,7 @@ def build_installer_iso(
     # Pass both .deb (binary-<arch>/) and .udeb (debian-installer/
     # binary-<arch>/) source dirs so the staged pool ends up flat as
     # the apt-cdrom logic on the target expects.
-    _pool_sources = [dir_repo]
-    if dir_repo_main_udeb is not None:
-        _pool_sources.append(dir_repo_main_udeb)
+    _pool_sources = [dir_repo, dir_repo_main_udeb]
     # Non-main component dirs (contrib/non-free/non-free-firmware) hold
     # tunneled binaries that must ship on the cdrom too — without them
     # finish-install.d/08hw-detect's apt-install of microcode/firmware
@@ -830,7 +828,7 @@ def _debian_version_cmp(a: str, b: str) -> int:
 
 def _select_pool_files(
     source_dirs: 'list[str]',
-    deb_whitelist: 'Optional[set[str]]',
+    deb_whitelist: 'set[str]',
     exclude_names: 'Optional[set[str]]' = None,
 ) -> 'tuple[list[tuple[str, str]], int]':
     """Decide which files across `source_dirs` ship on the installer ISO.
@@ -842,16 +840,14 @@ def _select_pool_files(
     binary-<arch>/); the ISO's /cdrom/pool/ is FLAT, so we walk
     multiple sources and merge into one staging tree.
 
-    `deb_whitelist` is one of:
-      - set/iterable of canonical package names: keep .deb iff its
-        package name is in the set AND it's not a dbgsym variant.
-        When repo/ holds multiple versions of the same package (our
-        source-build pipeline can leave older binaries behind), only
-        the highest version per name survives — measured by Debian
-        version-compare semantics.
-      - None: legacy blanket-copy — every regular file kept.
+    `deb_whitelist` is the set of canonical package names to ship:
+    keep a .deb iff its package name is in the set AND it's not a
+    dbgsym variant.  When repo/ holds multiple versions of the same
+    package (our source-build pipeline can leave older binaries
+    behind), only the highest version per name survives — measured by
+    Debian version-compare semantics.
 
-    Rules when whitelist is a set:
+    Rules:
       - Every `.udeb` is kept (anna may fetch any of them at install
         time — see docs/plans/comp-02-robust-build.md for the
         udeb-pool analysis).
@@ -885,16 +881,6 @@ def _select_pool_files(
                     _all.append((_src_dir, _name))
         except OSError:
             continue
-
-    if deb_whitelist is None:
-        # Apply the supersede-exclusion on the legacy path too — otherwise a
-        # fork-superseded udeb (e.g. apt-setup-udeb) rides along on the ISO
-        # when no whitelist is supplied.
-        _excl = exclude_names or set()
-        if _excl:
-            _all = [(_d, _n) for _d, _n in _all
-                    if _n.split('_', 1)[0] not in _excl]
-        return _all, 0
 
     # Binaries a SHIPPED fork supersedes (Conflicts/Replaces) — drop them so an
     # upstream udeb (e.g. apt-setup-udeb superseded by athena-setup-udeb) can't
@@ -939,7 +925,7 @@ def _select_pool_files(
 
 def _stage_pool(
     source_dirs: 'list[str]', staging: str, password: str,
-    deb_whitelist: 'Optional[set[str]]' = None,
+    deb_whitelist: 'set[str]',
     exclude_names: 'Optional[set[str]]' = None,
 ) -> bool:
     """Copy a filtered subset of source_dirs → staging/pool/ (FLAT).
@@ -953,13 +939,12 @@ def _stage_pool(
     The installer reads from /cdrom/pool at runtime (matches the locked
     decision: file:///cdrom apt source, no network repo fallback).
 
-    When `deb_whitelist` is provided (the normal case from
-    cmd_build_iso_installer), only packages the target system will
-    actually install plus their Recommends and every .udeb get shipped.
-    See `_select_pool_files` for the rules.  Without filtering, repo/
-    can be 5+ GB containing dbgsym packages, unused kernel flavors
-    (-rt, -cloud), old ABIs, live-exclusive packages — all dead weight
-    on an installer ISO.
+    `deb_whitelist` scopes the pool: only packages the target system
+    will actually install plus their Recommends and every .udeb get
+    shipped.  See `_select_pool_files` for the rules.  Without the
+    filter, repo/ can be 5+ GB containing dbgsym packages, unused
+    kernel flavors (-rt, -cloud), old ABIs, live-exclusive packages —
+    all dead weight on an installer ISO.
 
     Uses cp -a in batches (not rsync — caught 2026-05-12: rsync
     isn't always on the host): handles arbitrary file counts
@@ -968,7 +953,7 @@ def _stage_pool(
     """
     logger.info(
         f"stage pool: scanning {len(source_dirs)} source dir(s); "
-        f"whitelist={'on' if deb_whitelist else 'off'}, "
+        f"whitelist={len(deb_whitelist)}, "
         f"exclude={len(exclude_names) if exclude_names else 0}"
     )
     _dst = os.path.join(staging, 'pool')
@@ -984,7 +969,7 @@ def _stage_pool(
         )
         logger.error(
             f"_stage_pool: 0 files selected from {source_dirs} "
-            f"(whitelist size {len(deb_whitelist) if deb_whitelist else 'None'})"
+            f"(whitelist size {len(deb_whitelist)})"
         )
         return False
     # Estimate the kept-set size for the operator-facing log line.
@@ -995,16 +980,10 @@ def _stage_pool(
         except OSError:
             pass
     _mb = _bytes // (2 ** 20)
-    if deb_whitelist is not None:
-        tui.console.print(
-            f"Copying apt pool ({_mb} MB, {len(_kept)} files; "
-            f"{_skipped} filtered out) — may take a few minutes..."
-        )
-    else:
-        tui.console.print(
-            f"Copying apt pool ({_mb} MB, {len(_kept)} files) — "
-            "may take a few minutes..."
-        )
+    tui.console.print(
+        f"Copying apt pool ({_mb} MB, {len(_kept)} files; "
+        f"{_skipped} filtered out) — may take a few minutes..."
+    )
     # Ensure the destination exists.  The previous blanket `cp -a
     # repo/. pool` created `pool/` implicitly as part of the directory
     # copy; the new file-by-file form with `-t pool` requires the
