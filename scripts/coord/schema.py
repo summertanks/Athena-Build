@@ -623,14 +623,3 @@ def neighbour_urls(items: 'list') -> 'list':
     URLs.  The federation gate uses this for set comparison against
     local config's mirror URLs."""
     return [_r['url'] for _r in canonicalize_neighbour_records(items)]
-
-
-def canonicalize_neighbours(urls: 'list') -> 'list':
-    """Back-compat alias — v2 callers that expect a ``list[str]``
-    canonical URL list keep working unchanged.  Internally just the
-    URL projection of `canonicalize_neighbour_records`.
-
-    New code should call `canonicalize_neighbour_records` (when it
-    needs the full dict shape) or `neighbour_urls` (when it just needs
-    the URL set, e.g. federation-gate set-diff)."""
-    return neighbour_urls(urls)

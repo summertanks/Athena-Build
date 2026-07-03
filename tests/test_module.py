@@ -22033,8 +22033,8 @@ def test_fed01_ledger_stranded_claims_detector():
 def test_fed03d_builder_bindings_and_enforcement():
     """FED-03 D: build_builder_bindings + strict enforce_bindings —
     a swapped/injected pubkey or one absent from the signed map is rejected;
-    verified_keyring_from_head treats a head with no `builders` as
-    not-migrated (rejects all)."""
+    verified_keyring_from_head rejects ALL keys when the head carries no
+    `builders` map (keys are never trusted without signed bindings)."""
     import hashlib as _hl
     import coord.identity as _id
     with tempfile.TemporaryDirectory() as _d:
@@ -22058,19 +22058,18 @@ def test_fed03d_builder_bindings_and_enforcement():
         # a builder absent from the signed map → dropped
         _v, _dropped = _id.enforce_bindings({'carol': _bob}, _bindings)
         assert not _v and 'carol' in _dropped
-        # head with no `builders` → not migrated, ALL dropped
-        _vk, _dr, _has = _id.verified_keyring_from_head(
+        # head with no `builders` map → ALL dropped (strict, no bare trust)
+        _vk, _dr = _id.verified_keyring_from_head(
             {'bob': _bob}, {'inrelease_sha256': 'x'})
-        assert not _vk and _has is False and 'bob' in _dr
+        assert not _vk and 'bob' in _dr
+        assert 'no signed builder bindings' in _dr['bob']
         # head WITH bindings → enforced
-        _vk, _dr, _has = _id.verified_keyring_from_head(
+        _vk, _dr = _id.verified_keyring_from_head(
             {'bob': _bob}, {'builders': _bindings})
-        assert set(_vk) == {'bob'} and _has is True
+        assert set(_vk) == {'bob'} and not _dr
         # summaries
-        assert 'republish to migrate' in _id.binding_drop_summary(
-            {'a': 'r'}, False)
-        assert 'not matching' in _id.binding_drop_summary({'a': 'r'}, True)
-        assert _id.binding_drop_summary({}, True) == ''
+        assert 'not matching' in _id.binding_drop_summary({'a': 'r'})
+        assert _id.binding_drop_summary({}) == ''
 
 
 def test_fed03d_new_coord_head_carries_builders():
@@ -28923,13 +28922,8 @@ def test_snapshot_state_roundtrip_and_resolve_precedence():
             'current': '20260601T000000Z'}
         # state.current wins over the explicit [Snapshot] Timestamp
         assert utils.resolve_snapshot_timestamp(_cfg) == '20260601T000000Z'
-        # Legacy kwargs accepted for signature compat but DROPPED on
-        # write — only `current` persists; base/published/external
-        # don't drive live code anymore (per-mirror state files own
-        # publish-target pins).
-        utils.write_snapshot_state(_cfg, base='20260514T083402Z',
-                                   published='20260301T000000Z',
-                                   external=True)
+        # Only `current` persists — per-mirror state files own the
+        # publish-target pins.
         _st = utils.read_snapshot_state(_cfg)
         assert _st == {'current': '20260601T000000Z'}, _st
         # the state file is under config/, not cache/
@@ -33660,7 +33654,8 @@ def test_canonical_config_round_trip_and_verify():
             _coord, '', _p['pkg'], _p['pool'])
         assert not _ok3 and 'no config_sha256' in _d3 and _pl3 is None
 
-        # v1 back-compat: an old-shape manifest still applies pkg+pool.
+        # An unsupported (pre-v2) manifest shape is REFUSED — the peer's
+        # lists stay untouched (pre-release policy: no legacy formats).
         import json as _json
         import hashlib as _hl
         _v1 = _json.dumps({'v': 1, 'pkg.list': 'V1PKG\n',
@@ -33671,9 +33666,9 @@ def test_canonical_config_round_trip_and_verify():
         _v1sha = _hl.sha256(_v1).hexdigest()
         _ok4, _d4, _pl4 = _cm.apply_canonical_config(
             _coord, _v1sha, _p['pkg'], _p['pool'])
-        assert _ok4 and _pl4 is None and 'v1' in _d4
+        assert not _ok4 and _pl4 is None and 'unsupported schema' in _d4
         with open(_p['pkg']) as _f:
-            assert _f.read() == 'V1PKG\n'
+            assert _f.read() == 'KEEP\n'      # untouched from the case above
 
 
 def test_apply_canonical_config_is_all_or_nothing():
@@ -36568,13 +36563,12 @@ def _coord_schema_v2_modules():
     return _s, _r
 
 
-def test_canonicalize_neighbours_lowercases_strips_slash_sorts_dedups():
+def test_neighbour_urls_lowercases_strips_slash_sorts_dedups():
     """Canonical form: lowercase + trailing-slash-strip + sort + dedup.
     Used by both sides of the federation gate so trivial differences
-    (case, slash, order) don't cause false BLOCK signals.  v2
-    back-compat — `canonicalize_neighbours` returns flat list[str]."""
+    (case, slash, order) don't cause false BLOCK signals."""
     _s, _ = _coord_schema_v2_modules()
-    _got = _s.canonicalize_neighbours([
+    _got = _s.neighbour_urls([
         'SSH://USER@HOST/path/',
         'file:///srv/asgard',
         'ssh://user@host/path',       # dup after lowercase + slash strip
@@ -36622,22 +36616,6 @@ def test_neighbour_urls_projects_to_flat_str_list():
         'ssh://A/p',                                          # v2 string
     ])
     assert _got == ['ssh://a/p', 'ssh://b/p']
-
-
-def test_canonicalize_neighbours_is_alias_for_url_projection():
-    """v2 back-compat: every old caller of `canonicalize_neighbours`
-    keeps getting a flat list[str] even when fed v3 dicts.  This is the
-    plumbing that lets existing federation-gate code keep working."""
-    _s, _ = _coord_schema_v2_modules()
-    _records = [
-        {'url': 'ssh://b/p', 'public_url': 'https://b/asgard',
-         'public_proto': 'https'},
-        {'url': 'ssh://a/p', 'public_url': 'http://a/asgard',
-         'public_proto': 'http'},
-    ]
-    assert (_s.canonicalize_neighbours(_records)
-            == _s.neighbour_urls(_records)
-            == ['ssh://a/p', 'ssh://b/p'])
 
 
 def test_new_coord_head_includes_neighbours_field():
@@ -39333,21 +39311,23 @@ def test_claim_schema_deprecated_state_and_new_deprecation():
     assert _dep['size'] == 42 and _dep['built_version'] == '1.0'
 
 
-def test_claim_from_jsonl_accepts_deprecated_and_v1_lines():
-    """A v2 deprecated line and a v1 published line both fold (claim_from_jsonl
-    never version-compares; it gates on required fields + valid state)."""
+def test_claim_from_jsonl_gates_on_fields_not_version():
+    """claim_from_jsonl never compares the `v` field — it gates on required
+    fields + a valid claim_state.  The version stamp is informational (it
+    records what the writer knew), so a well-formed line parses regardless
+    of its `v` value."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from coord import schema as _sch
-    # v1 published line (manually stamped v:1 + a sig field)
-    _v1 = _sch.new_claim(
+    # a published line with an arbitrary v stamp + a sig field
+    _c = _sch.new_claim(
         builder='b1', seq=1, package='foo', intended_version='1.0',
         built_version='1.0', filename='foo_1.0_amd64.deb', sha256='aa',
         size=1, snapshot='s', built_at='t',
         claim_state=_sch.CLAIM_STATE_PUBLISHED)
-    _v1['v'] = 1
-    _v1['sig'] = 'deadbeef'
-    assert _sch.claim_from_jsonl(_sch.claim_to_jsonl(_v1)) is not None
-    # v2 deprecated line
+    _c['v'] = 1
+    _c['sig'] = 'deadbeef'
+    assert _sch.claim_from_jsonl(_sch.claim_to_jsonl(_c)) is not None
+    # a deprecated line
     _dep = _sch.new_deprecation(
         builder='b1', seq=2, package='foo', intended_version='1.0',
         built_version='1.0', filename='foo_1.0_amd64.deb', sha256='aa',
@@ -43313,7 +43293,7 @@ def main() -> int:
         test_or_resolve_canonical_tiebreak_is_seed_order_free,
         # SELECT-LOCK Chunk 7 — mirror deprecated claim state
         test_claim_schema_deprecated_state_and_new_deprecation,
-        test_claim_from_jsonl_accepts_deprecated_and_v1_lines,
+        test_claim_from_jsonl_gates_on_fields_not_version,
         test_project_owners_deprecated_releases_ownership,
         # SELECT-LOCK Chunk 8 — publish deprecation emission + coherence audit
         test_emit_deprecation_claims_keys_off_source_not_binary,
@@ -43762,10 +43742,9 @@ def main() -> int:
         test_mirror_update_state_merges_fields,
         test_cmd_mirror_dispatch_routes_subcommands,
         # MIRROR-01 Phase 2 — federation neighbours + reconcile
-        test_canonicalize_neighbours_lowercases_strips_slash_sorts_dedups,
+        test_neighbour_urls_lowercases_strips_slash_sorts_dedups,
         test_canonicalize_neighbour_records_promotes_v2_and_passes_v3,
         test_neighbour_urls_projects_to_flat_str_list,
-        test_canonicalize_neighbours_is_alias_for_url_projection,
         test_new_coord_head_includes_neighbours_field,
         test_new_closure_ledger_shape,
         test_new_coord_head_closure_ledger_pin_optional,

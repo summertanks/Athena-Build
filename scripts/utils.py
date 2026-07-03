@@ -2122,24 +2122,14 @@ def reconcile_snapshot_pin(config: 'BuildConfig') -> 'Optional[tuple[str, str]]'
 
 
 def write_snapshot_state(config: 'BuildConfig',
-                         base: 'Optional[str]' = None,
-                         current: 'Optional[str]' = None,
-                         published: 'Optional[str]' = None,
-                         external: 'Optional[bool]' = None) -> None:
+                         current: 'Optional[str]' = None) -> None:
     """Write `current` to config/snapshot.state; clear the resolve memo.
 
-    `current` is the only field that drives live code:
-    the operator-selected snapshot pin every build runs against.
-    Legacy kwargs `base`, `published`, `external` are accepted for
-    back-compat with old callers (so the function signature doesn't
-    break) but **silently dropped** — per-mirror state files own the
-    publish-target pins now; nothing reads these fields anymore.
-
-    Pre snapshot.state files carrying base / published
-    external get rewritten cleanly on the next write (the merge-then-
-    write logic from the old shape was removed in Phase 8)."""
+    `current` is the only field: the operator-selected snapshot pin
+    every build runs against.  Per-mirror state files own the
+    publish-target pins.  A snapshot.state file carrying extra fields
+    gets rewritten cleanly on the next write (only `current` persists)."""
     import json
-    del base, published, external  # silently dropped — see docstring
     _existing = read_snapshot_state(config)
     _new_current = current if current is not None else _existing.get('current')
     _state: 'dict[str, str]' = {}

@@ -17,10 +17,6 @@ identical distribution, not just identical pkg/pool inputs:
     payload the peer seeds locally (re-signed with its own HMAC key — the
     federation trust is the GPG head sha, the HMAC is only local tamper
     detection).
-  - top-level `pkg.list` / `pool.list`: duplicated for an OLD peer that only
-    knows v1 (it applies pkg+pool and ignores the rest — graceful).
-
-v1 (`{v:1, 'pkg.list', 'pool.list'}`) is still read for back-compat.
 """
 import hashlib
 import json
@@ -115,9 +111,6 @@ def write_canonical_config(coord_dir: str, pkglist_path: str,
         'flags': _sel.get('flags', {}) or {},
         'arch': _sel.get('arch', '') or '',
         'snapshot': _sel.get('snapshot', '') or '',
-        # back-compat for an old (v1-only) peer:
-        'pkg.list': _pkg,
-        'pool.list': _pool,
     }
     _payload = json.dumps(
         _doc, sort_keys=True, ensure_ascii=True, indent=2).encode('utf-8')
@@ -140,9 +133,9 @@ def apply_canonical_config(fetched_coord_dir: str, expected_sha256: str,
     the signed coord-head) and apply it.  Refuses on absence / missing head
     hash / sha mismatch — never applies unverified config.
 
-    Returns (ok, detail, selection_payload).  For a v2 manifest the payload is
+    Returns (ok, detail, selection_payload).  The payload is
     `{pins, closure, flags, arch, snapshot}` for the caller to seed
-    selection.state; for v1 (or on failure) it is None."""
+    selection.state; on failure it is None."""
     _path = manifest_path(fetched_coord_dir)
     try:
         with open(_path, 'rb') as _fh:
@@ -188,20 +181,8 @@ def apply_canonical_config(fetched_coord_dir: str, expected_sha256: str,
         return True, (f'applied canonical config — 4 lists '
                       f'(pkg {len(_pkg.splitlines())} lines) + selection'), _payload
 
-    # v1 back-compat: pkg.list + pool.list only.
-    _pkg = _doc.get('pkg.list')
-    _pool = _doc.get('pool.list', '')
-    if not isinstance(_pkg, str):
-        return False, 'canonical config missing pkg.list', None
-    try:
-        _write_lists_atomic([
-            (pkglist_path, _pkg),
-            (poollist_path, _pool if isinstance(_pool, str) else ''),
-        ])
-    except OSError as _e:
-        return False, f'write failed: {_e}', None
-    return True, (f'applied canonical pkg.list ({len(_pkg.splitlines())} '
-                  'lines) + pool.list (v1)'), None
+    return False, (f'canonical config has unsupported schema '
+                   f'(v={_v!r}) — republish from a current builder'), None
 
 
 # ───────────────────────── ClosureLedger ─────────────────────────

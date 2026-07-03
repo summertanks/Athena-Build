@@ -1312,8 +1312,8 @@ class MirrorCommandsMixin(SessionState):
         # public_proto from the operator-supplied --proto at
         # `mirror add` time) so a heterogeneous federation round-trips
         # the apt-readable URL per peer.  The federation gate inside
-        # remote_publish still works on the URL projection — back-compat
-        # `canonicalize_neighbours` does the dict-→-str collapse.
+        # remote_publish works on the URL projection — `neighbour_urls`
+        # does the dict-→-str collapse.
         _local_urls = _mirror.all_mirror_neighbour_records(self.config)
         # Release-media gate (gate-with-escape): a publish ships a coherent
         # release — repo + install media + a static index — so by default
@@ -1547,7 +1547,7 @@ class MirrorCommandsMixin(SessionState):
             _base_update: 'dict[str, object]' = {
                 'current':           _snapshot_pin,
                 'last_publish_at':   _publish._utc_now(),
-                'neighbours_known':  _schema.canonicalize_neighbours(_local_urls),
+                'neighbours_known':  _schema.neighbour_urls(_local_urls),
             }
             # Only overwrite base when we have a real value — empty
             # means "no claims yet" (fresh mirror) and we should keep
@@ -1704,9 +1704,8 @@ class MirrorCommandsMixin(SessionState):
         import coord.store as _store
         _keyring = _id.load_keyring(
             os.path.join(fetched, 'keyring', 'builders'))
-        _keyring, _dropped, _has_bind = _id.verified_keyring_from_head(
-            _keyring, head)
-        _bmsg = _id.binding_drop_summary(_dropped, _has_bind)
+        _keyring, _dropped = _id.verified_keyring_from_head(_keyring, head)
+        _bmsg = _id.binding_drop_summary(_dropped)
         _by_builder = _store.read_all_claims(
             os.path.join(fetched, 'claims'), _keyring,
             head.get('revoked_builders') or {})

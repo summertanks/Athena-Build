@@ -781,7 +781,7 @@ def remote_publish(
     `mirror.all_mirror_neighbour_records`).  When `None`, federation
     gate is BYPASSED (legacy path).  When provided:
       - if remote already has a coord-head → compare neighbour URLs
-        (`canonicalize_neighbours` projection); BLOCK on diff
+        (`neighbour_urls` projection); BLOCK on diff
       - if remote has no coord-head (first publish) → BOOTSTRAP:
         upload our pubkey to <root>/keyring/builders/<id>.pub and
         initialise the new coord-head with the local records (v3 form

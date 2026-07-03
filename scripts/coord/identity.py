@@ -269,34 +269,24 @@ def enforce_bindings(
 
 def verified_keyring_from_head(
     keyring: Dict[str, str], head: 'Optional[dict]',
-) -> 'Tuple[Dict[str, str], Dict[str, str], bool]':
+) -> 'Tuple[Dict[str, str], Dict[str, str]]':
     """Apply the coord-head's signed builder bindings to a loaded keyring
-    (strict FED-03 D).  Returns ``(verified_keyring, dropped, has_bindings)``.
+    (strict FED-03 D).  Returns ``(verified_keyring, dropped)``.
 
-    When the head carries no ``builders`` map (a pre-D head, not yet migrated)
-    EVERY entry is dropped and ``has_bindings`` is False, so the caller can
-    surface "owner must republish to migrate" rather than silently trusting
-    unauthenticated keys."""
+    A head carrying no ``builders`` map drops EVERY entry — builder keys
+    are only ever trusted against tier-1-signed bindings, never bare."""
     _bindings = (head or {}).get('builders')
     if not isinstance(_bindings, dict):
-        _reason = ('coord-head carries no signed builder bindings '
-                   '(republish to migrate — FED-03 D)')
-        return ({}, dict.fromkeys(keyring, _reason), False)
-    _verified, _dropped = enforce_bindings(keyring, _bindings)
-    return _verified, _dropped, True
+        _reason = 'coord-head carries no signed builder bindings'
+        return ({}, dict.fromkeys(keyring, _reason))
+    return enforce_bindings(keyring, _bindings)
 
 
-def binding_drop_summary(
-    dropped: Dict[str, str], has_bindings: bool,
-) -> str:
+def binding_drop_summary(dropped: Dict[str, str]) -> str:
     """One-line operator message for keys dropped by strict binding
-    enforcement, or '' when nothing was dropped.  Distinguishes a not-yet-
-    migrated head (no `builders` map) from per-key mismatches."""
+    enforcement, or '' when nothing was dropped.  Per-key reasons live
+    in the ``dropped`` mapping itself."""
     if not dropped:
         return ''
-    if not has_bindings:
-        return ("coord-head carries no signed builder bindings — the owner "
-                "must republish to migrate (FED-03 D); rejecting all "
-                f"{len(dropped)} builder key(s) until then")
     return (f"rejected {len(dropped)} builder key(s) not matching the "
             f"coord-head's signed bindings: {', '.join(sorted(dropped))}")

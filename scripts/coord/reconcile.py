@@ -207,7 +207,7 @@ def audit_local(
             severity='INFO', kind='unclaimed_pool_file',
             message=(
                 f"pool file {_fn} has no claim from us (may be owned by "
-                f"another builder or pre-coord legacy)"),
+                f"another builder)"),
             filename=_fn,
         ))
 
@@ -514,8 +514,8 @@ def check_federation_consistency(
     """
     if head is None:
         return []
-    _expected = set(_schema.canonicalize_neighbours(local_mirror_urls))
-    _actual = set(_schema.canonicalize_neighbours(
+    _expected = set(_schema.neighbour_urls(local_mirror_urls))
+    _actual = set(_schema.neighbour_urls(
         head.get('neighbours') or []))
     _findings: 'List[Finding]' = []
     _missing = _expected - _actual

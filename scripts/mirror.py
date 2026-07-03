@@ -1419,7 +1419,7 @@ def audit_ownership_summary(
 
 def _canon_url(url: str) -> str:
     """Lowercase + strip trailing slash for URL comparison.  Mirrors
-    the canonical form ``coord.schema.canonicalize_neighbours`` uses."""
+    the canonical form ``coord.schema.neighbour_urls`` uses."""
     return (url or '').lower().rstrip('/')
 
 
@@ -2124,8 +2124,8 @@ def neighbours_drift(config, name: str) -> 'tuple[str, list[str], list[str]]':
     _known_raw = _st.get('neighbours_known') or []
     if not _known_raw:
         return ('unpublished', [], [])
-    _known = set(_schema.canonicalize_neighbours(_known_raw))
-    _local = set(_schema.canonicalize_neighbours(all_mirror_urls(config)))
+    _known = set(_schema.neighbour_urls(_known_raw))
+    _local = set(_schema.neighbour_urls(all_mirror_urls(config)))
     _missing = sorted(_local - _known)
     _extra = sorted(_known - _local)
     if not _missing and not _extra:
@@ -2318,7 +2318,7 @@ def reconcile_neighbours(
                                'will initialise neighbours)'),
                 })
                 continue
-            _have = _schema.canonicalize_neighbours(_head.get('neighbours') or [])
+            _have = _schema.neighbour_urls(_head.get('neighbours') or [])
             if _have == _desired:
                 _results.append({
                     'name': _name, 'url': _url, 'reachable': True,
