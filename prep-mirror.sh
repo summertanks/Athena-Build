@@ -48,13 +48,14 @@ banner() {
 }
 step()  { printf '%s\n' "${_C}${_B}▸ ${1}${_R}"; }
 info()  { printf '   %s\n' "${1}"; }
-ok()    { printf '   %s%s%s\n' "${_G}" "✓ ${1}" "${_R}"; }
-warn()  { printf '   %s%s%s\n' "${_Y}" "! ${1}" "${_R}"; }
-die()   { printf '%s\n' "${_E}${_B}✗ ${1}${_R}" >&2; exit "${2:-1}"; }
-# present|missing → coloured ✓/✗ for the inventory table
+ok()    { printf '   %s%s%s\n' "${_G}" "[OK] ${1}" "${_R}"; }
+warn()  { printf '   %s%s%s\n' "${_Y}" "[WARN] ${1}" "${_R}"; }
+die()   { printf '%s\n' "${_E}${_B}[FAIL] ${1}${_R}" >&2; exit "${2:-1}"; }
+
+
 mark()  { case "$1" in
-            present|yes|ours) printf '%s✓%s' "$_G" "$_R" ;;
-            *)                printf '%s✗%s' "$_Y" "$_R" ;;
+            present|yes|ours) printf '%s%-6s%s' "$_G" "[OK]" "$_R" ;;
+            *)                printf '%s%-6s%s' "$_Y" "[WARN]" "$_R" ;;
           esac; }
 
 #  argument parsing
@@ -64,8 +65,6 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --check)  DRY=1; shift ;;
         --proto)
-            # Need a value; without this guard `shift 2` on a trailing
-            # `--proto` returns non-zero and set -e aborts with no message.
             [ $# -ge 2 ] || die "--proto needs a value (http|https)" 2
             PROTO="$2"; shift 2 ;;
         -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
@@ -74,12 +73,13 @@ while [ $# -gt 0 ]; do
         *) _pos+=("$1"); shift ;;
     esac
 done
+
 [ "${#_pos[@]}" -ge 2 ] || die "usage: ./prep-mirror.sh <ssh-url> <ssh-key> [--check] [--proto http|https]" 2
 SSH_URL="${_pos[0]}"; SSH_KEY="${_pos[1]}"
 [ -f "$SSH_KEY" ] || die "SSH key not found: ${SSH_KEY}" 2
 case "$PROTO" in http|https) ;; *) die "--proto must be http or https (got '${PROTO}')" 2 ;; esac
 
-# ── distribution id (from config/distro.conf, [Build] DISTRIBUTION) ──────
+# distribution id (from config/distro.conf, [Build] DISTRIBUTION
 # Mirrors scripts/mirror.py: dist_id = re.sub(r'[^a-z0-9_-]', '', DIST.lower()).
 [ -f "$CONF" ] || die "config/distro.conf not found next to this script (${CONF})" 2
 DIST_RAW="$(awk '
@@ -90,25 +90,27 @@ DIST_RAW="$(awk '
 DIST_ID="$(printf '%s' "$DIST_RAW" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
 [ -n "$DIST_ID" ] || die "could not read [Build] DISTRIBUTION from ${CONF}" 2
 
-# ── parse the ssh url → user / host / optional explicit root ─────────────
-# ssh://user@host           → root derived remotely as ~/<dist-id>
-# ssh://user@host/abs/path  → root pinned to /abs/path
+# parse the ssh url -> user / host / optional explicit root
+# ssh://user@host           -> root derived remotely as ~/<dist-id>
+# ssh://user@host/abs/path  -> root pinned to /abs/path
 case "$SSH_URL" in
     ssh://*) ;;
     *) die "ssh-url must start with ssh:// (got '${SSH_URL}')" 2 ;;
 esac
+
 _authpath="${SSH_URL#ssh://}"             # user@host[/path]
 case "$_authpath" in
     */*) _auth="${_authpath%%/*}"; EXPLICIT_ROOT="/${_authpath#*/}"; EXPLICIT_ROOT="${EXPLICIT_ROOT%/}" ;;
     *)   _auth="${_authpath}";     EXPLICIT_ROOT='' ;;
 esac
+
 case "$_auth" in
     *@*) SSH_USER="${_auth%@*}"; SSH_HOST="${_auth#*@}" ;;
     *)   SSH_USER=''; SSH_HOST="$_auth" ;;
 esac
+
 [ -n "$SSH_HOST" ] || die "could not parse host from ssh-url '${SSH_URL}'" 2
 
-# host-type keyword for `mirror add` (matches mirror.validate_host_for_type):
 # IPv4/IPv6 literal → 'ip', otherwise → 'fqdn'.
 case "$SSH_HOST" in
     *:*)                       HOST_TYPE=ip ;;   # IPv6
@@ -122,17 +124,13 @@ esac
 URL_PATH="/${DIST_ID}"
 _urlhost="$SSH_HOST"
 case "$_urlhost" in *:*) [ "${_urlhost#\[}" = "$_urlhost" ] && _urlhost="[${_urlhost}]" ;; esac
+
 PUBLIC_URL="${PROTO}://${_urlhost}/${DIST_ID}"
 SSH_TARGET="${SSH_USER:+${SSH_USER}@}${SSH_HOST}"
 SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o BatchMode=yes)
 
-# ── logging — record every prep run under log/ (same as the build) ───────
-# The log dir comes from [Directories] Log in config/distro.conf (default:
-# log/).  From here on, everything printed — banner, steps, the remote
-# REMOTE: lines, warnings, and the final die — is tee'd to a timestamped
-# transcript with ANSI colour stripped, so mirror prep leaves the same
-# auditable record as a build run.  sed -u keeps the log line-flushed so a
-# fast die/exit can't truncate it.
+# The log dir comes from [Directories] Log in config/distro.conf (default: log/). 
+# -u keeps the log line-flushed so a fast die/exit can't truncate it.
 LOG_DIR_NAME="$(awk '
     /^[[:space:]]*\[/ { insec = ($0 ~ /^[[:space:]]*\[Directories\]/) }
     insec && /^[[:space:]]*Log[[:space:]]*=/ {
@@ -153,17 +151,18 @@ info "served at    ${PUBLIC_URL}/   (location ${URL_PATH}/)"
 info "log          ${LOGFILE#"${_SELF_DIR}/"}"
 [ "$DRY" -eq 1 ] && warn "--check: DRY RUN — nothing on the remote will change"
 
-# ── connectivity ────────────────────────────────────────────────────────
+# connectivity
 step "Connectivity"
 if ! ssh "${SSH_OPTS[@]}" "$SSH_TARGET" 'echo ok' >/dev/null 2>&1; then
     die "cannot SSH to ${SSH_TARGET} with key ${SSH_KEY} (check key, user, host, firewall)"
 fi
 ok "SSH to ${SSH_TARGET} works"
 
-# ── identity + inventory probe (read-only, single round-trip) ────────────
+# identity + inventory probe (read-only, single round-trip) 
 # Remote computes ROOT (it owns $HOME) and reports identity, permissions
 # and a per-component inventory as KEY=VALUE lines.
 step "Inspecting remote"
+
 # NB: ssh joins remote args with spaces and re-parses them, so an EMPTY
 # positional would silently collapse (shifting later args).  Pass a sentinel
 # for "no explicit root" instead.
@@ -185,6 +184,15 @@ else _p="$(dirname "$ROOT")"; { [ -d "$_p" ] && [ -w "$_p" ]; } && echo "WRITABL
 # root shape
 if [ -e "$ROOT" ] && [ ! -d "$ROOT" ]; then echo "ROOT_NOTDIR=yes"; else echo "ROOT_NOTDIR=no"; fi
 if [ -d "$ROOT" ] && [ -n "$(ls -A "$ROOT" 2>/dev/null || true)" ]; then echo "ROOT_NONEMPTY=yes"; else echo "ROOT_NONEMPTY=no"; fi
+# tool inventory — binaries the toolchain later runs ON this host over SSH:
+# rsync (mirror publish/pull transport), curl (this script's serve probes),
+# fuser←psmisc (optional: `mirror unlock --force` fallback when the .pid
+# sidecar is gone).  coreutils/findutils/util-linux are Essential — assumed.
+_missing=''
+for _t in rsync curl fuser; do
+    command -v "$_t" >/dev/null 2>&1 || _missing="${_missing}${_missing:+ }${_t}"
+done
+echo "TOOLS_MISSING=${_missing}"
 # per-component inventory
 inv() { [ -d "$1" ] && echo "$2=present" || echo "$2=missing"; }
 inv "${ROOT}/dists"            INV_dists
@@ -202,9 +210,10 @@ if curl -fsS "http://localhost${URL_PATH}/" >/dev/null 2>&1; then
 else echo "INV_serving=no"; echo "INV_index=no"; fi
 REMOTE
 )"
+
 # parse KEY=VALUE lines into shell vars (whitelisted keys only)
 WHOAMI=''; REMOTE_HOME=''; ROOT=''; COORD=''; SUDO=''; WRITABLE=''
-ROOT_NOTDIR=''; ROOT_NONEMPTY=''
+ROOT_NOTDIR=''; ROOT_NONEMPTY=''; TOOLS_MISSING=''
 INV_dists=''; INV_iso=''; INV_claims=''; INV_keyring=''
 INV_marker=''; INV_serving=''; INV_index=''
 while IFS='=' read -r _k _v; do
@@ -216,17 +225,18 @@ while IFS='=' read -r _k _v; do
         INV_dists) INV_dists="$_v" ;; INV_iso) INV_iso="$_v" ;;
         INV_claims) INV_claims="$_v" ;; INV_keyring) INV_keyring="$_v" ;;
         INV_marker) INV_marker="$_v" ;; INV_serving) INV_serving="$_v" ;;
-        INV_index) INV_index="$_v" ;;
+        INV_index) INV_index="$_v" ;; TOOLS_MISSING) TOOLS_MISSING="$_v" ;;
     esac
 done <<< "$PROBE"
 [ -n "$ROOT" ] || die "could not inspect remote (probe returned: ${PROBE:-<empty>})"
 
 # full path-bearing ssh-url for `mirror add` (its rsync push needs the path)
 CANON_URL="ssh://${_auth}${ROOT}"
+
 # the exact `mirror add` invocation: <ip|fqdn> <ssh-url> --ssh-key --proto
 ADD_CMD="mirror add ${HOST_TYPE} ${CANON_URL} --ssh-key ${SSH_KEY} --proto ${PROTO}"
 
-# ── report identity + inventory ──────────────────────────────────────────
+#  report identity + inventory
 ok "user ${WHOAMI}   home ${REMOTE_HOME}"
 info "resolved root  ${ROOT}"
 info "coord root     ${COORD}"
@@ -249,12 +259,55 @@ printf '   %s  coord keyring/         %s\n' "$(mark "$INV_keyring")" "$INV_keyri
 printf '   %s  mirror-info.json       %s\n' "$(mark "$INV_marker")"  "$INV_marker"
 printf '   %s  HTTP serving %s/   %s\n'     "$(mark "$INV_serving")" "$URL_PATH" "$INV_serving"
 printf '   %s  index page at root     %s\n' "$(mark "$INV_index")"   "$INV_index"
+if [ -n "$TOOLS_MISSING" ]; then
+    printf '   %s  tools                  missing: %s\n' "$(mark missing)" "$TOOLS_MISSING"
+else
+    printf '   %s  tools                  rsync curl fuser\n' "$(mark present)"
+fi
 
-# ── classify state ───────────────────────────────────────────────────────
+# tools the toolchain runs on the mirror (see the probe's tool inventory).
+# rsync + curl are REQUIRED; fuser (psmisc) is an optional unlock fallback.
+# Installed here (not in the web-server branch) so ADOPT/PREPARED hosts get
+# them too — and because a missing curl blinds the serve probes above.
+if [ -n "$TOOLS_MISSING" ]; then
+    _pkgs=''
+    for _t in $TOOLS_MISSING; do
+        case "$_t" in fuser) _pkgs="${_pkgs}${_pkgs:+ }psmisc" ;;
+                      *)     _pkgs="${_pkgs}${_pkgs:+ }${_t}" ;; esac
+    done
+    if [ "$DRY" -eq 1 ]; then
+        warn "missing tool(s): ${TOOLS_MISSING} — would apt-get install ${_pkgs}"
+    elif [ "$SUDO" != yes ]; then
+        case " ${TOOLS_MISSING} " in
+            *' rsync '*|*' curl '*)
+                die "mirror is missing required tool(s) (${TOOLS_MISSING}) and ${WHOAMI} has no passwordless sudo to install: ${_pkgs}" ;;
+            *)  warn "fuser (psmisc) missing and no sudo to install — 'mirror unlock --force' loses its fuser fallback" ;;
+        esac
+    else
+        info "installing missing tool(s): ${_pkgs}"
+        # shellcheck disable=SC2029  # client-side ${_pkgs} expansion intended (apt names, safe charset)
+        ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
+            "sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ${_pkgs} >/dev/null" \
+            || die "could not install ${_pkgs} on ${SSH_HOST}"
+        ok "installed ${_pkgs}"
+        # the probe's serve checks ran WITHOUT curl — redo them now so an
+        # already-serving host isn't misclassified as down (spurious ABORT).
+        case " ${TOOLS_MISSING} " in *' curl '*)
+            # shellcheck disable=SC2029  # client-side ${URL_PATH} expansion intended (dist-id charset)
+            _re="$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
+                "if curl -fsS http://localhost${URL_PATH}/ >/dev/null 2>&1; then echo yes; curl -fsS http://localhost${URL_PATH}/ 2>/dev/null | grep -q athena-release-index && echo idx; fi" || true)"
+            case "$_re" in *yes*) INV_serving=yes ;; esac
+            case "$_re" in *idx*) INV_index=yes ;; esac
+        esac
+    fi
+fi
+
+# classify state
 _our_any=no
 for _c in "$INV_dists" "$INV_iso" "$INV_claims" "$INV_keyring"; do
     [ "$_c" = present ] && _our_any=yes
 done
+
 if   [ "$ROOT_NOTDIR" = yes ]; then STATE_KIND=UNEXPECTED; STATE_DETAIL="root exists but is not a directory: ${ROOT}"
 elif [ "$INV_marker" = foreign ]; then STATE_KIND=UNEXPECTED; STATE_DETAIL="${ROOT}/mirror-info.json exists but is not an athena-mirror marker"
 elif [ "$INV_marker" = present ]; then STATE_KIND=PREPARED; STATE_DETAIL="marker present"
@@ -290,6 +343,7 @@ if [ "$INV_serving" != yes ] && [ "$SUDO" != yes ]; then
     warn "installing/configuring nginx needs root; this non-interactive SSH session can't prompt for a password"
     die "grant ${WHOAMI} passwordless sudo (or pre-install + configure the web server), then re-run"
 fi
+
 [ "$WRITABLE" = yes ] || die "${WHOAMI} cannot write ${ROOT} — fix ownership/permissions, then re-run"
 
 if [ "$DRY" -eq 1 ]; then
@@ -299,7 +353,7 @@ if [ "$DRY" -eq 1 ]; then
     [ "$INV_claims"  = missing ] && info "create ${COORD}/claims"
     [ "$INV_keyring" = missing ] && info "create ${COORD}/keyring/builders"
     if [ "$INV_serving" != yes ]; then
-        [ "$STATE_KIND" = FRESH ] && info "apt-get install -y nginx rsync (if absent)"
+        [ "$STATE_KIND" = FRESH ] && info "apt-get install -y nginx (if absent)"
         info "configure ${URL_PATH}/ → ${ROOT}/ (index index.html; autoindex on)"
     elif [ "$INV_index" != yes ]; then
         info "advise: add 'index index.html;' to the existing ${URL_PATH}/ server block (won't auto-edit)"
@@ -311,7 +365,7 @@ if [ "$DRY" -eq 1 ]; then
     exit 0
 fi
 
-# ── apply ───────────────────────────────────────────────────────────────
+# apply
 step "Preparing ${SSH_HOST} (${STATE_KIND})"
 APPLY_OUT="$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" 'bash -s' -- \
     "$ROOT" "$COORD" "$URL_PATH" "$STATE_KIND" <<'REMOTE'
@@ -339,9 +393,10 @@ if serves_ok; then
     fi
 else
     if ! command -v nginx >/dev/null 2>&1; then
-        say "installing nginx + rsync"
+        # rsync/curl/psmisc are ensured by the tools step before apply
+        say "installing nginx"
         $SUDO apt-get update -qq
-        $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx rsync >/dev/null
+        $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx >/dev/null
     fi
     CONF="/etc/nginx/conf.d/asgard-$(basename "$ROOT").conf"
     if [ -f "$CONF" ]; then
