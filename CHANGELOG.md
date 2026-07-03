@@ -8,7 +8,7 @@ toolchain SemVer (`scripts/_version.py`); per-commit dev versions are automatic.
 ## [Unreleased]
 
 - **Reworked the version-numbering framework** (content-order / "transpose"
-  scheme; see `docs/bump-mechanics.md`).
+  scheme; see `docs/versioning-mechanics.md`).
 
 - **Resilient remote-build control plane.** Remote source builds are now driven
   by a detached on-host agent exposing a localhost poll API over an SSH tunnel,

@@ -24,7 +24,7 @@ sites keep working unchanged; new code may import from `bump` directly.  This
 module has NO dependency on `utils` (one-way: utils -> bump), which keeps the
 import graph acyclic.
 
-See docs/bump-mechanics.md for the full rationale and the exact rules.
+See docs/versioning-mechanics.md for the full rationale and the exact rules.
 """
 
 import hashlib
@@ -286,7 +286,7 @@ def apply_asg_suffix(base: str, release: int, n: int) -> str:
 # epoch, an EMBEDDED +deb (shim's `1.44~1+deb12u1+15.8-1...`), +dfsg/+ds/+git,
 # a sourceful +nmuN, a dotted Debian revision — is preserved verbatim.  The
 # leading +/~ sign is kept (a ~deb stays ~asg, sorting BELOW pristine, by
-# design).  See docs/bump-mechanics.md.
+# design).  See docs/versioning-mechanics.md.
 # ---------------------------------------------------------------------------
 # Trailing redistribution token.  `tail` captures an optional `~` that
 # constraint floors append after the ordinal (e.g. `>= 0.8.0-2+deb12u1~`); it
@@ -464,7 +464,7 @@ def _rewrite_control_text(
 
     # Pair-rewrite pass: collapse the same-upstream-sibling idiom
     # (`X (>> V), X (<< V-.)`) to `X (= our_version)`.  See
-    # docs/strip-nmu-sibling-constraint-idiom.md for the rationale.
+    # docs/versioning-mechanics.md (Appendix B) for the rationale.
     _our_version = _extract_version(_content)
     if _our_version:
         _content, _pairs = _rewrite_sibling_idiom_in_text(_content, _our_version)
@@ -650,7 +650,7 @@ def _repack_deb(work_dir: str, out_path: str, source_date_epoch: int) -> None:
     same input produced different bytes — the cause of the 2026-06 mass
     hash-divergence between rebuilds and the published mirror (the package
     CONTENT was identical; only the wrapper timestamps moved).  See
-    docs/bump-mechanics.md / docs/build-quirks.md.
+    docs/versioning-mechanics.md / docs/build-quirks.md.
     """
     import subprocess
     _env = dict(os.environ)
@@ -967,7 +967,7 @@ def decide_patch_bump_count(prior: 'Optional[dict]', intended_version: str,
         (we edited our patch; removing it entirely drops to 0 — faithful)
       * same version, same patch → P = prior.P  (idempotent rebuild reuses)
 
-    Mirrors the version-decision rules in docs/bump-mechanics.md; computed at build time where the
+    Mirrors the version-decision rules in docs/versioning-mechanics.md; computed at build time where the
     prior record is still on hand, so no separate cache-parse pass is needed.
     """
     _patched = bool(patch_set_hash) and patch_set_hash != EMPTY_PATCH_SET_HASH

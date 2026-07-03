@@ -1872,7 +1872,7 @@ class BuildContainer:
         # arise because +deb→+asg is deterministic from the upstream version,
         # not from ship history).  Dep constraints transpose the same way and
         # same-source sibling pins are restamped to the exact final version, all
-        # inside transpose_deb.  See docs/bump-mechanics.md.
+        # inside transpose_deb.  See docs/versioning-mechanics.md.
         try:
             _release = int(str(self.config.build_version).strip('"').strip("'"))
         except (TypeError, ValueError):

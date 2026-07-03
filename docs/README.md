@@ -16,7 +16,7 @@ New here? Read [config.md](config.md) to shape your own distribution, and keep [
 | Doc | What it's for |
 |---|---|
 | [architecture.md](architecture.md) | How the build pipeline fits together, stage by stage. |
-| [bump-mechanics.md](bump-mechanics.md) | The version-numbering rules — what gets bumped, and when. |
+| [versioning-mechanics.md](versioning-mechanics.md) | The version-numbering rules — what gets translated, patched and bumped, and when; includes the sibling-constraint deep dive. |
 | [branding-methodology.md](branding-methodology.md) | How your identity (name, codename, logos) is applied and enforced. |
 | [collision-gate.md](collision-gate.md) | How Athena stops an upstream version from silently overriding one of your forks. |
 | [security.md](security.md) | The security model — what gets signed and verified, and how. |
@@ -52,6 +52,5 @@ New here? Read [config.md](config.md) to shape your own distribution, and keep [
 | Doc | What it's for |
 |---|---|
 | [pseudocode.md](pseudocode.md) | A natural-English walkthrough of every module. |
-| [strip-nmu-sibling-constraint-idiom.md](strip-nmu-sibling-constraint-idiom.md) | Deep dive: how upstream version suffixes are normalized across sibling packages. |
 | [plans/](plans/) | Design documents for in-progress and upcoming features. |
 | [diagrams/](diagrams/) | The build state-machine diagram (`build-fsm`). |

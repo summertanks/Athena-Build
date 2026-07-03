@@ -9624,7 +9624,7 @@ def test_transpose_scheme_boundary_table_and_ordering():
     if not _sh.which('dpkg'):
         return
     from utils import transposed_version as _T
-    # (upstream, patched? -> patch_level, expected) from docs/bump-mechanics.md.
+    # (upstream, patched? -> patch_level, expected) from docs/versioning-mechanics.md.
     _table = [
         ('0.7.4-20',            0, '0.7.4-20'),                 # pristine, faithful
         ('1.2.3-4+deb12u3',     0, '1.2.3-4+asg1u3'),           # faithful update
@@ -9970,7 +9970,7 @@ def test_strip_nmu_pair_rewrite_collapses_sibling_idiom():
     The rewrite locks the constraint to our own atomic-source-build
     version, matching the invariant our pipeline actually preserves.
 
-    See docs/strip-nmu-sibling-constraint-idiom.md for the full
+    See docs/versioning-mechanics.md (Appendix B) for the full
     rationale + impact analysis."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from utils import strip_nmu_from_control_text
