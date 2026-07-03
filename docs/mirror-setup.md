@@ -516,7 +516,7 @@ signed federation head at `mirror publish` time, and a joining
 builder reads those records verbatim instead of having to inherit
 the operator's `--proto` flag.
 
-What happens when you `mirror add` joins an existing v3 federation:
+What happens when you `mirror add` joins an existing federation:
 
 1. The orchestrator's federation-discovery step reads the peer's
    `coord-head.neighbours` records.
@@ -524,9 +524,8 @@ What happens when you `mirror add` joins an existing v3 federation:
    `config/mirror.<name>.state` carries the **upstream's** `public_url`
    and `public_proto` — not whatever `--proto` you passed.
 3. The operator's `--proto` flag is still honoured for: (a) the
-   primary mirror you're explicitly adding, and (b) any v2-shaped
-   peers whose records have empty `public_url` (the back-compat path
-   for federations still running pre-v3 publishers).
+   primary mirror you're explicitly adding, and (b) any discovered
+   peer whose record carries an empty `public_url`.
 
 When you publish back, your builder's per-peer view of each peer's
 apt URL is what lands in the signed coord-head for that
@@ -539,12 +538,6 @@ SSH keys stay homogeneous across the federation — the operator's
 `--ssh-key` flag is the source of truth for every peer.
 Heterogeneous ssh keys would need a separate schema bump and an
 out-of-band key-distribution story.
-
-Read-compat: v2 coord-heads (`neighbours: list[str]`) are still
-readable; their per-peer records auto-promote to empty
-`public_url` / `public_proto` and `mirror add` falls back to the
-operator's `--proto`.  v1 coord-heads (no `neighbours` field at all)
-read as empty.
 
 ---
 
