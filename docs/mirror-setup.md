@@ -5,9 +5,6 @@ actually lives on the host (and what is safe to touch by hand), how to
 prepare and register one, how publishing and pulling behave day to day,
 and how to audit and recover one.
 
-Supersedes the pre-federation `repo publish ssh` / `repo publish local`
-command group, which was removed along with its operator doc.
-
 **Contents**
 
 1. [What a "mirror" is](#1-what-a-mirror-is)
@@ -1037,35 +1034,6 @@ mirror reconcile-neighbours
 
 after the remove.  Until you do, `mirror list` will show `drift` next
 to peers whose last-known `neighbours_known` still lists the removed URL.
-
-### Migrating from the legacy `[Repo]` keys
-
-The pre-federation publish keys have been **removed** from the shipped
-`config/build.conf` (they were dead — readers long gone, and they
-leaked one machine's mirror identity into a tracked file):
-
-```
-AptSourceURL     = http://…/asgard/
-PublishSshTarget = user@host
-PublishSshKey    = config/repo_asgard.key
-ExternalEnabled  = true
-```
-
-If an old checkout still has them, delete them.  Mirror endpoints now live
-per-machine in the **untracked** `config/mirror.<name>.state` files (created by
-`mirror add` / onboarding) and machine-local settings in `config/local.conf` —
-both gitignored.  Keep `SigningKeyUid` (used by tier-1 GPG signing).  Keep every
-`[Mirror.<name>]` section in the upstream area — those are **upstream
-Debian mirrors**, unrelated to publish targets.
-
-A typical migration:
-
-| Legacy key | New equivalent |
-|---|---|
-| `PublishSshTarget = ubuntu@host` (path implicit at `~/asgard`) | `mirror add ip ssh://ubuntu@<host>/home/ubuntu/asgard --ssh-key … --proto http` |
-| `PublishSshKey = config/repo_asgard.key` | `--ssh-key config/repo_asgard.key` on `mirror add` |
-| `AptSourceURL = http://host/asgard/` | Derived as `<proto>://<host>/<dist-id>`; written automatically |
-| `ExternalEnabled = true/false` | Removed — every configured mirror is enabled; un-register with `mirror remove` to disable |
 
 ### Where the parts live (`source` / `repo` / `mirror`)
 
