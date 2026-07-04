@@ -684,9 +684,11 @@ Overall the project sits at roughly **70% of a v1.0 we'd trust on real hardware*
 and the missing 30% is enumerated rather than mysterious. Bug reports are welcome
 and, at this stage, confidently expected.
 
-For the full per-dimension breakdown, see [`docs/maturity.md`](docs/maturity.md).
+For the full journey-by-journey breakdown — how far the end user's, the
+auditor's, and the operator's paths each carry today — see
+[`docs/maturity.md`](docs/maturity.md).
 
-*Maturity calibrated 2026-06-26.*
+*Maturity calibrated 2026-07-04.*
 
 ---
 

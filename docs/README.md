@@ -44,7 +44,7 @@ New here? Read [config.md](config.md) to shape your own distribution, and keep [
 
 | Doc | What it's for |
 |---|---|
-| [maturity.md](maturity.md) | An honest, per-dimension assessment of how far along the project is. |
+| [maturity.md](maturity.md) | An honest distance-to-goal assessment, measured along the end-user, auditor, and operator journeys. |
 | [done.md](done.md) | Archive of completed and closed work. |
 
 ## For contributors (deeper / advanced)
