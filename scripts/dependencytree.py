@@ -430,9 +430,18 @@ class DependencyTree:
                     _provides.setdefault(_name, []).append(_vn)
             _fixpoint = or_resolve.resolve_closure(
                 self._seed_history, _deps, provides=_provides)
+            # The fixpoint keeps unresolvable names as "unknown leaves"
+            # inside its closure (e.g. a Recommends target that does not
+            # exist in the archive at all — fwupd → secureboot-db on
+            # bookworm).  Those are phantoms of the diagnostic model, not
+            # packages a settled resolution could actually add — report
+            # only names the cache can resolve.
+            _fixpoint_extra = [
+                _n for _n in sorted(_fixpoint - _greedy)
+                if self.__cache.get_packages(_n)]
             return {
                 'greedy_only': sorted(_greedy - _fixpoint),
-                'fixpoint_only': sorted(_fixpoint - _greedy),
+                'fixpoint_only': _fixpoint_extra,
             }
         except Exception as _e:                       # best-effort diagnostic
             logger.warning(f"order_independence_report: {_e}")

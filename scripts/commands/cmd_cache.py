@@ -322,21 +322,25 @@ class CacheCommandsMixin(SessionState):
             if not _extra and not _missing:
                 continue
             console.print(
-                f"SELECT-02 ({_label}): order-sensitive closure divergence — "
+                f"[WARN] closure resolution is order-sensitive ({_label}): "
                 f"{len(_extra)} order-pulled extra(s), "
-                f"{len(_missing)} fixpoint-only", tui.COLOR_WARNING)
+                f"{len(_missing)} settled-only", tui.COLOR_WARNING)
             if _extra:
                 console.print(
-                    "  greedy pulled (an order-independent resolution would "
-                    f"drop): {', '.join(_extra[:30])}"
+                    "       pulled by seed order (a settled resolution "
+                    f"would drop): {', '.join(_extra[:30])}"
                     f"{' …' if len(_extra) > 30 else ''}", tui.COLOR_WARNING)
             if _missing:
                 console.print(
-                    "  fixpoint would add (likely a version/conflict drop in "
-                    f"the greedy path): {', '.join(_missing[:30])}"
+                    "       a settled resolution would add (the diagnostic "
+                    "model follows Recommends deeper and ignores "
+                    f"version/conflict bounds): {', '.join(_missing[:30])}"
                     f"{' …' if len(_missing) > 30 else ''}", tui.COLOR_INFO)
+            console.print(
+                "       diagnostic only — the shipped selection is "
+                "unchanged", tui.COLOR_INFO)
             logger.info(
-                f"SELECT-02 {_label}: greedy_only={_extra} "
+                f"order-independence shadow ({_label}): greedy_only={_extra} "
                 f"fixpoint_only={_missing}")
 
     def cmd_parse_dependency(self, *args):

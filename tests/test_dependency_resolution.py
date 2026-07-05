@@ -1850,6 +1850,25 @@ def test_dependencytree_order_independence_report():
     assert _tree2.order_independence_report() == {
         'greedy_only': [], 'fixpoint_only': []}
 
+    # (3) fixpoint_only is filtered to cache-resolvable names: the fixpoint
+    # model keeps unresolvable names as unknown leaves (fwupd →
+    # secureboot-db on bookworm, which does not exist in the archive) —
+    # those phantoms must not be reported; a genuinely addable package is.
+    class _CacheStub:
+        def get_packages(self, name, version='', constraint=''):
+            return [object()] if name == 'real-extra' else []
+
+    _tree3 = object.__new__(_dt.DependencyTree)
+    _tree3._DependencyTree__recommended = True
+    _tree3._DependencyTree__cache = _CacheStub()
+    _p_a = _P('a')
+    _p_a.recommends = [('ghost-pkg', '', ''), ('real-extra', '', '')]
+    _tree3.selected_pkgs = {'a': _p_a}
+    _tree3._seed_history = ['a']
+    _rep3 = _tree3.order_independence_report()
+    assert _rep3['fixpoint_only'] == ['real-extra'], _rep3
+    assert 'ghost-pkg' not in _rep3['fixpoint_only'], _rep3
+
 TESTS = [
     test_sta33_build_depends_serialises_apt_pkg_profile_global,
     test_sta45_provides_does_not_clobber_real_selected_package,
