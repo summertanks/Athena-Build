@@ -1,8 +1,54 @@
 #!/bin/bash
 
-# Defining Colors
-IWhite='\033[0;97m'       # White
-Color_Off='\033[0m'       # Text Reset
+# Colour only on a real terminal AND when NO_COLOR is unset — the same
+# presentation helpers as prep-mirror.sh; keep the two scripts in step.
+if [ -t 1 ] && [ -z "${NO_COLOR+x}" ]; then
+    _B=$'\033[1m'; _D=$'\033[2m'; _R=$'\033[0m'
+    _G=$'\033[32m'; _Y=$'\033[33m'; _E=$'\033[31m'; _C=$'\033[36m'
+else
+    _B=''; _D=''; _R=''; _G=''; _Y=''; _E=''; _C=''
+fi
+banner() {
+    printf '%s\n' "${_C}${_B}╭─╮╶┬╴╷ ╷╭─╴╭╮╷╭─╮   ╭╮ ╷ ╷╷╷  ╶┬╮   ╭─╮╷ ╷╭─╮╶┬╴╭─╴╭┬╮${_R}"
+    printf '%s\n' "${_C}${_B}├─┤ │ ├─┤├╴ │╰┤├─┤   ├┴╮│ │││   ││   ╰─╮╰┬╯╰─╮ │ ├╴ │││${_R}"
+    printf '%s\n' "${_C}${_B}╵ ╵ ╵ ╵ ╵╰─╴╵ ╵╵ ╵   ╰─╯╰─╯╵╰─╴╶┴╯   ╰─╯ ╵ ╰─╯ ╵ ╰─╴╵ ╵${_R}"
+    printf '%s\n' "${_D}(c) Harkirat S Virk${_R}"
+    printf '%s\n' "${_D}https://github.com/summertanks/Athena-Build${_R}"
+    printf '%s\n' "${_B}Host preflight${_R}"
+}
+step()  { printf '\n%s\n' "${_C}${_B}${1}${_R}"; }
+info()  { printf '   %s\n' "${1}"; }
+ok()    { printf '   %s%s%s\n' "${_G}" "[  OK] ${1}" "${_R}"; }
+warn()  { printf '   %s%s%s\n' "${_Y}" "[WARN] ${1}" "${_R}"; }
+die()   { printf '%s\n' "${_E}${_B}[FAIL] ${1}${_R}" >&2; exit "${2:-1}"; }
+# info-print "tool: version" without doubling the name when the tool's
+# version line already leads with it (mksquashfs, grub-mkrescue, ...).
+tool_info() {
+    case "$2" in
+        "$1"*|*"/$1 "*) info "$2" ;;
+        '')             info "$1 (version unknown)" ;;
+        *)              info "$1 $2" ;;
+    esac
+}
+# require_min <label> <min> <version-line> — pull the first x.y[.z]
+# out of the line and die when it is below <min> (dpkg version compare
+# — the build host is always dpkg-based).  Silent when satisfied; an
+# unparseable line only warns (present-but-odd output must not block
+# startup).  The comment at each call site names the feature that
+# demands the floor.
+require_min() {
+    local _have
+    # head -n1: -o prints every match on the line; only the first is the
+    # tool's own version (e.g. "OpenSSH_10.0p2 ..., OpenSSL 3.5.6 ...").
+    _have=$(printf '%s' "$3" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)*' | head -n1 || true)
+    if [ -z "$_have" ]; then
+        warn "$1 required >= $2, found unknown"
+    elif ! dpkg --compare-versions "$_have" ge "$2"; then
+        die "$1 required >= $2, found $_have"
+    else
+        ok "$1 required >= $2, found $_have"
+    fi
+}
 
 DIR_TMP="tmp"
 DIR_PKG="packages"
@@ -53,7 +99,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-echo -e "Athena Build System Check..."
+banner
 
 # Parsing args
 ARGS=$(getopt -n Athena -o 'hc:p:vV' --long 'help,version,config-file:,pkg-list:,verbose,headless,yes,cmd:,api,api-port:' -- "$@") || exit
@@ -106,22 +152,18 @@ while true; do
 done
 
 # check user state
+step "Host tools"
 if [[ "$(id -u)" ==  0 ]]; then
-	echo "W: running as sudo"
+	warn "running as sudo"
 fi
 
-# Check sudo access — chroot build and iso build live run dpkg and mksquashfs
-# as root via sudo.  -l lists the user's privileges; -n skips the password
-# prompt so this is non-interactive.  A warning (not a fatal error) is issued
-# here because the core build pipeline (cache/dependency/source) does not
-# require sudo — only the chroot and ISO stages do.
+# Check sudo access — chroot build & iso build live run dpkg / mksquashfs as root via sudo
 if sudo -l -n 2>/dev/null | grep -q '(ALL'; then
-    echo "Sudo access: OK ($(whoami) has sudo privileges)"
+    ok "sudo access: $(whoami) has sudo privileges"
 elif id -nG "$(whoami)" | grep -qw sudo; then
-    echo "Sudo access: OK ($(whoami) is in sudo group — password will be required)"
+    ok "sudo access: $(whoami) is in sudo group — password will be required"
 else
-    echo "E: $(whoami) does not have sudo access — chroot build and iso build live require sudo" >&2
-    exit 1
+    die "$(whoami) does not have sudo access — chroot build and iso build live require sudo"
 fi
 
 # Version probes use `|| true` after the head pipe.  `head -n1` closes
@@ -131,30 +173,65 @@ fi
 # whether the writer has finished flushing before head closes depends
 # on output size and scheduler timing.
 
-# Bash version
-echo "Using $(/usr/bin/bash --version 2>/dev/null | head -n1 || true)"
+# Bash version (assoc arrays + ${var//} rewrites — ancient floor)
+require_min bash 4.4 "$(/usr/bin/bash --version 2>/dev/null | head -n1 || true)"
 
-# gunzip version
-echo "Using $(/usr/bin/gunzip --version 2>/dev/null | head -n1 || true)"
+# gzip version (apt_repo compresses indexes with `gzip -k`, added 1.6)
+require_min gzip 1.6 "$(/usr/bin/gunzip --version 2>/dev/null | head -n1 || true)"
 
-# python version
-echo "Using $(/usr/bin/python3 --version 2>/dev/null | head -n1 || true)"
+# python version — hard floor 3.11: utils uses hashlib.file_digest
+# (added 3.11); mypy/CI already type-check against 3.11.
+_PY_V=$(/usr/bin/python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null || true)
+if /usr/bin/python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+    ok "python3 required >= 3.11, found ${_PY_V}"
+else
+    die "python3 required >= 3.11, found ${_PY_V:-none}"
+fi
 
 # checking docker
 if [ -x "$(command -v docker || true)" ]; then
-    echo "Using $(docker --version 2>/dev/null | head -n1 || true)"
+    # docker-py auto-negotiates the API; 20.10 is the practical floor
+    require_min docker 20.10 "$(docker --version 2>/dev/null | head -n1 || true)"
 else
-    echo "E: docker not found, build system requires docker" >&2
-    exit 1
+    die "docker not found, build system requires docker"
 fi
 
 # checking gpg (used by python-gnupg in verify_inrelease).
 # python-gnupg invokes `gpg`, not `gpgv`, so we check for the full binary.
 if [ -x "$(command -v gpg || true)" ]; then
-    echo "Using $(gpg --version 2>/dev/null | head -n1 || true)"
+    require_min gpg 2.1 "$(gpg --version 2>/dev/null | head -n1 || true)"
 else
-    echo "E: gpg not found (install gnupg) — required for InRelease verification" >&2
-    exit 1
+    die "gpg not found (install gnupg) — required for InRelease verification"
+fi
+
+# rsync — every mirror publish/pull transfer and the disk-image chroot
+# copy go through it; the coord transport passes --mkpath.
+if [ -x "$(command -v rsync || true)" ]; then
+    require_min rsync 3.2.3 "$(rsync --version 2>/dev/null | head -n1 || true)"
+else
+    die "rsync not found — mirror publish/pull and disk imaging require it"
+fi
+
+# openssl — builder Ed25519 identity (genpkey + pkeyutl -rawin).
+# NOTE: -rawin needs OpenSSL 3.0, not the oft-quoted 1.1.1.
+if [ -x "$(command -v openssl || true)" ]; then
+    require_min openssl 3.0.0 "$(openssl version 2>/dev/null | head -n1 || true)"
+else
+    die "openssl not found — builder identity (Ed25519 claims) requires it"
+fi
+
+# ssh — remote transport uses StrictHostKeyChecking=accept-new.
+if [ -x "$(command -v ssh || true)" ]; then
+    require_min OpenSSH 7.6 "$(ssh -V 2>&1 | head -n1 || true)"
+else
+    die "ssh not found (install openssh-client) — mirror + remote-build transport requires it"
+fi
+
+# git — toolchain version derivation (git describe).
+if [ -x "$(command -v git || true)" ]; then
+    require_min git 1.8.5 "$(git --version 2>/dev/null | head -n1 || true)"
+else
+    die "git not found — toolchain version derivation requires it"
 fi
 
 # checking default Debian archive keyring.  build.conf [Security] Keyring
@@ -163,26 +240,23 @@ fi
 # config-overridden setup is not blocked.
 DEFAULT_KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
 if [ -r "$DEFAULT_KEYRING" ]; then
-    echo "Using keyring $DEFAULT_KEYRING (from debian-archive-keyring)"
+    info "keyring $DEFAULT_KEYRING (from debian-archive-keyring)"
 else
-    echo "W: $DEFAULT_KEYRING not found — install 'debian-archive-keyring'" \
-         "or set [Security] Keyring in build.conf to a readable file" >&2
+    warn "$DEFAULT_KEYRING not found — install 'debian-archive-keyring' or set [Security] Keyring in build.conf to a readable file"
 fi
 
 # checking docker group membership
 if id -nG "$(whoami)" | grep -qw docker; then
-    echo "User $(whoami) is in the docker group"
+    ok "user $(whoami) is in the docker group"
 else
-    echo "E: user $(whoami) is not in the 'docker' group — cannot talk to docker daemon" >&2
-    exit 1
+    die "user $(whoami) is not in the 'docker' group — cannot talk to docker daemon"
 fi
 
 # checking wget
 if [ -x /usr/bin/wget ]; then
-        echo "Using $(/usr/bin/wget --version 2>/dev/null | head -n1 || true)"
+        require_min wget 1.14 "$(/usr/bin/wget --version 2>/dev/null | head -n1 || true)"
 else
-        echo "E: wget not found, do we want to be in a world without wget" > /dev/stderr
-        exit 1
+        die "wget not found, do we want to be in a world without wget"
 fi
 
 # Checking awk — every pipe below is `|| true` because under
@@ -195,8 +269,7 @@ fi
 #      manifested as the script silently exiting at this point.
 AWK_PATH=$(command -v awk || true)
 if [ -z "$AWK_PATH" ] || [ ! -x "$AWK_PATH" ]; then
-    echo "E: awk not found, build script will not work" >&2
-    exit 1
+    die "awk not found, build script will not work"
 fi
 
 REAL_AWK=$(readlink -f "$AWK_PATH" || echo "$AWK_PATH")
@@ -216,17 +289,9 @@ case "$PACKAGE" in
         AWK_VERSION=$("$AWK_PATH" --version 2>/dev/null | head -n1 || true)
         ;;
 esac
-echo "Using awk: ${PACKAGE:-unknown} — ${AWK_VERSION:-version unknown}"
+require_min "awk (${PACKAGE:-unknown})" 1.3 "${AWK_VERSION:-}"
 
-# Build mode.  A build-mode peer only builds + publishes packages (chroot/ISO/
-# disk steps are refused in build mode), so it needs Docker + the cache/source
-# toolchain but NOT the ISO/disk host tools — a missing one is a note, not a
-# fatal startup error.
-#
-# Mode now lives in the untracked machine-local config/local.conf ([Local]
-# Mode), falling back to build.conf for back-compat — mirror BuildConfig's
-# precedence (local.conf > build.conf > distribution) so this gate agrees with
-# the Python side on a peer whose mode is only in local.conf.
+# Build mode.  A build-mode peer only builds + publishes individual packages
 BUILD_MODE="distribution"
 LOCAL_CONF="$(dirname "$CONFIG_FILE")/local.conf"
 MODE_LINE=""
@@ -242,56 +307,55 @@ if [ -z "$MODE_LINE" ] && [ -f "$CONFIG_FILE" ]; then
 fi
 if printf '%s' "$MODE_LINE" | grep -qiE '=[[:space:]]*build([[:space:]]|$)'; then
     BUILD_MODE="build"
-    echo "Build mode = build — ISO/disk host tools are optional."
+    info "build mode = build — ISO/disk host tools are optional"
 fi
 
 # Checking ISO build tools (required for `iso build live` command only)
-echo "Checking ISO build tools..."
+step "ISO build tools"
 ISO_TOOLS_OK=1
 
 if [ -x "$(command -v mksquashfs || true)" ]; then
-    echo "Using mksquashfs $(mksquashfs -version 2>&1 | head -n1 || true)"
+    require_min mksquashfs 4.2 "$(mksquashfs -version 2>&1 | head -n1 || true)"
 else
-    echo "W: mksquashfs not found (install squashfs-tools) — iso build live will not work"
+    warn "mksquashfs not found (install squashfs-tools) — iso build live will not work"
     ISO_TOOLS_OK=0
 fi
 
 if [ -x "$(command -v grub-mkrescue || true)" ]; then
-    echo "Using grub-mkrescue $(grub-mkrescue --version 2>/dev/null | head -n1 || true)"
+    require_min grub-mkrescue 2.02 "$(grub-mkrescue --version 2>/dev/null | head -n1 || true)"
 else
-    echo "W: grub-mkrescue not found (install grub-pc-bin grub-efi-amd64-bin) — iso build live will not work"
+    warn "grub-mkrescue not found (install grub-pc-bin grub-efi-amd64-bin) — iso build live will not work"
     ISO_TOOLS_OK=0
 fi
 
 if [ -x "$(command -v xorriso || true)" ]; then
-    echo "Using xorriso $(xorriso --version 2>&1 | head -n1 || true)"
+    require_min xorriso 1.4 "$(xorriso --version 2>&1 | head -n1 || true)"
 else
-    echo "W: xorriso not found (install xorriso) — iso build live will not work"
+    warn "xorriso not found (install xorriso) — iso build live will not work"
     ISO_TOOLS_OK=0
 fi
 
 if [ -x "$(command -v mformat || true)" ]; then
-    echo "Using mformat $(mformat --version 2>&1 | head -n1 || true)"
+    require_min mformat 4.0 "$(mformat --version 2>&1 | head -n1 || true)"
 else
-    echo "W: mformat not found (install mtools) — grub-mkrescue will fail"
+    warn "mformat not found (install mtools) — grub-mkrescue will fail"
     ISO_TOOLS_OK=0
 fi
 
 if [[ $ISO_TOOLS_OK -eq 0 ]]; then
     if [[ "$BUILD_MODE" == "build" ]]; then
-        echo "Note: ISO build tools missing — skipped (Mode = build; iso steps are refused in build mode)."
+        warn "ISO build tools missing — skipped (Mode = build; iso steps are refused in build mode)"
     else
-        echo "E: one or more ISO build tools missing — run: sudo apt install squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso mtools" >&2
-        exit 1
+        die "one or more ISO build tools missing — run: sudo apt install squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso mtools"
     fi
 else
-    echo "All ISO build tools found."
+    ok "all ISO build tools found"
 fi
 
 # Checking disk image build tools (required for `iso build disk` — COMP-09).
 # Gates startup — every tool below must be present.  Same pattern as
 # the ISO tools section above.
-echo "Checking disk image build tools..."
+step "Disk image build tools"
 DISK_TOOLS_OK=1
 DISK_MISSING=()          # "tool (pkg)" pairs — names the actual missing tool
 DISK_MISSING_PKGS=()     # bare package names — for the apt-install hint
@@ -299,8 +363,8 @@ DISK_MISSING_PKGS=()     # bare package names — for the apt-install hint
 # tool → providing package map.  When the tool is missing, the
 # matching package name gets appended to DISK_MISSING_PKGS for the
 # summary listing.
+# (rsync is checked under Host tools — required unconditionally there.)
 declare -A _DISK_TOOL_PKG=(
-    [rsync]=rsync
     [qemu-img]=qemu-utils
     [mkfs.fat]=dosfstools
     [losetup]=util-linux
@@ -309,8 +373,20 @@ declare -A _DISK_TOOL_PKG=(
     [grub-install]=grub-common
     [blkid]=util-linux
 )
+# tool → minimum version.  losetup -P needs util-linux 2.25 and
+# sfdisk --wipe needs 2.29 (disk_image.py); the rest are ancient
+# conservative floors — no modern flag in use.
+declare -A _DISK_TOOL_MIN=(
+    [qemu-img]=2.0
+    [mkfs.fat]=3.0
+    [losetup]=2.25
+    [sfdisk]=2.29
+    [mkfs.ext4]=1.43
+    [grub-install]=2.02
+    [blkid]=2.25
+)
 
-for _t in rsync qemu-img mkfs.fat losetup sfdisk mkfs.ext4 grub-install blkid; do
+for _t in qemu-img mkfs.fat losetup sfdisk mkfs.ext4 grub-install blkid; do
     _p=$(command -v "$_t" || true)
     if [ -z "$_p" ]; then
         for _d in /sbin /usr/sbin; do
@@ -318,9 +394,12 @@ for _t in rsync qemu-img mkfs.fat losetup sfdisk mkfs.ext4 grub-install blkid; d
         done
     fi
     if [ -n "$_p" ]; then
-        echo "Using $_t $($_p --version 2>/dev/null | head -n1 || true)"
+        _v=$($_p --version 2>/dev/null | head -n1 || true)
+        # mke2fs and friends only answer -V, and on stderr
+        [ -z "$_v" ] && _v=$($_p -V 2>&1 | head -n1 || true)
+        require_min "$_t" "${_DISK_TOOL_MIN[$_t]}" "$_v"
     else
-        echo "W: $_t not found"
+        warn "$_t not found"
         DISK_TOOLS_OK=0
         _pkg="${_DISK_TOOL_PKG[$_t]}"
         DISK_MISSING+=("$_t ($_pkg)")
@@ -336,14 +415,23 @@ if [[ $DISK_TOOLS_OK -eq 0 ]]; then
     _MISSING_TOOLS=$(printf '%s, ' "${DISK_MISSING[@]}"); _MISSING_TOOLS=${_MISSING_TOOLS%, }
     _UNIQ_PKGS=$(printf '%s\n' "${DISK_MISSING_PKGS[@]}" | sort -u | tr '\n' ' ')
     if [[ "$BUILD_MODE" == "build" ]]; then
-        echo "Note: disk image build tools missing — skipped (Mode = build): $_MISSING_TOOLS"
+        warn "disk image build tools missing — skipped (Mode = build): $_MISSING_TOOLS"
     else
-        echo "E: one or more disk image build tools missing: $_MISSING_TOOLS" >&2
-        echo "E:   install with: sudo apt install${_UNIQ_PKGS:+ }${_UNIQ_PKGS% }" >&2
-        exit 1
+        warn "one or more disk image build tools missing: $_MISSING_TOOLS"
+        die "install with: sudo apt install${_UNIQ_PKGS:+ }${_UNIQ_PKGS% }"
     fi
 else
-    echo "All disk image build tools found."
+    ok "all disk image build tools found"
+fi
+
+# systemd-firstboot — chroot build (live + disk) stamps the target's
+# root password / hostname / locale with it; --force needs systemd 247.
+if [ -x "$(command -v systemd-firstboot || true)" ]; then
+    require_min systemd-firstboot 247 "$(systemd-firstboot --version 2>/dev/null | head -n1 || true)"
+elif [[ "$BUILD_MODE" == "build" ]]; then
+    warn "systemd-firstboot not found — skipped (Mode = build; chroot steps are refused in build mode)"
+else
+    die "systemd-firstboot not found (install systemd) — chroot build requires it"
 fi
 
 # CVE-01: grype is an OPTIONAL prerequisite — used by `cve` to scan the
@@ -351,14 +439,16 @@ fi
 # Debian Security Tracker DBs.  Build pipeline runs fine without it;
 # the `cve` command is only useful when grype is on PATH.  Non-blocking
 # warning here so the operator knows how to enable it.
+step "Optional tools"
 if [ -x "$(command -v grype || true)" ]; then
-    echo "Using grype $(grype version 2>/dev/null | head -n1 || true) — cve command enabled"
+    tool_info grype "$(grype version 2>/dev/null | head -n1 || true) — cve command enabled"
 else
-    echo "W: grype not found — cve command will be a no-op.  Install: https://github.com/anchore/grype/releases (or apt repo: https://anchore.github.io/grype/install.sh)"
+    warn "grype not found — cve command will be a no-op.  Install: https://github.com/anchore/grype/releases (or apt repo: https://anchore.github.io/grype/install.sh)"
 fi
 
 # Checking build directories
-echo "Checking Build Directories (everything is relative to the script path)"
+step "Build directories"
+info "creating any missing (everything is relative to the script path)"
 mkdir -p $BUILD_DIR/$DIR_TMP
 mkdir -p $BUILD_DIR/$DIR_PKG
 mkdir -p $BUILD_DIR/$DIR_REPO
@@ -373,20 +463,20 @@ mkdir -p $BUILD_DIR/$DIR_GNUPG
 chmod 0700 $BUILD_DIR/$DIR_GNUPG
 
 # Checking build system
-awk -F= '/PRETTY_NAME/ { print "Current Build System " $2 }' /etc/os-release
+step "Configuration"
+info "build host: $(awk -F= '/PRETTY_NAME/ { gsub(/"/, "", $2); print $2 }' /etc/os-release)"
 BUILD_ID=$(awk -F= '/^ID/ { print $2 }' /etc/os-release)
 
-echo Build Flavour $BUILD_ID
+info "build flavour: $BUILD_ID"
 if [[ $BUILD_ID != "debian" ]]; then
-	echo "E: Not using Debian to build, not tested, will likely fail"
+	warn "not using Debian to build — untested, will likely fail"
 fi
 
 # Load basic config
 if ! [ -f $CONFIG_FILE ]; then
-	echo "E: Not found Config file" $CONFIG_FILE > /dev/stderr
-	exit 1
+	die "config file not found: $CONFIG_FILE"
 else
-	echo "Using config file" $CONFIG_FILE
+	info "config file: $CONFIG_FILE"
 fi
 
 wanted_sections=("Build" "Base" "Source")
@@ -404,7 +494,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         section="${BASH_REMATCH[1]}"
         if [[ " ${wanted_sections[*]} " =~ " $section " ]]; then
             current_section="$section"
-            echo -e "\n [$current_section]"
+            printf '   %s\n' "${_B}[$current_section]${_R}"
         else
             current_section=""
         fi
@@ -420,7 +510,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         value="${value%\"}"
         value="${value#\"}"
 
-        printf "   %-20s : %s\n" "$key" "$value"
+        printf "     %-20s : %s\n" "$key" "$value"
     fi
 # Tracked config is split: [Build]/[Base] live in the sibling distro.conf,
 # [Source] in build.conf.  Read both so the summary shows every section.
@@ -430,11 +520,10 @@ done < <(cat "$(dirname "$CONFIG_FILE")/distro.conf" "$CONFIG_FILE" 2>/dev/null)
 # Check required Python packages
 PY_REQ_FILE="py_requirements.txt"
 if [ ! -f "$PY_REQ_FILE" ]; then
-    echo "E: Python requirements file not found: $PY_REQ_FILE" >&2
-    exit 1
+    die "Python requirements file not found: $PY_REQ_FILE"
 fi
 
-echo "Checking required Python packages..."
+step "Python packages"
 
 # Halt on the FIRST missing module rather than collecting them into an
 # end-of-run summary: with a half-provisioned box the actionable signal is
@@ -446,19 +535,29 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 
     import_name=$(echo "$line" | awk '{print $1}')
     install_name=$(echo "$line" | awk '{print $2}')
+    dist_name=$(echo "$line" | awk '{print $3}')
+    min_ver=$(echo "$line" | awk '{print $4}')
 
-    printf '   %-14s ... ' "$import_name"
-    if python3 -c "import ${import_name}" 2>/dev/null; then
-        echo "ok"
+    if ! python3 -c "import ${import_name}" 2>/dev/null; then
+        warn "required Python module '${import_name}' is not importable"
+        die "install it with:  sudo apt install ${install_name}"
+    fi
+    # Version floor (columns 3+4; apt installs register dist metadata,
+    # so importlib.metadata resolves the installed version).
+    have_ver=""
+    if [ -n "$dist_name" ] && [ -n "$min_ver" ]; then
+        have_ver=$(python3 -c "import importlib.metadata as m; print(m.version('${dist_name}'))" 2>/dev/null || true)
+    fi
+    if [ -z "$have_ver" ]; then
+        warn "${import_name} required >= ${min_ver:-?}, found unknown"
+    elif ! dpkg --compare-versions "$have_ver" ge "$min_ver"; then
+        die "${import_name} required >= ${min_ver}, found ${have_ver}"
     else
-        echo "MISSING"
-        echo "E: required Python module '${import_name}' is not importable." >&2
-        echo "   install it with:  sudo apt install ${install_name}" >&2
-        exit 1
+        ok "${import_name} required >= ${min_ver}, found ${have_ver}"
     fi
 done < "$PY_REQ_FILE"
 
-echo "All required Python packages found."
+ok "all required Python packages found"
 
 # Forward UX-05 flags to build.py.  Each is stripped from sys.argv by
 # build.py:main before BuildConfig (which uses argparse) sees argv.

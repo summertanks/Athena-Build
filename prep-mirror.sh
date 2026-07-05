@@ -46,16 +46,16 @@ banner() {
     printf '%s\n' "${_D}https://github.com/summertanks/Athena-Build${_R}"
     printf '%s\n' "${_B}Asgard mirror preparation${_R}"
 }
-step()  { printf '%s\n' "${_C}${_B}▸ ${1}${_R}"; }
+step()  { printf '\n%s\n' "${_C}${_B}${1}${_R}"; }
 info()  { printf '   %s\n' "${1}"; }
-ok()    { printf '   %s%s%s\n' "${_G}" "[OK] ${1}" "${_R}"; }
+ok()    { printf '   %s%s%s\n' "${_G}" "[  OK] ${1}" "${_R}"; }
 warn()  { printf '   %s%s%s\n' "${_Y}" "[WARN] ${1}" "${_R}"; }
 die()   { printf '%s\n' "${_E}${_B}[FAIL] ${1}${_R}" >&2; exit "${2:-1}"; }
 
 
 mark()  { case "$1" in
-            present|yes|ours) printf '%s%-6s%s' "$_G" "[OK]" "$_R" ;;
-            *)                printf '%s%-6s%s' "$_Y" "[WARN]" "$_R" ;;
+            present|yes|ours) printf '%s%s%s' "$_G" "[  OK]" "$_R" ;;
+            *)                printf '%s%s%s' "$_Y" "[WARN]" "$_R" ;;
           esac; }
 
 #  argument parsing

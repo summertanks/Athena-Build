@@ -279,7 +279,8 @@ def test_transpose_scheme_boundary_table_and_ordering():
         '1.2.3-4+asg1u3+p1',
         '1.2.3-4+asg1u4',
     ]
-    for _lo, _hi in zip(_asg_chain, _asg_chain[1:]):
+    # pairwise walk — the offset slice is one shorter by design
+    for _lo, _hi in zip(_asg_chain, _asg_chain[1:], strict=False):
         assert _lt(_lo, _hi), f"ordering broken: {_lo} !< {_hi}"
     # A forced rebuild on a pristine base is anchored too (sorts below u1).
     assert _T('1.0-2', 'asg', 1, 0, 1) == '1.0-2+asg1u0+b1'

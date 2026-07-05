@@ -1,8 +1,10 @@
 """Builder identity — Ed25519 sign/verify, keyring load.
 
 Backed by openssl(1) — no Python crypto dep required on the operator's
-host.  openssl 1.1.1+ supports Ed25519 natively (`openssl genpkey
--algorithm Ed25519`, `openssl pkeyutl -sign -rawin`).
+host.  Requires OpenSSL 3.0+: Ed25519 keygen (`openssl genpkey
+-algorithm Ed25519`) landed in 1.1.1, but the raw-input signing this
+module uses (`openssl pkeyutl -sign -rawin`) only exists from 3.0.
+The build-system.sh preflight enforces the floor.
 
 Key layout:
 

@@ -1,14 +1,21 @@
 # Python package requirements
-# Format: import_name   install_name
+# Format: import_name   install_name   dist_name   min_version
 # Lines starting with # are ignored
-
+#
 # install_name is the Debian/apt package (build-system.sh suggests
-# `sudo apt install <install_name>`); the import_name is what Python sees.
-psutil        python3-psutil
-requests      python3-requests
-apt_pkg       python3-apt
-debian        python3-debian
-gnupg         python3-gnupg
-docker        python3-docker
-apt           python3-apt
-aptsources    python3-apt
+# `sudo apt install <install_name>`); import_name is what Python sees;
+# dist_name is the importlib.metadata distribution the version check
+# queries; min_version is the lowest release whose API surface the
+# code actually uses (audited 2026-07-05):
+#   psutil        cpu_percent/virtual_memory/.percent          -> 2.0
+#   requests      Response as context manager (download path)  -> 2.18.0
+#   python-apt    version_compare/check_dep/TagFile (ancient)  -> 1.1
+#   python-debian DpkgArchTable.matches_architecture           -> 0.1.44
+#   python-gnupg  GPG(gnupghome=)/import_keys/verify_file      -> 0.4.0
+#   docker        containers.run(nano_cpus=)                   -> 2.4
+psutil        python3-psutil    psutil          2.0
+requests      python3-requests  requests        2.18.0
+apt_pkg       python3-apt       python-apt      1.1
+debian        python3-debian    python-debian   0.1.44
+gnupg         python3-gnupg     python-gnupg    0.4.0
+docker        python3-docker    docker          2.4

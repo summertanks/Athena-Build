@@ -7505,8 +7505,8 @@ def test_cve_command_registered():
 def test_build_system_sh_grype_is_non_blocking():
     """build-system.sh checks for grype at startup but does NOT exit
     on its absence — grype is OPTIONAL.  Source-level pin: the check
-    block must use the warning shape (echo 'W:') and must NOT be
-    followed by an `exit 1`."""
+    block must use the warn helper (non-fatal) and must NOT die or
+    `exit 1`."""
     _bs = os.path.join(_ROOT, 'build-system.sh')
     with open(_bs) as fh:
         _body = fh.read()
@@ -7522,11 +7522,11 @@ def test_build_system_sh_grype_is_non_blocking():
     )
     assert _m, 'grype check block not found in build-system.sh'
     _block = _m.group(0)
-    assert 'exit 1' not in _block, (
-        'grype check must be non-blocking (no exit 1 on absence)'
+    assert 'exit 1' not in _block and 'die ' not in _block, (
+        'grype check must be non-blocking (no exit/die on absence)'
     )
-    assert 'W: grype' in _block, (
-        'grype-absent branch must use the W: (warning) shape'
+    assert 'warn "grype' in _block, (
+        'grype-absent branch must use the warn (non-fatal) helper'
     )
 
 

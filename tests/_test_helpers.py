@@ -1588,7 +1588,8 @@ def _advertised_and_dispatched(method):
         if (isinstance(_node, ast.Compare)
                 and isinstance(_node.left, ast.Name)
                 and _node.left.id == 'action'):
-            for _op, _comp in zip(_node.ops, _node.comparators):
+            # ast.Compare guarantees len(ops) == len(comparators)
+            for _op, _comp in zip(_node.ops, _node.comparators, strict=True):
                 if isinstance(_op, ast.Eq) and isinstance(_comp, ast.Constant):
                     if isinstance(_comp.value, str):
                         _disp.add(_comp.value)
