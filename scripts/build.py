@@ -2278,6 +2278,7 @@ if __name__ == '__main__':
     # git-describe provenance (`0.1.3-1-gSHA-dirty`) is noise in a 50-char
     # footer.  The exact version is still one keystroke away via `--version`
     # and is stamped verbatim into build records / ISOs / the repo Release.
+    # No stdout logo here — build-system.sh (the entry point) already
+    # printed the banner; the TUI console prints its own on session start.
     build_banner = f"Athena Build System {_version.base_version()}"
-    print(asciiart_logo)
     main(build_banner)
