@@ -3562,7 +3562,8 @@ def test_cmd_mirror_add_refuses_unprepared_mirror():
             _restore()
         _joined = '\n'.join(_sess.lines)
         assert _ok is False, _joined
-        assert 'NOT prepared' in _joined and 'prep-mirror.sh' in _joined, _joined
+        assert 'not prepared' in _joined and 'prep-mirror.sh' in _joined, _joined
+        assert '[FAIL]' in _joined, _joined
         # nothing registered
         assert _mirror.list_mirrors(_sess.config) == [], _joined
 

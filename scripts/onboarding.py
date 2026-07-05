@@ -159,7 +159,7 @@ def run_onboarding(session) -> None:
         getattr(config, 'system_role', '?'),
         getattr(config, 'build_mode', '?'),
         getattr(config, 'system_name', '?'))
-    console.print("✓ setup complete — all commands enabled.",
+    console.print("[  OK] setup complete — all commands enabled.",
                   tui.COLOR_HIGHLIGHT)
 
     # Post-setup sanity check: now that the snapshot is pinned and any mirror is
@@ -279,7 +279,7 @@ def _onboard_first(session) -> bool:
         console.print("Generating tier-1 signing key…", tui.COLOR_INFO)
         if session.cmd_key('generate') is False:
             logger.error('configure: tier-1 signing key generation failed')
-            console.print("✗ key generation failed", tui.COLOR_ERROR)
+            console.print("[FAIL] key generation failed", tui.COLOR_ERROR)
             return False
         logger.info('configure: tier-1 signing key generated')
     else:
@@ -308,18 +308,18 @@ def _onboard_federation(session) -> bool:
         return False
     _proto, _host, _path = _parse_public_url(_url)
     if not _host:
-        console.print("✗ enter an http(s)://host/<dist-id> URL (no user@)",
+        console.print("[FAIL] enter an http(s)://host/<dist-id> URL (no user@)",
                       tui.COLOR_ERROR)
         return False
     _pub = f"{_proto}://{_host}{_path}"
     _ok, _det = session._mirror_is_prepared(_pub)
     if not _ok:
-        console.print(f"✗ not a working Asgard mirror ({_det})", tui.COLOR_ERROR)
+        console.print(f"[FAIL] not a working Asgard mirror ({_det})", tui.COLOR_ERROR)
         if not _path:
             console.print("  (did you include the repo path, e.g. /asgard?)",
                           tui.COLOR_INFO)
         return False
-    console.print(f"✓ working mirror ({_host})", tui.COLOR_INFO)
+    console.print(f"[  OK] working mirror ({_host})", tui.COLOR_INFO)
 
     # 2. SSH bits → copy key, validate auth + write.
     _login = _ask_required(f"SSH login user@host (user, host={_host}):")
@@ -327,7 +327,7 @@ def _onboard_federation(session) -> bool:
         return False
     _user, _sshhost = _split_login(_login, _host)
     if not _user:
-        console.print("✗ enter a user (or user@host)", tui.COLOR_ERROR)
+        console.print("[FAIL] enter a user (or user@host)", tui.COLOR_ERROR)
         return False
     # Remote repo path = the repo's FILESYSTEM path on the mirror
     # (prep-mirror.sh's ~<user>/<dist-id>); offer that as the default.
@@ -343,7 +343,7 @@ def _onboard_federation(session) -> bool:
     _name = _derive_name(_sshhost)
     _keydst = os.path.join(config.dir_config, f"{_name}.key")
     if not _copy_key(_keysrc, _keydst):
-        console.print(f"✗ cannot read SSH key {_keysrc}", tui.COLOR_ERROR)
+        console.print(f"[FAIL] cannot read SSH key {_keysrc}", tui.COLOR_ERROR)
         return False
     import mirror as _m
     _ok, _det = _m.probe_dns_and_tcp(_sshhost, 22)
@@ -354,10 +354,10 @@ def _onboard_federation(session) -> bool:
     if not _ok:
         logger.error('configure: federation ssh check failed for %s (%s)',
                      _sshhost, _det)
-        console.print(f"✗ ssh check failed ({_det})", tui.COLOR_ERROR)
+        console.print(f"[FAIL] ssh check failed ({_det})", tui.COLOR_ERROR)
         return False
     logger.info('configure: federation ssh access + write to %s ok', _sshhost)
-    console.print("✓ ssh access + write", tui.COLOR_INFO)
+    console.print("[  OK] ssh access + write", tui.COLOR_INFO)
 
     # 3. GPG key → import + verify against the mirror's signed head.
     _gpgsrc = _ask_required("Tier-1 GPG private key path:")
@@ -368,7 +368,7 @@ def _onboard_federation(session) -> bool:
         logger.error('configure: tier-1 gpg key rejected (no match to mirror)')
         return False
     logger.info('configure: tier-1 gpg key installed + verified against mirror')
-    console.print("✓ gpg key matches the mirror (can publish)", tui.COLOR_INFO)
+    console.print("[  OK] gpg key matches the mirror (can publish)", tui.COLOR_INFO)
     console.print(f"keys installed: {_keydst} + signing keyring",
                   tui.COLOR_INFO)
 
@@ -386,7 +386,7 @@ def _onboard_federation(session) -> bool:
         logger.info('configure: initialising builder identity %s', _bid)
         if session.cmd_mirror('init', _bid) is False:
             logger.error('configure: builder init failed (%s)', _bid)
-            console.print("✗ builder init failed", tui.COLOR_ERROR)
+            console.print("[FAIL] builder init failed", tui.COLOR_ERROR)
             return False
         logger.info('configure: builder identity %s created', _bid)
 
@@ -398,14 +398,14 @@ def _onboard_federation(session) -> bool:
                           '--proto', _proto, '--name', _name,
                           '--no-probe') is False:
         logger.error('configure: mirror add failed (%s)', _name)
-        console.print("✗ mirror add failed", tui.COLOR_ERROR)
+        console.print("[FAIL] mirror add failed", tui.COLOR_ERROR)
         return False
     if session.cmd_mirror('builders', 'register', _name) is False:
         logger.error('configure: builder registration failed on %s', _name)
-        console.print("✗ registration failed", tui.COLOR_ERROR)
+        console.print("[FAIL] registration failed", tui.COLOR_ERROR)
         return False
     logger.info('configure: registered builder on %s', _name)
-    console.print(f"✓ registered on {_name}", tui.COLOR_HIGHLIGHT)
+    console.print(f"[  OK] registered on {_name}", tui.COLOR_HIGHLIGHT)
     _keys = session._coord_self_keys()
     config.system_role = 'federation'
     utils.write_local_conf(config, role='federation')
@@ -414,7 +414,7 @@ def _onboard_federation(session) -> bool:
     import mirror as _mirror
     if not _mirror.set_registration(config, _name, _keys[0] if _keys else ''):
         console.print(
-            "✗ could not record registration in mirror.conf", tui.COLOR_ERROR)
+            "[FAIL] could not record registration in mirror.conf", tui.COLOR_ERROR)
         return False                      # stay un-configured + re-runnable
 
     # 6. Mode.
@@ -424,7 +424,7 @@ def _onboard_federation(session) -> bool:
         return False
     config.build_mode = _mode
     utils.write_local_conf(config, mode=_mode)
-    console.print(f"✓ mode = {_mode}", tui.COLOR_INFO)
+    console.print(f"[  OK] mode = {_mode}", tui.COLOR_INFO)
     return True
 
 
@@ -438,37 +438,37 @@ def _validate_and_install_gpg(session, gpg_src, ssh_url, ssh_key) -> bool:
     import coord.head as _h
     config = session.config
     if not os.path.isfile(gpg_src):
-        console.print(f"✗ gpg key not found: {gpg_src}", tui.COLOR_ERROR)
+        console.print(f"[FAIL] gpg key not found: {gpg_src}", tui.COLOR_ERROR)
         return False
     _coord_spec, _ = _m.rsync_spec_for_url(_m.coord_root_for(ssh_url))
     with tempfile.TemporaryDirectory() as _tmp:
         _ok, _det = signing.import_key(_tmp, gpg_src)
         if not _ok:
-            console.print(f"✗ gpg import failed ({_det})", tui.COLOR_ERROR)
+            console.print(f"[FAIL] gpg import failed ({_det})", tui.COLOR_ERROR)
             return False
         _fetch = os.path.join(_tmp, 'fetched')
         _ok, _det = _t.pull_remote_coord(
             local_dest=_fetch, remote_spec=_coord_spec, ssh_key=ssh_key)
         if not _ok:
-            console.print(f"✗ cannot fetch coord tree ({_det})",
+            console.print(f"[FAIL] cannot fetch coord tree ({_det})",
                           tui.COLOR_ERROR)
             return False
         if not os.path.isfile(_h.coord_head_path(_fetch)):
-            console.print("✗ mirror has no signed head yet (origin must "
+            console.print("[FAIL] mirror has no signed head yet (origin must "
                           "publish first)", tui.COLOR_ERROR)
             return False
         if _h.read_coord_head(_fetch, _tmp) is None:
-            console.print("✗ gpg key does not match the mirror's signing key",
+            console.print("[FAIL] gpg key does not match the mirror's signing key",
                           tui.COLOR_ERROR)
             return False
         # Validated → commit into the real signing keyring.
         _ok, _det = signing.import_key(signing.signing_home(config), gpg_src)
         if not _ok:
-            console.print(f"✗ gpg install failed ({_det})", tui.COLOR_ERROR)
+            console.print(f"[FAIL] gpg install failed ({_det})", tui.COLOR_ERROR)
             return False
     _ok, _msg = signing.verify_key(config)
     if not _ok:
-        console.print(f"✗ signing key not usable ({_msg})", tui.COLOR_ERROR)
+        console.print(f"[FAIL] signing key not usable ({_msg})", tui.COLOR_ERROR)
         return False
     # Export the PUBLIC keyring so build_chroot can embed it (the installed
     # system trusts our mirror via `[signed-by=…]`).  generate_key does this for
@@ -496,7 +496,7 @@ def _ensure_builder_identity(session) -> bool:
     logger.info('configure: initialising builder identity %s', _bid)
     if session.cmd_mirror('init', _bid) is False:
         logger.error('configure: builder init failed (%s)', _bid)
-        console.print("✗ builder init failed", tui.COLOR_ERROR)
+        console.print("[FAIL] builder init failed", tui.COLOR_ERROR)
         return False
     logger.info('configure: builder identity %s created', _bid)
     return True
@@ -535,7 +535,7 @@ def _add_mirror_interactive(session) -> str:
             _rpath = _rpath or _default_path
             if not _rpath:
                 console.print(
-                    "✗ an ssh publish mirror needs a remote repo path",
+                    "[FAIL] an ssh publish mirror needs a remote repo path",
                     tui.COLOR_ERROR)
                 return ''
             _url = _url.rstrip('/') + '/' + _rpath.lstrip('/')
@@ -552,10 +552,10 @@ def _add_mirror_interactive(session) -> str:
                 ' '.join(str(_a) for _a in _args))
     if session.cmd_mirror('add', *_args) is False:
         logger.error("configure: mirror add failed (%s)", _name)
-        console.print("✗ mirror add failed", tui.COLOR_ERROR)
+        console.print("[FAIL] mirror add failed", tui.COLOR_ERROR)
         return ''
     logger.info("configure: mirror '%s' added (%s)", _name, _url)
-    console.print(f"✓ mirror '{_name}' added", tui.COLOR_HIGHLIGHT)
+    console.print(f"[  OK] mirror '{_name}' added", tui.COLOR_HIGHLIGHT)
     return _name
 
 

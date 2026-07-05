@@ -250,7 +250,7 @@ forced to `distribution`, and the mirror prompts run in this order:
    `local`/`file://` mirrors.
 
 The wizard then runs the registration (the same probes and preview as
-`mirror add` — see below) and reports `✓ mirror 'origin' added`.  Two
+`mirror add` — see below) and reports `[  OK] mirror 'origin' added`.  Two
 Enter-to-accept prompts follow the role flow — the parallel-build count,
 and (origin only) the **archive snapshot pin** — then the wizard marks
 setup complete and finishes with an automatic `config check` that probes
@@ -264,11 +264,11 @@ the live mirror before the next one is asked, so a typo fails
 immediately, not at the end:
 
 - **Mirror URL** (`https://host/path`) → probed for the `asgard-mirror`
-  marker (`✓ working mirror`).
+  marker (`[  OK] working mirror`).
 - **SSH login / remote path / key path** → SSH auth + write are probed and
-  the key is copied to `config/<name>.key` (0600) (`✓ ssh access + write`).
+  the key is copied to `config/<name>.key` (0600) (`[  OK] ssh access + write`).
 - **Tier-1 GPG private key path** → imported and validated by verifying the
-  mirror's *signed coord-head* (`✓ gpg key matches the mirror`). You supply
+  mirror's *signed coord-head* (`[  OK] gpg key matches the mirror`). You supply
   the **private** key (copied off the origin) so this peer can publish; the
   wizard installs it into the signing keyring itself.
 - **Builder identity** (defaults to the hostname), then `mirror add` +

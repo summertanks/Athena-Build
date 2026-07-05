@@ -974,7 +974,7 @@ class RepoCommandsMixin(SessionState):
                     f"{len(_claimed_foreign)} foreign-cross → run "
                     "`mirror withdraw-foreign` to retract (publish won't)")
             console.print(
-                f"\n  ⚠ {len(_claimed)} of these still have a LIVE published "
+                f"\n  [WARN] {len(_claimed)} of these still have a LIVE published "
                 "claim on a mirror — run `mirror publish` FIRST and they "
                 f"release automatically ({'; '.join(_what)}); then cleanup + "
                 "`mirror audit` stay clean.  This is about ORDER, not safety: "

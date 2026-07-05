@@ -452,10 +452,12 @@ class MirrorCommandsMixin(SessionState):
             _prep_ok, _prep_detail = self._mirror_is_prepared(_public_url)
             if not _prep_ok:
                 console.print(
-                    f"mirror add: {_host} is NOT prepared as an Asgard "
-                    f"mirror ({_prep_detail}).  Prepare it first:\n"
-                    f"    ./prep-mirror.sh {_normalised} <ssh-key>\n"
-                    "(or pass `--no-probe` to skip this check).",
+                    f"[FAIL] mirror add: {_host} is not prepared as an "
+                    "Asgard mirror\n"
+                    f"       ({_prep_detail})\n"
+                    "       prepare it first:  "
+                    f"./prep-mirror.sh {_normalised} <ssh-key>\n"
+                    "       (or pass --no-probe to skip this check)",
                     tui.COLOR_ERROR)
                 return False
             console.print(
