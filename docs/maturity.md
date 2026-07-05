@@ -1,4 +1,4 @@
-# Project maturity — detailed assessment
+# Project maturity
 
 This is the long-form companion to the maturity summary in the [README](../README.md). It scores the project by *distance to the intended goal* — a fully from-source, trustworthy Debian derivative — not by activity. Each dimension carries a score, the reasoning behind it, and the direction it is moving since the last assessment.
 
