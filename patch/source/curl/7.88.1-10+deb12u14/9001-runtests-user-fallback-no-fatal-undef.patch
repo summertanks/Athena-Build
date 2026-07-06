@@ -1,0 +1,55 @@
+Description: runtests.pl: fall back to getpwuid() when USER is unset;
+ never substitute an undef $USER.
+ .
+ The Athena build container runs dpkg-buildpackage without USER, USERNAME
+ or LOGNAME in the environment. runtests.pl derives $USER only from those
+ variables, and runs under `use warnings FATAL => 'all'` (line 79), so at
+ the first ssh-based test (582) the s/%USER/$USER/ substitution in
+ subVariables() (line 3575) hits an undefined $USER and the fatal warning
+ kills the whole test run ("make: Error 2") instead of skipping the test.
+ .
+ Two changes:
+ 1. Fall back to getpwuid($<) for $USER, the pure-perl equivalent of the
+    `whoami` / `id -un` fallback upstream curl added in tests/servers.pm.
+    With a user name available (and openssh-server installed via the
+    <!nocheck> build-dependency) the sftp/scp/socks-over-ssh tests can
+    actually run.
+ 2. Guard the %USER substitution so that if no user name can be
+    determined at all, ssh-based tests skip cleanly through the existing
+    "Can't start ssh server due to lack of USER name" path in
+    runsshserver() rather than aborting the run.
+Origin: backport, https://github.com/curl/curl (tests/servers.pm USER fallback)
+Bug: https://github.com/curl/curl/issues/9007
+Forwarded: not-needed (fixed differently upstream)
+Author: Athena-Build
+Last-Update: 2026-07-06
+---
+--- a/tests/runtests.pl
++++ b/tests/runtests.pl
+@@ -401,6 +401,12 @@
+         $USER = $ENV{LOGNAME};  # Some Unix (I think)
+     }
+ }
++if (!$USER) {
++    # no user name in the environment (e.g. a minimal build container);
++    # fall back to the password database. Upstream curl does the
++    # equivalent with `whoami` / `id -un` in tests/servers.pm.
++    $USER = getpwuid($<);
++}
+ 
+ # enable memory debugging if curl is compiled with it
+ $ENV{'CURL_MEMDEBUG'} = $memdump;
+@@ -3572,7 +3578,12 @@
+     $$thing =~ s/${prefix}FILE_PWD/$file_pwd/g;
+     $$thing =~ s/${prefix}SSH_PWD/$ssh_pwd/g;
+     $$thing =~ s/${prefix}SRCDIR/$srcdir/g;
+-    $$thing =~ s/${prefix}USER/$USER/g;
++    # $USER may still be undefined if no user name could be determined;
++    # this script runs with FATAL warnings, so substituting undef here
++    # would abort the whole test run instead of letting ssh-based tests
++    # skip via the check in runsshserver().
++    my $subst_user = (defined $USER) ? $USER : '';
++    $$thing =~ s/${prefix}USER/$subst_user/g;
+ 
+     $$thing =~ s/${prefix}SSHSRVMD5/$SSHSRVMD5/g;
+     $$thing =~ s/${prefix}SSHSRVSHA256/$SSHSRVSHA256/g;

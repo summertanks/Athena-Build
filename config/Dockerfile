@@ -63,6 +63,23 @@ ARG SNAPSHOT_TS
 # fails the build LOUDLY rather than silently leaving the image at the
 # live mirror (which would re-introduce the contamination problem).
 
+# Drop the docker-specific dpkg configuration the slim base image ships
+# (/etc/dpkg/dpkg.cfg.d/docker + docker-apt-speedup).  Two reasons:
+#   1. The path-exclude/path-include filters in `docker` are loaded by
+#      EVERY dpkg invocation; under DPKG_DEBUG they emit 19 extra
+#      "adding exclude/include filter" stderr lines, which breaks
+#      exact-stderr autotest checks in source builds (dpkg's own
+#      testsuite, src/at/chdir.at, tests 41-45).
+#   2. A real Debian buildd has no such config — the filters silently
+#      strip docs/man/locale files from every package installed in the
+#      container (toolchain + per-build build-deps), deviating from a
+#      clean build environment.  We build with docs enabled.
+# `docker-apt-speedup` (force-unsafe-io) is removed for the same
+# buildd-parity reason; the fsync speedup is not worth the deviation.
+# Removed BEFORE the toolchain install below so those packages land
+# complete, as they would on a buildd.
+RUN rm -f /etc/dpkg/dpkg.cfg.d/docker*
+
 # (a) toolchain install against the live mirror.
 RUN set -eux; \
     apt-get update; \
