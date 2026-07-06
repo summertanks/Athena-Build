@@ -92,6 +92,13 @@ def stage_bundle(bundle: str, *, dockerfile: str, source_files: 'list[str]',
             if _p.endswith('.patch'):
                 shutil.copy(os.path.join(patch_dir, _p),
                             os.path.join(bundle, 'patch', _p))
+    # Version-independent prebuild script — shipped at the bundle root;
+    # run_container mounts it at /prebuild.sh iff present in the bundle
+    # (presence tracks the recipe: compose_recipe only emits the
+    # `. /prebuild.sh` step when the file existed at compose time).
+    _pb = recipe.get('prebuild') or ''
+    if _pb and os.path.isfile(_pb):
+        shutil.copy(_pb, os.path.join(bundle, 'prebuild.sh'))
     _params: dict = {
         'package':    recipe.get('filename_prefix'),
         'image_tag':  recipe['image_tag'],

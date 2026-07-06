@@ -771,10 +771,17 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 self.config.dir_patch_source, _pkg,
                 utils.version_no_epoch(_src.version),
             )
+            # Version-independent prebuild script — folded into the same
+            # hash by every caller (see utils.patch_set_hash), so an edit
+            # or addition invalidates the record exactly like a patch.
+            _pb_path = utils.prebuild_script_path(
+                self.config.dir_patch_source, _pkg)
+            _pb_exists = os.path.isfile(_pb_path)
 
             # Stage 1: mtime gate.  Re-hashing every source's patch tree
             # on every patch_refresh is wasteful when nothing changed —
-            # gate on "is any patch file newer than the record?"
+            # gate on "is any patch file (or the prebuild script) newer
+            # than the record?"
             try:
                 _record_mtime = os.path.getmtime(_record_path)
             except OSError:
@@ -783,16 +790,23 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                 os.path.getmtime(os.path.join(_patch_dir, _pf)) > _record_mtime
                 for _pf in (_src.patch_list or [])
                 if os.path.exists(os.path.join(_patch_dir, _pf))
-            )
-            # Patch-removal case: no patches now, but record carries a
+            ) or (_pb_exists
+                  and os.path.getmtime(_pb_path) > _record_mtime)
+            # Removal case: nothing on disk now, but record carries a
             # non-empty hash → still need to compare (empty-set hash vs
-            # stored).  Bypass the mtime gate for that case.
-            if not _newer and not (_stored_hash and not _src.patch_list):
+            # stored).  Bypass the mtime gate for that case.  (Partial
+            # removal — one patch of several, or the prebuild while
+            # patches remain — is invisible to the mtime gate, same
+            # pre-existing limitation as before.)
+            if not _newer and not (_stored_hash
+                                   and not _src.patch_list
+                                   and not _pb_exists):
                 continue
 
             # Stage 2: content hash.
             _current_hash = utils.patch_set_hash(
-                _patch_dir, _src.patch_list or [])
+                _patch_dir, _src.patch_list or [],
+                prebuild_path=_pb_path if _pb_exists else None)
             if _stored_hash == _current_hash:
                 # Cosmetic edit (header / comment) — content unchanged.
                 # Touch the record so the next refresh's mtime gate
@@ -805,6 +819,9 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                      if os.path.exists(os.path.join(_patch_dir, _pf))),
                     default=0.0,
                 )
+                if _pb_exists:
+                    _newest_patch_mtime = max(
+                        _newest_patch_mtime, os.path.getmtime(_pb_path))
                 _touch_mtime = max(time.time(), _newest_patch_mtime + 1.0)
                 try:
                     os.utime(_record_path, (_touch_mtime, _touch_mtime))

@@ -308,6 +308,76 @@ def test_compose_recipe_assembles_image_args_and_cmd_str():
 
 
 
+def test_compose_recipe_prebuild_sourced_hashed_and_mounted():
+    """Version-independent `patch/source/<pkg>/prebuild.sh` — package-
+    specific build environment that must NOT land in the image (where it
+    would affect every build): (a) sourced into the build shell AFTER
+    unpack+patches and BEFORE dpkg-checkbuilddeps/dpkg-buildpackage, so
+    its exports reach the build; (b) folded into patch_set_hash so an
+    edit invalidates the build record; (c) carried in the recipe and
+    bind-mounted READ-ONLY at /prebuild.sh.  Absent script → zero effect."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+
+    def _fixture(patch_path):
+        _bc = buildcontainer.BuildContainer.__new__(
+            buildcontainer.BuildContainer)
+        _bc.arch = 'amd64'
+        _bc.cache = None
+        _bc.codename = 'thor'
+        _bc.build_distribution = 'Asgard'
+        _bc.build_base_id = 'asgard'
+        _bc.patch_path = patch_path
+        _bc.patch_empty = '/nonexistent/patch-empty'
+        _bc.snapshot_ts = '20260602T173733Z'
+        _bc._image_tag = 'athenalinux:build-bookworm-20260602T173733Z'
+        _bc.config = mock.Mock(
+            container_release='bookworm',
+            snapshot_baseurl='https://snapshot.debian.org/archive')
+        _bc.config.build_profiles_for.return_value = frozenset()
+        _bc.config.build_options_for.return_value = frozenset()
+        _bc._render_install_cmd = mock.Mock(return_value='APT_INSTALL; ')
+        _bc._write_snapshot_sources_cmd = mock.Mock(
+            return_value='WRITE_SOURCES; ')
+        _src = mock.Mock(package='adduser', version='3.134',
+                         files=['adduser_3.134.dsc', 'adduser_3.134.tar.xz'])
+        _src.build_depends.return_value = [[('debhelper', '', '')]]
+        _src._mirror = mock.Mock(component='main')
+        return _bc, _src
+
+    with tempfile.TemporaryDirectory() as _pp:
+        _bc, _src = _fixture(_pp)
+        _r0 = _bc.compose_recipe(_src)
+        assert _r0['prebuild'] == ''
+        assert '. /prebuild.sh' not in _r0['cmd_str']
+
+        os.makedirs(os.path.join(_pp, 'adduser'), exist_ok=True)
+        _pb = os.path.join(_pp, 'adduser', 'prebuild.sh')
+        with open(_pb, 'w') as _fh:
+            _fh.write('export FOO=1\n')
+        _r1 = _bc.compose_recipe(_src)
+        assert _r1['prebuild'] == _pb
+        _cmd = _r1['cmd_str']
+        assert '. /prebuild.sh; ' in _cmd
+        # sourced inside the unpacked tree, after patches, before the build
+        assert _cmd.index('dpkg-source -x') < _cmd.index('. /prebuild.sh')
+        assert _cmd.index('. /prebuild.sh') < _cmd.index('dpkg-checkbuilddeps')
+        # hash folds the script: presence and content both matter
+        assert _r1['patch_set_hash'] != _r0['patch_set_hash']
+        with open(_pb, 'w') as _fh:
+            _fh.write('export FOO=2\n')
+        assert _bc.compose_recipe(_src)['patch_set_hash'] \
+            != _r1['patch_set_hash']
+
+    # the build() bind mount is read-only (MAT-04 discipline)
+    import re
+    with open(os.path.join(_ROOT, 'scripts', 'buildcontainer.py')) as _fh:
+        _body = _fh.read()
+    assert re.search(r"'/prebuild\.sh',\s*'mode':\s*'ro'", _body), (
+        "/prebuild.sh must be bind-mounted read-only")
+
+
 def test_sec05_gate_returns_false_when_operator_declines():
     """SEC-05: the gate must return False when the operator answers 'n'
     to the YESNO prompt — caller (build()) returns False and skips."""
@@ -2556,6 +2626,29 @@ def test_comp03_all_containers_run_sites_carry_athena_label():
             f"containers.run site missing `labels=self._container_labels`:\n"
             f"{_args[:300]}")
 
+
+
+def test_all_containers_run_sites_carry_user_env():
+    """Source-grep: every `self.client.containers.run(` invocation in
+    buildcontainer.py must pass `environment=_CONTAINER_ENV` — docker does
+    not populate USER/LOGNAME from the image's `USER athena`, and package
+    test suites read them (curl's runtests.pl dies under fatal-warnings on
+    undefined $USER instead of skipping its ssh tests; a real buildd always
+    has both set)."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    import re as _re
+    _calls = list(_re.finditer(
+        r'self\.client\.containers\.run\((.*?)\)\s*(?:\n\s*self\._register_live|\n\s*logger|\n\s*_buf|\n\s*\w+\s*=|\Z)',
+        _src, _re.DOTALL))
+    assert len(_calls) >= 3, (
+        f"expected >=3 containers.run sites; found {len(_calls)}")
+    for _m in _calls:
+        assert 'environment=_CONTAINER_ENV' in _m.group(1), (
+            f"containers.run site missing `environment=_CONTAINER_ENV`:\n"
+            f"{_m.group(1)[:300]}")
+    assert "_CONTAINER_ENV = {'USER': 'athena', 'LOGNAME': 'athena'}" in _src
 
 
 def test_comp03_register_live_called_after_each_containers_run():
@@ -5564,6 +5657,7 @@ TESTS = [
     test_sec05_build_gates_on_audit_when_enabled_in_source,
     test_sec05_gate_short_circuits_when_no_deps,
     test_compose_recipe_assembles_image_args_and_cmd_str,
+    test_compose_recipe_prebuild_sourced_hashed_and_mounted,
     test_sec05_gate_returns_false_when_operator_declines,
     test_sec05_gate_returns_false_when_preview_infrastructure_fails,
     test_comp03_buildconfig_defaults_for_new_keys,
@@ -5641,6 +5735,7 @@ TESTS = [
     test_comp03_register_live_adds_under_lock_and_is_idempotent,
     test_comp03_deregister_live_removes_and_tolerates_missing_key,
     test_comp03_all_containers_run_sites_carry_athena_label,
+    test_all_containers_run_sites_carry_user_env,
     test_comp03_register_live_called_after_each_containers_run,
     test_comp03_deregister_live_called_in_every_finally,
     test_comp03_startup_orphan_reap_filters_by_athena_label,

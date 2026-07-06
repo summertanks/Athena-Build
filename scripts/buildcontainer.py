@@ -90,6 +90,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger('athena.build')
 
+# Environment for every container we run.  docker does NOT populate
+# USER/LOGNAME from the image's `USER athena` (config/Dockerfile), and
+# package test suites read them — curl's runtests.pl dies under
+# fatal-warnings on undefined $USER (its sshd setup) instead of
+# skipping; a real buildd always has both set.  Keep in step with the
+# Dockerfile's useradd.
+_CONTAINER_ENV = {'USER': 'athena', 'LOGNAME': 'athena'}
+
 # serialises segregate's per-file moves from
 # every worker's scratch dir into the shared repo subdirs.  Held
 # only for the duration of one source's move loop (microseconds);
@@ -1058,7 +1066,22 @@ class BuildContainer:
             f'do patch -p1 < /patch/"$PATCH"; done; '
             if _live_patch_list else ''
         )
-        _patch_set_hash = utils.patch_set_hash(_live_patch_dir, _live_patch_list)
+        # Optional version-independent prebuild script — package-specific
+        # build environment (exports, setup) that must not land in the image
+        # where it would affect every build.  Sourced into the build shell
+        # (so exports persist) after unpack+patches, before dpkg-buildpackage;
+        # under the recipe's set -e a script error FAILS the build loudly.
+        _prebuild_src = utils.prebuild_script_path(
+            self.patch_path, src_pkg.package)
+        if not os.path.isfile(_prebuild_src):
+            _prebuild_src = ''
+        prebuild_cmd = (
+            'echo "prebuild: sourcing prebuild.sh"; . /prebuild.sh; '
+            if _prebuild_src else ''
+        )
+        _patch_set_hash = utils.patch_set_hash(
+            _live_patch_dir, _live_patch_list,
+            prebuild_path=_prebuild_src or None)
         _comp = getattr(
             getattr(src_pkg, '_mirror', None), 'component', '') or 'main'
         # patch dir to mount (local) or ship (remote); empty fallback.
@@ -1106,6 +1129,7 @@ class BuildContainer:
                   f'{patches_applied_cmd}' \
                   f'{patch_cmd}' \
                   f'{_token_subst}' \
+                  f'{prebuild_cmd}' \
                   f'{deb_build_env} dpkg-checkbuilddeps; {deb_build_env} dpkg-buildpackage -a {self.arch} -b -us -uc -nc; cd ..;' \
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;'
 
@@ -1119,6 +1143,7 @@ class BuildContainer:
             'patch_dir':       _src_patch_path,
             'patch_list':      _live_patch_list,
             'patch_set_hash':  _patch_set_hash,
+            'prebuild':        _prebuild_src,
             'component':       _comp,
             'cmd_str':         cmd_str,
             'image_tag':       self._image_tag,
@@ -1230,10 +1255,17 @@ class BuildContainer:
             if self._localmirror_active:
                 _volumes[self.config.dir_localmirror] = {
                     'bind': '/localmirror', 'mode': 'ro'}
+            # Version-independent prebuild script (single-file ro bind) —
+            # mount tracks recipe presence: compose_recipe only emits the
+            # `. /prebuild.sh` step when the file existed at compose time.
+            if _recipe.get('prebuild'):
+                _volumes[_recipe['prebuild']] = {
+                    'bind': '/prebuild.sh', 'mode': 'ro'}
             container = self.client.containers.run(
                 self._image_tag, command=["/bin/bash", "-c", cmd_str],
                 detach=True, auto_remove=False,
                 labels=self._container_labels,
+                environment=_CONTAINER_ENV,
                 volumes=_volumes,
                 **self._resource_kwargs(),
             )
@@ -1653,6 +1685,7 @@ class BuildContainer:
                 self._image_tag, command=["/bin/bash", "-c", cmd_str],
                 detach=True, auto_remove=False,
                 labels=self._container_labels,
+                environment=_CONTAINER_ENV,
             )
             self._register_live(container)
             _buf: bytes = b''
@@ -1784,6 +1817,7 @@ class BuildContainer:
                 command=['/bin/bash', '-c', cmd_str],
                 detach=True, auto_remove=False,
                 labels=self._container_labels,
+                environment=_CONTAINER_ENV,
                 volumes={
                     staging_dir: {'bind': '/staging', 'mode': 'rw'},
                     _output_dir: {'bind': '/output',  'mode': 'rw'},

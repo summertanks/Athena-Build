@@ -635,6 +635,15 @@ patch -p1 < <patch dir>/package/version/xxxx-description.patch
 The patch file numbering is four digit, preferably start from 9001 for simplicity sake
 The patch folder will have folder for each source package 'name' and sub folders for respective versions. each patch is version specific and saved in that version folder.
 
+**Prebuild scripts.** When a package needs build-time *environment* rather
+than a source change — exports, ulimits, generated files that must not go
+into the shared container image — drop an optional
+`patch/source/<pkg>/prebuild.sh` (next to the version dirs, version-independent
+so it survives version bumps). It is sourced into the build shell after
+patches and before `dpkg-buildpackage`, a script error fails that package's
+build, and edits trigger a rebuild just like a patch edit. Details:
+[`docs/patching.md`](docs/patching.md).
+
 ## Development
 
 Lint and unit tests run in CI on every push (`.github/workflows/ci.yml`).

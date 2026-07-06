@@ -704,7 +704,8 @@ def compute_tree_hash(root: str,
     return _h.hexdigest()
 
 
-def patch_set_hash(patch_dir: str, patch_files: list) -> str:
+def patch_set_hash(patch_dir: str, patch_files: list,
+                   prebuild_path: 'Optional[str]' = None) -> str:
     """SHA256 over (filename + NUL + content + NUL) tuples in the given order.
 
     Used by `_refresh_patches` (build.py) to confirm whether a patch
@@ -716,8 +717,15 @@ def patch_set_hash(patch_dir: str, patch_files: list) -> str:
     Also stamped into the build.json record's patch_set_hash field on
     every build attempt so future refreshes have a stable baseline.
 
-    Returns hex digest.  Empty patch_files → digest of "".
-    Missing/unreadable patch files are skipped silently (mirrors
+    `prebuild_path` — the package's version-independent prebuild script
+    (`patch/source/<pkg>/prebuild.sh`, sourced into the build shell).
+    It shapes the build exactly like a patch does, so its content folds
+    into the same hash: editing, adding, or removing it invalidates the
+    build record.  EVERY caller (compose_recipe, _refresh_patches, sbom)
+    must pass it for the baselines to agree.
+
+    Returns hex digest.  Empty patch_files + no prebuild → digest of "".
+    Missing/unreadable files are skipped silently (mirrors
     _refresh_patches's defensive os.path.exists guard); the resulting
     hash naturally differs from a baseline taken when the file was
     readable, which is the conservative behaviour.
@@ -733,7 +741,28 @@ def patch_set_hash(patch_dir: str, patch_files: list) -> str:
         _h.update(b'\0')
         _h.update(_content)
         _h.update(b'\0')
+    if prebuild_path:
+        try:
+            with open(prebuild_path, 'rb') as fh:
+                _pb: 'Optional[bytes]' = fh.read()
+        except OSError:
+            _pb = None
+        if _pb is not None:
+            _h.update(b'prebuild.sh\0')
+            _h.update(_pb)
+            _h.update(b'\0')
     return _h.hexdigest()
+
+
+def prebuild_script_path(patch_source_dir: str, package: str) -> str:
+    """Path of a package's OPTIONAL version-independent prebuild script:
+    `patch/source/<pkg>/prebuild.sh`.  Sits NEXT to the version-keyed patch
+    dirs (one intervention point per package) and survives version bumps.
+    Sourced (not executed) into the build shell before dpkg-buildpackage so
+    it can export package-specific build environment; a script error fails
+    that package's build (recipe runs under set -e).  Callers check
+    existence themselves."""
+    return os.path.join(patch_source_dir, package, 'prebuild.sh')
 
 
 # ─── canonical signed build record ──────────────────────────────────

@@ -8,6 +8,7 @@ patch's *why* survives.
 ```
 patch/
 ├── source/<pkg>/<exact-debian-version>/9001-*.patch       — source-level
+├── source/<pkg>/prebuild.sh                               — per-pkg build env
 ├── pre-install/<chroot-relative-path>/{file | *.patch}    — chroot bring-up
 ├── post-install/<chroot-relative-path>/{file | *.patch}   — chroot finalize
 └── empty/                                                 — bind-mount stub
@@ -18,6 +19,7 @@ Decision shortcut:
 | Symptom | Use |
 |---|---|
 | Upstream source has a bug / OOM / wrong defaults / build-system issue | **`patch/source/<pkg>/<ver>/`** |
+| ONE package's build needs environment setup (exports, ulimits, generated files) that must not land in the container image where it affects every build | **`patch/source/<pkg>/prebuild.sh`** |
 | A file must exist in the chroot BEFORE a package is unpacked (e.g. `/etc/passwd`, pre-seed input) | **`patch/pre-install/`** |
 | A file installed by a package needs to be amended / overwritten AFTER dpkg lays it down (e.g. `/etc/os-release`) | **`patch/post-install/`** |
 | You can fix it via debconf preseed / debian-installer answer | **NOT a patch** — use `installer/preseed.cfg` (memory: `feedback_prefer_preseed_over_code.md`) |
@@ -137,6 +139,26 @@ pkgs> to post-snapshot-advance versions` (see `0fa2680`,
   marked as temporary workarounds, not the steady state.
 - **Anything you'd preseed** — d-i answer keys, debconf priorities,
   apt-setup mirror choices.  See `installer/preseed.cfg`.
+
+### Prebuild script — `patch/source/<pkg>/prebuild.sh`
+
+Optional, **version-independent** (sits next to the version dirs, survives
+version bumps).  For package-specific build *environment* — exports,
+ulimits, generated files — that must not go into the container image where
+it would affect every build.
+
+- **Sourced, not executed** (`. /prebuild.sh`) in the build shell, inside
+  the unpacked source tree, after patches, before
+  `dpkg-checkbuilddeps`/`dpkg-buildpackage` — so its exports reach the
+  build.
+- Runs under the recipe's `set -e -o nounset`: a script error **fails that
+  package's build** loudly.
+- Content folds into `patch_set_hash` — editing it invalidates the build
+  record and triggers a rebuild, exactly like a patch edit.  Disclosed in
+  the SBOM as `athena:prebuild`.
+- Ships in the remote bundle; local and remote builds behave identically.
+- NOT for source modifications (that's a `.patch`) and NOT for env every
+  build needs (that's the Dockerfile / `_CONTAINER_ENV`).
 
 ## 2. Pre-install overlay — `patch/pre-install/<chroot-relative-path>/`
 

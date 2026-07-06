@@ -7,6 +7,9 @@ toolchain SemVer (`scripts/_version.py`); per-commit dev versions are automatic.
 
 ## [Unreleased]
 
+- **Per-package prebuild scripts** (`patch/source/<pkg>/prebuild.sh`; see
+  `docs/patching.md`).
+
 - **Reworked the version-numbering framework** (content-order / "transpose"
   scheme; see `docs/versioning-mechanics.md`).
 

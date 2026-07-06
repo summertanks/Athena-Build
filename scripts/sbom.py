@@ -102,7 +102,14 @@ def _component_for_source(src: Any, baseid: str,
         patch_root, _name, utils.version_no_epoch(src.version),
     )
     _patch_files = _list_patch_files(_pkg_patch_dir)
-    _patch_hash = utils.patch_set_hash(_pkg_patch_dir, _patch_files)
+    # The version-independent prebuild script shapes the build like a
+    # patch — same hash fold as compose_recipe/_refresh_patches, plus its
+    # own property so the SBOM discloses the intervention explicitly.
+    _pb_path = utils.prebuild_script_path(patch_root, _name)
+    _pb_exists = os.path.isfile(_pb_path)
+    _patch_hash = utils.patch_set_hash(
+        _pkg_patch_dir, _patch_files,
+        prebuild_path=_pb_path if _pb_exists else None)
     _props: List[Dict[str, str]] = [
         {'name': 'athena:patch-count',    'value': str(len(_patch_files))},
         {'name': 'athena:patch-set-hash', 'value': _patch_hash},
@@ -112,6 +119,8 @@ def _component_for_source(src: Any, baseid: str,
             'name':  'athena:patch-files',
             'value': ', '.join(_patch_files),
         })
+    if _pb_exists:
+        _props.append({'name': 'athena:prebuild', 'value': 'prebuild.sh'})
     _comp['properties'] = _props
     return _comp
 

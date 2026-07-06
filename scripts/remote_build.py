@@ -129,11 +129,23 @@ def run_container(bundle: str, tag: str, cmd_str: str,
             _emit(out, f"WARNING: localmirror {_lm_abs} not present — skipping "
                   "mount (recipe's file:///localmirror source may fail)")
 
+    # Version-independent prebuild script: mount iff the bundle shipped one
+    # (stage_bundle copies it only when the recipe's cmd_str sources it).
+    _pb: list = []
+    _pb_file = os.path.join(bundle, "prebuild.sh")
+    if os.path.isfile(_pb_file):
+        _pb = ["-v", f"{os.path.abspath(_pb_file)}:/prebuild.sh:ro"]
+        _emit(out, "mounting prebuild.sh → /prebuild.sh")
+
     # A stable --name lets the agent's watchdog `docker kill` a wedged build
     # and the orchestrator `docker rm -f` an orphan the client left behind.
     _name = ["--name", container_name] if container_name else []
     _cmd = [
-        "docker", "run", "--rm", *_name, *_caps, *_lm,
+        "docker", "run", "--rm", *_name, *_caps, *_lm, *_pb,
+        # docker doesn't populate USER/LOGNAME from the image's `USER athena`;
+        # test suites read them (curl's runtests.pl aborts on undefined $USER).
+        # Matches the local runner's _CONTAINER_ENV (buildcontainer.py).
+        "-e", "USER=athena", "-e", "LOGNAME=athena",
         "-v", f"{os.path.abspath(_src)}:/source:rw",
         "-v", f"{os.path.abspath(_patch)}:/patch:rw",
         "-v", f"{os.path.abspath(_out)}:/repo:rw",

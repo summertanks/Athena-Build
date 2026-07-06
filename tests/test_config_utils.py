@@ -902,6 +902,37 @@ def test_patch_set_hash_stable_and_order_sensitive():
         assert _h_changed != _h1, "content edit must change the digest"
 
 
+def test_patch_set_hash_folds_prebuild_script():
+    """The version-independent prebuild script (`patch/source/<pkg>/
+    prebuild.sh`) shapes the build like a patch, so it folds into
+    patch_set_hash: adding or editing it changes the digest; passing None
+    or a missing path leaves the patch-only digest (so packages without a
+    prebuild keep their existing baselines)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import patch_set_hash
+
+    with tempfile.TemporaryDirectory() as _root:
+        _a = os.path.join(_root, '9001-a.patch')
+        with open(_a, 'w') as fh: fh.write('content-a\n')
+        _base = patch_set_hash(_root, ['9001-a.patch'])
+        assert patch_set_hash(_root, ['9001-a.patch'],
+                              prebuild_path=None) == _base
+        assert patch_set_hash(
+            _root, ['9001-a.patch'],
+            prebuild_path=os.path.join(_root, 'missing.sh')) == _base
+        _pb = os.path.join(_root, 'prebuild.sh')
+        with open(_pb, 'w') as fh: fh.write('export FOO=1\n')
+        _h1 = patch_set_hash(_root, ['9001-a.patch'], prebuild_path=_pb)
+        assert _h1 != _base, "adding a prebuild must change the digest"
+        with open(_pb, 'w') as fh: fh.write('export FOO=2\n')
+        _h2 = patch_set_hash(_root, ['9001-a.patch'], prebuild_path=_pb)
+        assert _h2 != _h1, "prebuild content edit must change the digest"
+        # prebuild also folds when there are no patches at all
+        assert patch_set_hash(_root, [], prebuild_path=_pb) != \
+            patch_set_hash(_root, [])
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fork-pkg content invalidation (tree-hash mechanism)
@@ -1056,6 +1087,7 @@ TESTS = [
     test_format_snapshot_timestamp_well_formed,
     test_format_snapshot_timestamp_falls_back_on_malformed,
     test_patch_set_hash_stable_and_order_sensitive,
+    test_patch_set_hash_folds_prebuild_script,
     test_compute_tree_hash_deterministic_and_content_addressed,
     test_compute_tree_hash_changes_on_file_add_and_delete,
     test_compute_tree_hash_skips_designated_dirs,

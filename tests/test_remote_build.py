@@ -131,6 +131,10 @@ def test_remote_build_run_container_command_shape():
             '/repo:rw' in _joined
         assert '--cpus' in _argv and '7.0' in _argv
         assert '--memory' in _argv and '28g' in _argv
+        # USER/LOGNAME ride every build container — docker doesn't set them
+        # from the image's `USER athena` and test suites read them (curl's
+        # runtests.pl aborts on undefined $USER).
+        assert 'USER=athena' in _argv and 'LOGNAME=athena' in _argv
         assert _argv[-3:] == ['bash', '-c', 'set -e; dpkg-buildpackage']
         # out/ was created world-writable for the container's copy-out
         assert os.path.isdir(os.path.join(_b, 'out'))
@@ -752,6 +756,53 @@ def test_remotebuild_composes_recipe_per_slot_localmirror():
 
 
 
+def test_stage_bundle_ships_prebuild_and_run_container_mounts_it():
+    """The version-independent prebuild script rides the remote bundle:
+    stage_bundle copies the recipe's prebuild.sh to the bundle root, and
+    run_container bind-mounts it ro at /prebuild.sh IFF present — mount
+    presence tracks bundle content, which tracks the recipe's
+    `. /prebuild.sh` step (compose_recipe emits both from one check)."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_build
+    import remote_orchestrate
+    with tempfile.TemporaryDirectory() as _d:
+        _mk = lambda _n, _c='x': (  # noqa: E731 - tiny file factory
+            open(os.path.join(_d, _n), 'w').write(_c),
+            os.path.join(_d, _n))[1]
+        _dockerfile = _mk('Dockerfile', 'FROM x')
+        _rb = _mk('remote_build.py', '# stub')
+        _src = _mk('x_1.dsc', 'dsc')
+        _pb = _mk('prebuild.sh', 'export FOO=1\n')
+        _recipe = {'filename_prefix': 'x', 'image_tag': 't',
+                   'build_args': {}, 'cmd_str': 'c', 'prebuild': _pb}
+
+        _bundle = os.path.join(_d, 'bundle')
+        remote_orchestrate.stage_bundle(
+            _bundle, dockerfile=_dockerfile, source_files=[_src],
+            patch_dir='', recipe=_recipe, build_cpus=None,
+            build_memory=None, remote_build_py=_rb)
+        assert os.path.isfile(os.path.join(_bundle, 'prebuild.sh'))
+        with mock.patch.object(remote_build, 'subprocess') as _sp:
+            _sp.run.return_value = mock.Mock(returncode=0)
+            remote_build.run_container(_bundle, 't', 'c', None, None)
+        _joined = ' '.join(_sp.run.call_args[0][0])
+        assert ':/prebuild.sh:ro' in _joined
+
+        # no prebuild in the recipe → none in the bundle → no mount
+        _bundle2 = os.path.join(_d, 'bundle2')
+        remote_orchestrate.stage_bundle(
+            _bundle2, dockerfile=_dockerfile, source_files=[_src],
+            patch_dir='', recipe={k: v for k, v in _recipe.items()
+                                  if k != 'prebuild'},
+            build_cpus=None, build_memory=None, remote_build_py=_rb)
+        assert not os.path.isfile(os.path.join(_bundle2, 'prebuild.sh'))
+        with mock.patch.object(remote_build, 'subprocess') as _sp:
+            _sp.run.return_value = mock.Mock(returncode=0)
+            remote_build.run_container(_bundle2, 't', 'c', None, None)
+        assert ':/prebuild.sh:ro' not in ' '.join(_sp.run.call_args[0][0])
+
+
 def test_local_mirror_is_container_workflow_not_cache_parse():
     """The local build mirror belongs to the CONTAINER workflow: `cache parse`
     must not trigger a populate (distinct, unrelated activities).  The
@@ -957,6 +1008,7 @@ TESTS = [
     test_stage_bundle_writes_localmirror_dir_into_build_json,
     test_add_remote_persists_per_remote_local_mirror_flag,
     test_remotebuild_composes_recipe_per_slot_localmirror,
+    test_stage_bundle_ships_prebuild_and_run_container_mounts_it,
     test_local_mirror_is_container_workflow_not_cache_parse,
     test_container_local_mirror_update_refetches_and_refreshes,
     test_remote_build_run_container_command_shape,
