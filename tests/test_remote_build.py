@@ -752,17 +752,48 @@ def test_remotebuild_composes_recipe_per_slot_localmirror():
 
 
 
-def test_ensure_local_mirror_no_per_run_prompt():
-    """The local-container mirror decision is made ONCE (container local init);
-    `_ensure_local_mirror` must NOT re-prompt on every cache parse."""
+def test_local_mirror_is_container_workflow_not_cache_parse():
+    """The local build mirror belongs to the CONTAINER workflow: `cache parse`
+    must not trigger a populate (distinct, unrelated activities).  The
+    decision + populate prompts live at `container local init`
+    (_local_mirror_gate, BEFORE BuildContainer is constructed — the flag is
+    computed at construct time); `_ensure_local_mirror` itself stays
+    promptless so `container local mirror update` is scriptable."""
     import re
     with open(os.path.join(_ROOT, 'scripts', 'commands', 'cmd_cache.py')) as _f:
-        _src = _f.read()
+        _cache_src = _f.read()
+    assert '_ensure_local_mirror' not in _cache_src, (
+        "cache parse must not populate the local mirror")
+    assert 'import local_mirror' not in _cache_src
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as _f:
+        _build_src = _f.read()
     _fn = re.search(r'def _ensure_local_mirror\(self.*?(?=\n    def )',
-                    _src, re.DOTALL).group(0)
-    assert 'Download / refresh the local build mirror now?' not in _fn, (
-        "must not re-prompt each cache parse")
-    assert 'PROMPT_YESNO' not in _fn, "no y/n in the per-parse mirror refresh"
+                    _build_src, re.DOTALL).group(0)
+    assert 'PROMPT_YESNO' not in _fn, "no y/n inside the populate engine"
+    _init = re.search(r'def cmd_init_container\(self.*?(?=\n    def )',
+                      _build_src, re.DOTALL).group(0)
+    assert '_local_mirror_gate' in _init
+    assert (_init.index('_local_mirror_gate')
+            < _init.index('buildcontainer.BuildContainer(')), (
+        "mirror gate must run BEFORE the container is constructed")
+
+
+def test_container_local_mirror_update_refetches_and_refreshes():
+    """`container local mirror update` must (a) force the populate past the
+    up-to-date marker check — a closure change needs its ADDED files even on
+    an unchanged snapshot — and (b) refresh the live container's
+    _localmirror_active, which is otherwise stale until the next init.
+    `purge` prompts (force skips) — the mirror can hold GBs."""
+    import re
+    _body = _session_source()
+    _fn = re.search(r'def _cmd_container_local_mirror\(self.*?(?=\n    def )',
+                    _body, re.DOTALL).group(0)
+    assert '_ensure_local_mirror(force=True)' in _fn
+    assert '_refresh_container_localmirror()' in _fn
+    assert "'update'" in _fn and "'rebuild'" not in _fn, (
+        "subcommands are update|status|purge")
+    assert 'PROMPT_YESNO' in _fn and "'force' not in args" in _fn, (
+        "purge confirms unless forced")
 
 
 
@@ -926,7 +957,8 @@ TESTS = [
     test_stage_bundle_writes_localmirror_dir_into_build_json,
     test_add_remote_persists_per_remote_local_mirror_flag,
     test_remotebuild_composes_recipe_per_slot_localmirror,
-    test_ensure_local_mirror_no_per_run_prompt,
+    test_local_mirror_is_container_workflow_not_cache_parse,
+    test_container_local_mirror_update_refetches_and_refreshes,
     test_remote_build_run_container_command_shape,
     test_remote_agent_helpers_name_and_log_offsets,
     test_remote_agent_lifecycle_success_logs_and_auth,

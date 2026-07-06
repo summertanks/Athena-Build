@@ -987,6 +987,12 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             )
             return
         self.flags.build_container_ready = False
+        # Local-mirror gate BEFORE the container is constructed:
+        # BuildContainer evaluates _localmirror_active from the on-disk
+        # mirror at construct time, so the decision (and an opted-in
+        # populate) must happen first for THIS container to serve
+        # build-deps from the mirror.
+        self._local_mirror_gate()
         spin = Spinner("Initialising build container")
         try:
             self.container = buildcontainer.BuildContainer(
@@ -997,7 +1003,6 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             self.flags.build_container_ready = True
             spin.done()
             console.print("  Build container ready")
-            self._prompt_local_mirror_first_run()
         except (RuntimeError,
                 buildcontainer.docker.errors.DockerException) as e:
             # connect failures are wrapped in RuntimeError, but a
@@ -1008,36 +1013,124 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             console.print(f"  ERROR: build container initialisation failed — {e}")
             logger.error(f"BuildContainer() raised: {e}")
 
-    def _prompt_local_mirror_first_run(self) -> None:
-        """First container init: if the operator hasn't yet decided on a local
-        build mirror, offer it (persists the choice to local.conf).  The mirror
-        itself builds at the next `cache parse` (or `container local mirror
-        build`); if the dep tree is already resolved, build it now."""
+    def _local_mirror_gate(self) -> None:
+        """Container-init local-mirror gate (the mirror is CONTAINER
+        workflow — `cache parse` never touches it).  Two decisions, both
+        made here because this is where the mirror is consumed:
+
+          1. first init — operator hasn't decided: offer the mirror
+             (persists the choice to local.conf, asked once);
+          2. enabled but not current for the selected snapshot: offer to
+             populate NOW, before the container is constructed.
+
+        Declining 2 keeps the container CONFIGURED for the mirror — builds
+        fall back to snapshot.debian.org until `container local mirror
+        update` populates it."""
         _lc = utils.read_local_conf(self.config)
-        if _lc.has_option('Local', 'CreateLocalMirror'):
-            return   # operator already decided — don't re-ask
+        if not _lc.has_option('Local', 'CreateLocalMirror'):
+            _resp = Prompt(
+                PROMPT_YESNO,
+                "Enable a local build mirror?  Caches every Debian build-dep "
+                "on disk so build containers stop re-downloading them from "
+                "snapshot.debian.org on every build — a big speedup on "
+                "bandwidth-limited links (costs a few GB of disk).",
+                informational=True,
+            ).get_response()
+            _enable = _resp.lower() in ('y', 'yes')
+            self.config.create_local_mirror = _enable
+            utils.write_local_conf(self.config, create_local_mirror=_enable)
+            if not _enable:
+                console.print(
+                    "  local build mirror disabled — `set create-local-mirror "
+                    "true` to enable later", tui.COLOR_INFO)
+                return
+        if not getattr(self.config, 'create_local_mirror', False):
+            return
+        _ts = utils.resolve_snapshot_timestamp(self.config) or ''
+        if _ts and local_mirror.is_valid_for(self.config.dir_localmirror, _ts):
+            console.print(
+                f"  local build mirror: current for snapshot {_ts}",
+                tui.COLOR_INFO)
+            return
         _resp = Prompt(
             PROMPT_YESNO,
-            "Enable a local build mirror?  Caches every Debian build-dep on "
-            "disk so build containers stop re-downloading them from "
-            "snapshot.debian.org on every build — a big speedup on "
-            "bandwidth-limited links (costs a few GB of disk).",
+            "The local build mirror is enabled but not populated for the "
+            "selected snapshot.  Populate it now?",
             informational=True,
         ).get_response()
-        _enable = _resp.lower() in ('y', 'yes')
-        self.config.create_local_mirror = _enable
-        utils.write_local_conf(self.config, create_local_mirror=_enable)
-        if _enable:
-            console.print(
-                "  local build mirror enabled — builds at the next "
-                "`cache parse` (or `container local mirror build`)",
-                tui.COLOR_INFO)
-            if self.flags.dep_check_ready:
-                self._ensure_local_mirror()
+        if _resp.lower() in ('y', 'yes'):
+            self._ensure_local_mirror()
         else:
             console.print(
-                "  local build mirror disabled — `set create-local-mirror "
-                "true` to enable later", tui.COLOR_INFO)
+                "  container stays configured for the local mirror — populate "
+                "later with `container local mirror update` (builds fall "
+                "back to snapshot.debian.org until then)", tui.COLOR_INFO)
+
+    def _ensure_local_mirror(self, force: bool = False) -> None:
+        """Populate/refresh the snapshot-pinned local build mirror (the build
+        closure of all shipped sources).  Size + free space are checked, not
+        prompted (the keep-a-mirror decision was made once, at the gate);
+        rebuilds from scratch when the snapshot advanced (stale `.snapshot`
+        marker).  Requires the cache + dep_tree (the build closure needs
+        both).  `force` skips the up-to-date early-return so a closure
+        change fetches its ADDED files even on an unchanged snapshot."""
+        if self.cache is None or self.dep_tree is None:
+            console.print(
+                "local mirror: run `cache build` + `cache parse` first",
+                tui.COLOR_WARNING)
+            return
+        _ts = utils.resolve_snapshot_timestamp(self.config) or ''
+        if not _ts:
+            console.print(
+                "local mirror: snapshot pinning disabled — skipped",
+                tui.COLOR_WARNING)
+            return
+        _dir = self.config.dir_localmirror
+        if not force and local_mirror.is_valid_for(_dir, _ts):
+            console.print(
+                f"Local build mirror: current for snapshot {_ts}",
+                tui.COLOR_INFO)
+            return
+        _existing = local_mirror.status(_dir)
+        _stale = bool(_existing['snapshot'] and _existing['snapshot'] != _ts)
+        _hs = local_mirror.human_size
+        console.print("Computing local build mirror (build closure)…",
+                      tui.COLOR_INFO)
+        _pl = local_mirror.plan(self.cache, self.dep_tree, self.config)
+        _ok, _free, _need = local_mirror.disk_check(_pl['total_size'], _dir)
+        console.print(
+            f"Local build mirror: {len(_pl['entries'])} package(s), "
+            f"{_hs(_pl['total_size'])} for snapshot {_ts}"
+            + (f"  (replaces stale snapshot {_existing['snapshot']})"
+               if _stale else ""))
+        console.print(f"  disk: free {_hs(_free)}, need ~{_hs(_need)}")
+        if not _ok:
+            console.print("  insufficient disk space — skipping local mirror",
+                          tui.COLOR_WARNING)
+            return
+        if _stale:
+            local_mirror.purge(_dir)
+        _dl, _fail = local_mirror.download(_pl, _dir, _ts)
+        if _fail:
+            console.print(
+                f"  {len(_fail)} file(s) failed — apt falls back to snapshot "
+                "for those", tui.COLOR_WARNING)
+        if local_mirror.index(_dir):
+            if _fail:
+                # download() withheld the .snapshot marker (not valid-for-
+                # snapshot), so the next `container local mirror update`
+                # re-attempts the failures.
+                console.print(
+                    f"  local build mirror PARTIAL ({_hs(_dl)} indexed; "
+                    f"{len(_fail)} file(s) retried next update)",
+                    tui.COLOR_WARNING)
+            else:
+                console.print(
+                    f"  local build mirror ready ({_hs(_dl)} indexed)",
+                    tui.COLOR_INFO)
+        else:
+            console.print("  local mirror index failed — see logs",
+                          tui.COLOR_WARNING)
 
     def _stage_remote_localmirror_bars(self, host, plan, ssh_key):
         """Run remote_orchestrate.stage_remote_localmirror with a live two-bar
@@ -1456,36 +1549,108 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         return self._group_help('container local', _table, sub)
 
     def _cmd_container_local_mirror(self, sub: str = '', *args):
-        """`container local mirror {build|rebuild|status|purge}` — manage the
+        """`container local mirror {update|status|purge}` — manage the
         snapshot-pinned local build mirror that containers serve build-deps
         from."""
         _table = {
-            'build':   'build/refresh the mirror for the current snapshot',
-            'rebuild': 'force a full rebuild (ignore the up-to-date check)',
-            'status':  'show package count / size / pinned snapshot',
-            'purge':   'delete the mirror contents',
+            'update':  'populate/refresh for the current snapshot + closure '
+                       '(resumable; also fetches deps ADDED by a closure change)',
+            'status':  'health + coverage of the mirror vs the build closure',
+            'purge':   'delete the mirror contents (prompts; reclaims the '
+                       'bloat left by snapshot advances): purge [force]',
         }
         _dir = self.config.dir_localmirror
         if sub == 'status':
-            _st = local_mirror.status(_dir)
-            console.print(
-                f"local build mirror: {_st['n_debs']} package(s), "
-                f"{local_mirror.human_size(_st['size'])}, "
-                f"snapshot {_st['snapshot'] or '(none)'}")
-            return None
+            return self._local_mirror_status(_dir)
         if sub == 'purge':
+            _st = local_mirror.status(_dir)
+            if (_st['n_debs'] or _st['size']) and 'force' not in args:
+                _resp = Prompt(
+                    PROMPT_YESNO,
+                    f"Delete the local build mirror — {_st['n_debs']} "
+                    f"package(s), {local_mirror.human_size(_st['size'])}?",
+                ).get_response()
+                if _resp.lower() not in ('y', 'yes'):
+                    console.print("local build mirror purge: declined")
+                    return None
             local_mirror.purge(_dir)
             console.print("local build mirror purged")
             return None
-        if sub in ('build', 'rebuild'):
+        if sub == 'update':
             if not (self.flags.cache_ready and self.flags.dep_check_ready):
                 console.print(
                     "container local mirror: run `cache build` + "
                     "`cache parse` first", tui.COLOR_WARNING)
                 return None
-            self._ensure_local_mirror(force=(sub == 'rebuild'))
+            # force=True: never early-return on the snapshot marker — a
+            # closure change needs its ADDED files even when the snapshot
+            # is unchanged.  Present files sha-skip, so an up-to-date
+            # mirror updates as a near-no-op.
+            self._ensure_local_mirror(force=True)
+            self._refresh_container_localmirror()
             return None
         return self._group_help('container local mirror', _table, sub)
+
+    def _local_mirror_status(self, directory: str) -> None:
+        """`container local mirror status` — health (indexed? snapshot
+        current?) + coverage (present/missing vs the build closure, stale
+        files left by snapshot advances).  Coverage needs the cache + dep
+        tree (same-session `cache build` + `cache parse`); without them only
+        the on-disk facts print."""
+        _hs = local_mirror.human_size
+        _st = local_mirror.status(directory)
+        console.print(
+            f"local build mirror: {_st['n_debs']} package(s), "
+            f"{_hs(_st['size'])}")
+        _ts = utils.resolve_snapshot_timestamp(self.config) or ''
+        _mk = _st['snapshot']
+        if not _mk:
+            _snap = 'unstamped — never completed, `update` resumes'
+        elif _mk == _ts:
+            _snap = f'{_mk} (current)'
+        else:
+            _snap = f'{_mk} (STALE — selected snapshot is {_ts or "(none)"})'
+        console.print(f"  snapshot: {_snap}")
+        _pkgs = os.path.join(directory, 'Packages')
+        _indexed = os.path.isfile(_pkgs) and os.path.getsize(_pkgs) > 0
+        console.print(
+            f"  index: {'present' if _indexed else 'missing — run `container local mirror update`'}")
+        if self.cache is None or self.dep_tree is None:
+            console.print(
+                "  coverage: unknown — run `cache build` + `cache parse` "
+                "in this session for closure coverage", tui.COLOR_INFO)
+            return
+        _pl = local_mirror.plan(self.cache, self.dep_tree, self.config)
+        _cov = local_mirror.coverage(_pl, directory)
+        _n = len(_pl['entries'])
+        console.print(
+            f"  coverage: {_cov['present']}/{_n} planned package(s) present"
+            + (f", {len(_cov['missing'])} missing (~{_hs(_cov['missing_size'])})"
+               if _cov['missing'] else ''))
+        if _cov['stale']:
+            console.print(
+                f"  stale: {len(_cov['stale'])} file(s) (~{_hs(_cov['stale_size'])}) "
+                "outside the current closure — `purge` + `update` reclaims",
+                tui.COLOR_WARNING)
+
+    def _refresh_container_localmirror(self) -> None:
+        """Re-evaluate the live container's local-mirror activation after the
+        on-disk mirror changed (`container local mirror update`):
+        _localmirror_active is computed at BuildContainer construct time and
+        would otherwise stay stale until the next `container local init`."""
+        _c = getattr(self, 'container', None)
+        if _c is None:
+            return
+        _was = getattr(_c, '_localmirror_active', False)
+        _now = bool(getattr(self.config, 'create_local_mirror', False)
+                    and local_mirror.is_valid_for(
+                        self.config.dir_localmirror,
+                        getattr(_c, 'snapshot_ts', '') or ''))
+        _c._localmirror_active = _now
+        if _now and not _was:
+            console.print(
+                "  local build mirror now active for the initialised "
+                "container", tui.COLOR_INFO)
 
     def _cmd_container_remote(self, sub: str = '', *args):
         _table = {

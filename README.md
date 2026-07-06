@@ -517,9 +517,10 @@ changing the local build path or the published artifacts:
   computed locally.
 - **Local build mirror** — `set create-local-mirror true` stages a
   snapshot-pinned apt mirror of the build closure so containers resolve
-  Build-Depends from local disk instead of `snapshot.debian.org`.  Manage it
-  with `container local mirror <build|rebuild|status|purge>`.  The on-remote
-  variant is a per-remote toggle, asked at `container remote add`.
+  Build-Depends from local disk instead of `snapshot.debian.org`.  Populated
+  at `container local init` (offered) or `container local mirror update`;
+  manage it with `container local mirror <update|status|purge>`.  The
+  on-remote variant is a per-remote toggle, asked at `container remote add`.
 
 Full howto, the `[Remote.<name>]` config schema, and the fan-out / on-remote-
 mirror details: [`docs/remote-build.md`](docs/remote-build.md).

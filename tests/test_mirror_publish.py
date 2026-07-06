@@ -4776,6 +4776,38 @@ def test_local_mirror_download_withholds_marker_on_failure_cons13():
 
 
 
+def test_local_mirror_coverage_present_missing_stale():
+    """local_mirror.coverage(plan, dir) — the `container local mirror status`
+    probe: size-matched planned files count present; absent or size-mismatched
+    ones are missing (with byte totals); on-disk .debs OUTSIDE the plan are
+    stale (snapshot-advance bloat).  Presence is basename+size, not sha256
+    (a status probe must not hash a multi-GB mirror)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import local_mirror as lm
+    with tempfile.TemporaryDirectory() as _d:
+        def _put(name, nbytes):
+            with open(os.path.join(_d, name), 'wb') as _f:
+                _f.write(b'x' * nbytes)
+        _put('present_1_amd64.deb', 10)
+        _put('truncated_1_amd64.deb', 4)          # size mismatch → missing
+        _put('stale_1_amd64.deb', 7)              # not in the plan
+        _plan = {'entries': [
+            {'basename': 'present_1_amd64.deb', 'size': 10},
+            {'basename': 'truncated_1_amd64.deb', 'size': 10},
+            {'basename': 'absent_1_amd64.deb', 'size': 25},
+            {'basename': 'sizeless_1_amd64.deb', 'size': 0},  # unknown size
+        ]}
+        _cov = lm.coverage(_plan, _d)
+        assert _cov['present'] == 1
+        assert sorted(_cov['missing']) == [
+            'absent_1_amd64.deb', 'sizeless_1_amd64.deb',
+            'truncated_1_amd64.deb']
+        assert _cov['missing_size'] == 35
+        assert _cov['stale'] == ['stale_1_amd64.deb']
+        assert _cov['stale_size'] == 7
+
+
+
 def test_local_mirror_plan_excludes_fork_file_urls():
     """plan excludes closure members served from a file:// (fork / local)
     mirror — the build mirror caches UPSTREAM snapshot packages only; forks come
@@ -4872,6 +4904,7 @@ TESTS = [
     test_local_mirror_plan_resolves_build_closure_to_snapshot_urls,
     test_local_mirror_plan_include_index_emits_packages_blob,
     test_local_mirror_download_withholds_marker_on_failure_cons13,
+    test_local_mirror_coverage_present_missing_stale,
     test_local_mirror_plan_excludes_fork_file_urls,
     test_local_mirror_index_writes_flat_apt_repo_with_origin,
     test_local_mirror_index_failure_leaves_no_valid_mirror,

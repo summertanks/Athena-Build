@@ -214,6 +214,10 @@ class ConfigRunCommandsMixin(SessionState):
         console.print(
             f"  create-local-mirror  →  {_new}  ({_saved})",
             tui.COLOR_HIGHLIGHT)
+        if _new:
+            console.print(
+                "  populate with `container local mirror update` (or at "
+                "`container local init`)", tui.COLOR_INFO)
 
     def _set_jobs(self, value: str) -> None:
         """`set jobs <N>` — MaxParallelBuilds (1-8)."""

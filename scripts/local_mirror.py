@@ -9,9 +9,10 @@ local disk instead of being re-downloaded from snapshot.debian.org on every
 container instance — a large win on bandwidth-limited links where small
 packages are network-bound, not CPU-bound.
 
-The mirror is keyed to the snapshot via a ``.snapshot`` marker file: when the
-snapshot advances the mirror is stale and gets rebuilt (after a size /
-free-space prompt).  apt sees identical versions in both the local mirror and
+The mirror belongs to the CONTAINER workflow (populated at `container local
+init` / `container local mirror update` — never by `cache parse`).  It is
+keyed to the snapshot via a ``.snapshot`` marker file: when the snapshot
+advances the mirror is stale and gets rebuilt (size / free-space checked).  apt sees identical versions in both the local mirror and
 the snapshot mirror, so the local one must out-prioritise the snapshot-origin
 pin (1001) — its Release carries ``Origin: AthenaLocalMirror`` and the
 container pins ``release o=AthenaLocalMirror`` to 1002.
@@ -233,8 +234,9 @@ def download(plan_dict: 'Dict[str, Any]', directory: str,
     # keys "ready" on this marker and _ensure_local_mirror early-returns when
     # valid — so stamping a PARTIAL mirror would mark it valid-for-snapshot and
     # skip it forever, never retrying the missing files (they'd stay
-    # snapshot-fallback permanently).  No marker → the next `cache parse` re-runs
-    # (resumably, sha-skipping the files already present) and retries them.
+    # snapshot-fallback permanently).  No marker → the next `container local
+    # mirror update` re-runs (resumably, sha-skipping the files already
+    # present) and retries them.
     # Matches the remote runner, which returns non-zero when `failed`.
     if not _failures:
         _write_marker(directory, snapshot_ts)
@@ -340,6 +342,45 @@ def is_valid_for(directory: 'Any', snapshot_ts: 'Optional[str]') -> bool:
     except OSError:
         return False
     return mirror_snapshot(directory) == snapshot_ts
+
+
+def coverage(plan_dict: 'Dict[str, Any]', directory: str) -> 'Dict[str, Any]':
+    """Compare *directory* against a plan(): which planned basenames are
+    present, which are missing, and which on-disk .debs fall OUTSIDE the plan
+    (stale — left behind by snapshot advances / closure shrinks; the bloat
+    `purge` reclaims).  Presence is basename + exact size (sha256 over a
+    multi-GB mirror is too slow for a status probe; download() already
+    sha-verified every file on write; a size-0 plan entry counts on existence
+    alone)."""
+    _planned = {_e['basename']: _e for _e in plan_dict['entries']}
+    _present = 0
+    _missing: 'List[str]' = []
+    _missing_size = 0
+    for _bn, _e in _planned.items():
+        try:
+            _sz = os.path.getsize(os.path.join(directory, _bn))
+            if _sz == _e['size'] or not _e['size']:
+                _present += 1
+                continue
+        except OSError:
+            pass
+        _missing.append(_bn)
+        _missing_size += _e['size']
+    _stale: 'List[str]' = []
+    _stale_size = 0
+    try:
+        for _f in os.listdir(directory):
+            if _f.endswith('.deb') and _f not in _planned:
+                _stale.append(_f)
+                try:
+                    _stale_size += os.path.getsize(os.path.join(directory, _f))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return {'present': _present,
+            'missing': _missing, 'missing_size': _missing_size,
+            'stale': _stale, 'stale_size': _stale_size}
 
 
 def status(directory: str) -> 'Dict[str, Any]':

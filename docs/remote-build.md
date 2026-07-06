@@ -119,15 +119,16 @@ A machine-local decision, separate from any remote's:
 set create-local-mirror true        # persists local.conf [Local] CreateLocalMirror
 ```
 
-When on, `cache parse` builds/refreshes the mirror for the current snapshot
-(incrementally on a snapshot advance). Manage it directly with:
+The mirror is part of the container workflow: `container local init` offers
+to populate it when it isn't current for the selected snapshot (declining
+keeps the container configured for it — builds fall back to
+snapshot.debian.org until it is populated). Manage it directly with:
 
 | Command                            | What it does                                  |
 |------------------------------------|-----------------------------------------------|
-| `container local mirror build`     | build/refresh for the current snapshot        |
-| `container local mirror rebuild`   | force a full rebuild (ignore the up-to-date check) |
-| `container local mirror status`    | package count / size / pinned snapshot        |
-| `container local mirror purge`     | delete the mirror contents                    |
+| `container local mirror update`    | populate/refresh (resumable; also fetches deps added by a closure change) |
+| `container local mirror status`    | health + coverage vs the build closure        |
+| `container local mirror purge`     | delete the mirror contents (prompts; `purge force` skips) |
 
 ### On a remote (per-remote, `LocalMirror=true`)
 
