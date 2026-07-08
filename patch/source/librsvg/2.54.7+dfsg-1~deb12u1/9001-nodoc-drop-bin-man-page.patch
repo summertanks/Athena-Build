@@ -1,45 +1,45 @@
-Description: drop usr/share/man from librsvg2-bin.install for nodoc builds
- `debian/librsvg2-bin.install` lists two paths to install into the
- `librsvg2-bin` binary package:
+Description: Make the librsvg2-bin man-page install path nodoc-proof
+ `debian/librsvg2-bin.install` lists `usr/share/man` (rsvg-convert(1)).
+ Under `DEB_BUILD_PROFILES=nodoc` the upstream build does not generate
+ man pages, `usr/share/man` is absent from `debian/tmp/`, and
+ `dh_install` (compat 13 = --fail-missing) aborts.
  .
-   usr/bin
-   usr/share/man
+ An earlier revision of this patch instead DROPPED the `usr/share/man`
+ line from `debian/librsvg2-bin.install`.  That traded one failure
+ mode for its mirror image: with docs enabled (Athena's current
+ config — `[Source]` BuildOptions/BuildProfiles emptied by the
+ operator, 2026-07), the built rsvg-convert.1 lands in debian/tmp but
+ nothing installs it, and `dh_missing` aborts the build:
  .
- The first claims `/usr/bin/rsvg-convert` (the rsvg-convert(1) CLI).
- The second claims the man pages associated with that binary.
+   dh_missing: warning: usr/share/man/man1/rsvg-convert.1 exists in
+   debian/tmp but is not installed to anywhere
+   dh_missing: error: missing files, aborting
  .
- Under `DEB_BUILD_PROFILES=nodoc` (Athena's default — `[Source]
- BuildProfiles = nodoc, nocheck` in build.conf), the librsvg upstream
- build system doesn't generate man pages.  `usr/share/man` is then
- absent from `debian/tmp/` and `dh_install --fail-missing` (the
- default in `debhelper-compat (= 13)`) aborts:
+ This revision takes the dynamic-gate route the earlier header already
+ prescribed: keep the stock install list and pre-create
+ `debian/tmp/usr/share/man` in `override_dh_install` before dh_install
+ runs.  Docs-enabled builds are byte-identical to stock (the mkdir is
+ a no-op; the man page ships in librsvg2-bin as Debian intends);
+ nodoc builds get an empty directory, which dh_install copies without
+ complaint instead of failing on a missing source path.  Works in
+ both modes; no dh_missing regression in either.
  .
-   dh_install: warning: librsvg2-bin missing files: usr/share/man
-   dh_install: error: missing files, aborting
-   make[1]: *** [debian/rules:52: override_dh_install] Error 25
- .
- Drop the `usr/share/man` line.  Under nodoc the man page wasn't
- going to be shipped anyway; under a hypothetical full build the
- rsvg-convert(1) page would generate but go unshipped (a minor
- documentation regression we accept since Athena always builds
- with `nodoc`).
- .
- If a future Athena variant needs to ship the man page, gate the
- line dynamically in `debian/rules`'s `override_dh_install` rather
- than re-adding it unconditionally — a re-add would re-introduce
- this exact failure mode.
- .
- Surfaced during GROUPS-01 phase 3 gnome build 2026-05-14 —
- librsvg is pulled in transitively by gnome-shell (SVG icon and
- background rendering via the gdk-pixbuf loader).
+ Originally surfaced during GROUPS-01 phase 3 gnome build 2026-05-14
+ (nodoc direction); re-surfaced 2026-07-06 full-testsuite run (docs
+ direction, dh_missing).
 Author: Harkirat S Virk <harkiratsvirk@gmail.com>
 Origin: local
 Forwarded: no
-Last-Update: 2026-05-15
+Last-Update: 2026-07-06
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- a/debian/librsvg2-bin.install
-+++ b/debian/librsvg2-bin.install
-@@ -1,2 +1 @@
- usr/bin
--usr/share/man
+--- a/debian/rules
++++ b/debian/rules
+@@ -49,6 +49,7 @@
+ 	find debian/tmp -name '*.a' -print -delete
+ 	find debian/tmp -name '*.la' -print -delete
+ 	rm -f debian/tmp/usr/bin/rsvg-view-3
++	mkdir -p debian/tmp/usr/share/man
+ 	dh_install
+ 	sed -e "s/#MULTIARCH#/$(DEB_HOST_MULTIARCH)/g" debian/librsvg2-common.postinst.in > \
+ 		debian/librsvg2-common.postinst
