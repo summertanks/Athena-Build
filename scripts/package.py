@@ -500,7 +500,6 @@ class Source(Sources):
         # audit.  Removed 2026-05-20; pre-audit-split-2026-05-20 tag
         # preserves the prior layout.
 
-        self.skip_test = False
         self.patch_list: List[str] = []
         self._err_str: str = ''
 

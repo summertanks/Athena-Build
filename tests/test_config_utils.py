@@ -385,6 +385,44 @@ def test_arch16_per_pkg_build_options_override_global():
 
 
 
+def test_skiptest_unions_nocheck_into_effective_options():
+    """`[Source] SkipTest = a, b` must suppress the listed packages' test
+    suites through the EFFECTIVE options — build_options_for is the single
+    authority compose_recipe consults.  Regression pin for the c61b0e6 dead
+    config: SkipTest was parsed and stamped onto a per-Source flag nothing
+    read, so listed packages built WITH tests (vim, 2026-07-07 run)."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = _BASE_CONF_BODY.replace(
+        'SkipTest =',
+        'SkipTest = vim, libsoup2.4',
+    ).replace(
+        'BuildProfiles = nodoc, nocheck',
+        'BuildOptions =\n    BuildProfiles =\n\n'
+        '[Source.vim]\n'
+        '    BuildOptions = nodoc',
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_skiptest_unions_nocheck_into_effective_options ({cfg.error_str})")
+            return
+        # listed pkg with empty global options → nocheck injected
+        assert 'nocheck' in cfg.build_options_for('libsoup2.4'), \
+            cfg.build_options_for('libsoup2.4')
+        # listed pkg with a per-pkg override → UNION, not replace
+        assert cfg.build_options_for('vim') == frozenset({'nodoc', 'nocheck'}), \
+            cfg.build_options_for('vim')
+        # unlisted pkg stays untouched
+        assert 'nocheck' not in cfg.build_options_for('glibc')
+        # profiles are NOT affected — SkipTest is an options-only knob
+        assert cfg.build_profiles_for('vim') == cfg.build_profiles
+
+
 def test_sec05_audit_build_deps_default_false():
     """SEC-05: `[Security] AuditBuildDeps` defaults to False — no
     behaviour change for existing operators on un-modified configs."""
@@ -1067,6 +1105,7 @@ TESTS = [
     test_buildconfig_build_options_and_profiles_are_separate,
     test_buildconfig_build_options_falls_back_to_profiles_when_omitted,
     test_arch16_per_pkg_build_options_override_global,
+    test_skiptest_unions_nocheck_into_effective_options,
     test_arch16_empty_per_pkg_section_name_rejected,
     test_sec05_audit_build_deps_default_false,
     test_sec05_audit_build_deps_parses_true,

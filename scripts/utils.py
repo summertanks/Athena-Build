@@ -3442,12 +3442,21 @@ class BuildConfig:
           1. `[Source.<pkg>] BuildOptions = …` if present in build.conf
           2. global `[Source] BuildOptions = …`
 
+        `[Source] SkipTest = a, b` then UNIONS `nocheck` in for the listed
+        packages — it suppresses that package's test suite whatever the
+        options above say.  (This is SkipTest's sole consumer; the old
+        per-Source `skip_test` flag lost its reader in c61b0e6 and shipped
+        dead until 2026-07-07 — vim built WITH tests despite being listed.)
+
         A per-invocation override (the `[nocheck]` bracket-token on
         `source build foo [nocheck]`) is layered ON TOP of this at the call
         site (buildcontainer.build's `options_override` kwarg) — that path
         is not visible here.
         """
-        return self.build_options_per_pkg.get(pkg_name, self.build_options)
+        _opts = self.build_options_per_pkg.get(pkg_name, self.build_options)
+        if pkg_name in self.skip_build_test:
+            _opts = _opts | {'nocheck'}
+        return _opts
 
     def build_profiles_for(self, pkg_name: str) -> 'frozenset[str]':
         """Return the effective DEB_BUILD_PROFILES set for a source pkg.

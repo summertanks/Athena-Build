@@ -896,11 +896,6 @@ class CacheCommandsMixin(SessionState):
                 tui.COLOR_INFO,
             )
 
-        # Apply per-package skip_test flag from config (suppresses 'nocheck' build opt).
-        for _pkg in self.config.skip_build_test:
-            if _pkg in self.dep_tree.selected_srcs:
-                self.dep_tree.selected_srcs[_pkg].skip_test = True
-
         # --- Patch discovery ----------------------------------------------------
         self._refresh_patches()
 
