@@ -2648,7 +2648,13 @@ def test_all_containers_run_sites_carry_user_env():
         assert 'environment=_CONTAINER_ENV' in _m.group(1), (
             f"containers.run site missing `environment=_CONTAINER_ENV`:\n"
             f"{_m.group(1)[:300]}")
+        # buildd parity: no seccomp filter — testsuites assert KERNEL error
+        # semantics (glibc tst-personality EPERM-vs-EINVAL, keyutils keyctl)
+        assert 'security_opt=_CONTAINER_SECURITY_OPT' in _m.group(1), (
+            f"containers.run site missing seccomp unconfine:\n"
+            f"{_m.group(1)[:300]}")
     assert "_CONTAINER_ENV = {'USER': 'athena', 'LOGNAME': 'athena'}" in _src
+    assert "_CONTAINER_SECURITY_OPT = ['seccomp=unconfined']" in _src
 
 
 def test_comp03_register_live_called_after_each_containers_run():

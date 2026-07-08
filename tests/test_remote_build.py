@@ -135,6 +135,8 @@ def test_remote_build_run_container_command_shape():
         # from the image's `USER athena` and test suites read them (curl's
         # runtests.pl aborts on undefined $USER).
         assert 'USER=athena' in _argv and 'LOGNAME=athena' in _argv
+        # buildd parity: seccomp unfiltered, matching the local runner
+        assert '--security-opt' in _argv and 'seccomp=unconfined' in _argv
         assert _argv[-3:] == ['bash', '-c', 'set -e; dpkg-buildpackage']
         # out/ was created world-writable for the container's copy-out
         assert os.path.isdir(os.path.join(_b, 'out'))

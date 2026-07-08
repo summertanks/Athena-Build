@@ -146,6 +146,10 @@ def run_container(bundle: str, tag: str, cmd_str: str,
         # test suites read them (curl's runtests.pl aborts on undefined $USER).
         # Matches the local runner's _CONTAINER_ENV (buildcontainer.py).
         "-e", "USER=athena", "-e", "LOGNAME=athena",
+        # Buildd parity: no seccomp filter — testsuites assert KERNEL error
+        # semantics (glibc tst-personality, keyutils).  Matches the local
+        # runner's _CONTAINER_SECURITY_OPT.
+        "--security-opt", "seccomp=unconfined",
         "-v", f"{os.path.abspath(_src)}:/source:rw",
         "-v", f"{os.path.abspath(_patch)}:/patch:rw",
         "-v", f"{os.path.abspath(_out)}:/repo:rw",

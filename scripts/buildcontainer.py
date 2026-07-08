@@ -98,6 +98,15 @@ logger = logging.getLogger('athena.build')
 # Dockerfile's useradd.
 _CONTAINER_ENV = {'USER': 'athena', 'LOGNAME': 'athena'}
 
+# Buildd parity: docker's default seccomp profile answers filtered
+# syscalls with EPERM where the bare kernel would return EINVAL etc. —
+# glibc's tst-personality/tst-clock2 and keyutils' keyctl tests assert
+# KERNEL error semantics and fail under the filter (2026-07-06 run).
+# Real Debian buildds run unfiltered; the container already grants the
+# build passwordless sudo and is treated as a throwaway sandbox
+# (MAT-04 covers the host-facing mounts), so drop the filter.
+_CONTAINER_SECURITY_OPT = ['seccomp=unconfined']
+
 # serialises segregate's per-file moves from
 # every worker's scratch dir into the shared repo subdirs.  Held
 # only for the duration of one source's move loop (microseconds);
@@ -1266,6 +1275,7 @@ class BuildContainer:
                 detach=True, auto_remove=False,
                 labels=self._container_labels,
                 environment=_CONTAINER_ENV,
+                security_opt=_CONTAINER_SECURITY_OPT,
                 volumes=_volumes,
                 **self._resource_kwargs(),
             )
@@ -1686,6 +1696,7 @@ class BuildContainer:
                 detach=True, auto_remove=False,
                 labels=self._container_labels,
                 environment=_CONTAINER_ENV,
+                security_opt=_CONTAINER_SECURITY_OPT,
             )
             self._register_live(container)
             _buf: bytes = b''
@@ -1818,6 +1829,7 @@ class BuildContainer:
                 detach=True, auto_remove=False,
                 labels=self._container_labels,
                 environment=_CONTAINER_ENV,
+                security_opt=_CONTAINER_SECURITY_OPT,
                 volumes={
                     staging_dir: {'bind': '/staging', 'mode': 'rw'},
                     _output_dir: {'bind': '/output',  'mode': 'rw'},
