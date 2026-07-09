@@ -1,0 +1,43 @@
+Description: xfail tst-ttyname — its chroot phase can't mount procfs in a container
+ misc/tst-ttyname's ttyname()/ttyname_r() checks all PASS; the test then
+ fails building its second chroot scenario at
+ sysdeps/unix/sysv/linux/tst-ttyname.c:414, where it mounts a fresh procfs:
+ .
+   mount("proc", "/proc", "proc", MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL)
+     -> EPERM (Operation not permitted)
+ .
+ This is a kernel restriction, not an LSM denial: Athena's build container
+ already runs with seccomp=unconfined AND apparmor=unconfined (verified —
+ the glibc support/test-container tests, which also unshare+mount, now
+ pass).  Mounting a new procfs instance requires the caller to OWN the PID
+ namespace it mounts for; the test does unshare(CLONE_NEWNS) but not
+ CLONE_NEWPID, so inside the container's shared PID namespace the kernel
+ refuses.  Only --privileged with a private PID namespace, or building
+ outside a container, would satisfy it — neither is a real libc concern.
+ .
+ Add it to the "All architectures" xfail list, next to
+ tst-support_descriptors which Debian already xfails for the same
+ unshare/chroot-in-container reason (bug #1070003).  With the entry the
+ testsuite still runs and still fails the build on any OTHER regression;
+ only this structurally-impossible test is excused.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-07-09
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/testsuite-xfail-debian.mk
++++ b/debian/testsuite-xfail-debian.mk
+@@ -15,6 +15,12 @@
+ # chroot mode, see bug #1070003.
+ test-xfail-tst-support_descriptors = yes
+
++# tst-ttyname's chroot-2 phase mounts a fresh procfs; mounting proc
++# requires PID-namespace ownership, which a container build process
++# lacks (the ttyname() checks themselves all pass).  Fails inside the
++# Athena docker build container even with seccomp+apparmor unconfined.
++test-xfail-tst-ttyname = yes
++
+ ######################################################################
+ # alpha (including optimized flavours)
+ ######################################################################
