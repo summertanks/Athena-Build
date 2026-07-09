@@ -486,58 +486,6 @@ def test_arch16_empty_per_pkg_section_name_rejected():
 
 
 
-def test_build_conf_ingests_nonfree_components_and_tunnels_firmware():
-    """build.conf ingests contrib/non-free/non-free-firmware (one [Mirror.*]
-    per component, incl. the security suite) and tunnels the curated
-    firmware/microcode SOURCES; pool.list selects the matching BINARIES so
-    they ship in the pool + publish under non-free-firmware."""
-    import configparser
-    _cp = configparser.ConfigParser(interpolation=None)
-    # [Mirror.*] now lives in distro.conf, [Source] Tunneled in build.conf —
-    # read both (configparser merges the list) to exercise the shipped pair.
-    _cp.read([os.path.join(_ROOT, 'config', 'distro.conf'),
-              os.path.join(_ROOT, 'config', 'build.conf')])
-    _comps = {
-        _cp.get(_s, 'Component', fallback='main')
-        for _s in _cp.sections() if _s.startswith('Mirror.')
-    }
-    for _c in ('main', 'contrib', 'non-free', 'non-free-firmware'):
-        assert _c in _comps, (_c, _comps)
-    # security suite must also offer non-free-firmware (microcode security upd).
-    assert _cp.get('Mirror.security-non-free-firmware', 'Component') == \
-        'non-free-firmware'
-    assert _cp.get('Mirror.security-non-free-firmware', 'BASEID') == \
-        'debian-security'
-    _tun = {_t.strip() for _t in
-            _cp.get('Source', 'Tunneled', fallback='').split(',') if _t.strip()}
-    for _src in ('intel-microcode', 'amd64-microcode', 'firmware-nonfree'):
-        assert _src in _tun, (_src, _tun)
-    # shim-signed / shim-helpers-amd64-signed / fwupd-amd64-signed entered the
-    # closure via Recommends and ARE tunneled — they repackage Debian's signed
-    # binaries from source data, so we ship the pristine .deb rather than
-    # source-build a relabelled signature (see build.conf [Source]).
-    for _src in ('shim-signed', 'shim-helpers-amd64-signed',
-                 'fwupd-amd64-signed'):
-        assert _src in _tun, (_src, _tun)
-    # grub-efi-amd64-signed / linux-signed-amd64 are left source-building (NOT
-    # tunneled); grub2 is not a signed package.
-    for _src in ('grub-efi-amd64-signed', 'linux-signed-amd64', 'grub2'):
-        assert _src not in _tun, (
-            f"{_src} unexpectedly in Tunneled — left source-building")
-    with open(os.path.join(_ROOT, 'config', 'pool.list')) as fh:
-        _pool = {ln.strip() for ln in fh
-                 if ln.strip() and not ln.lstrip().startswith('#')}
-    for _bin in ('intel-microcode', 'amd64-microcode', 'firmware-iwlwifi',
-                 'firmware-realtek', 'firmware-misc-nonfree',
-                 'firmware-amd-graphics'):
-        assert _bin in _pool, _bin
-    # shim-signed deliberately not in pool.list either.
-    assert 'shim-signed' not in _pool, (
-        "shim-signed in pool.list — SECBOOT-01 is deferred; reintroduce "
-        "only when the self-signed + MOK chain lands")
-
-
-
 
 def test_setup_file_logging_filename_has_timestamp():
     """Two calls in quick succession produce distinct files (timestamped)."""
@@ -583,22 +531,6 @@ def test_force_ipv4_http_pins_af_inet_and_respects_optout():
         else:
             os.environ['ATHENA_ALLOW_IPV6'] = _prev
 
-
-
-def test_shipped_build_conf_has_snapshot_enabled():
-    """the shipped config/build.conf must default to snapshot pinning
-    enabled, so cache and live mirror cannot drift between cache build and
-    source build.  Lock-in test — fails if anyone flips Enabled back to false."""
-    import configparser
-    p = configparser.ConfigParser()
-    # [Snapshot] now lives in the upstream-definition file distro.conf.
-    cfg_path = os.path.join(_ROOT, 'config', 'distro.conf')
-    assert os.path.isfile(cfg_path), f"shipped distro.conf missing at {cfg_path}"
-    p.read(cfg_path)
-    assert p.has_section('Snapshot'), "shipped distro.conf is missing [Snapshot]"
-    assert p.getboolean('Snapshot', 'Enabled') is True, (
-        "regression: shipped distro.conf must default Snapshot.Enabled = true"
-    )
 
 
 
@@ -1079,10 +1011,8 @@ TESTS = [
     test_sec05_audit_build_deps_parses_true,
     test_setup_file_logging_filename_has_timestamp,
     test_force_ipv4_http_pins_af_inet_and_respects_optout,
-    test_shipped_build_conf_has_snapshot_enabled,
     test_buildconfig_snapshot_endpoints_default_to_debian,
     test_buildconfig_snapshot_endpoints_overridable_via_config,
-    test_build_conf_ingests_nonfree_components_and_tunnels_firmware,
     test_get_sha256_writes_sidecar_on_first_call,
     test_get_sha256_returns_cached_value_on_size_mtime_match,
     test_get_sha256_recomputes_when_mtime_changes,

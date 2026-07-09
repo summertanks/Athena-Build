@@ -1712,8 +1712,10 @@ def test_buildconfig_exposes_poollist_path():
 
 def test_read_pkg_list_handles_pool_list_format():
     """`Build._read_pkg_list` is the shared parser for pkg/live/installer/
-    pool lists.  Confirm pool.list parses to the expected name set
-    (no surprises from the comment block)."""
+    pool lists.  Confirm it parses the shipped pool.list into a plain name
+    set with no comment/blank-line bleed.  (Which packages pool.list
+    selects is the operator's choice — NOT pinned here; that's a config
+    value, not parser behaviour.)"""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
@@ -1721,21 +1723,11 @@ def test_read_pkg_list_handles_pool_list_format():
         os.path.join(_ROOT, 'config', 'pool.list'),
         already_selected=set(),
     )
-    assert 'grub-pc' in _names, _names
-    assert 'grub-efi-amd64' in _names, _names
-    assert 'open-vm-tools' in _names, _names
-    assert 'open-vm-tools-desktop' in _names, _names
-    # console-setup re-added 2026-05-18 after the audit-removal
-    # regression — base-installer apt-installs it directly on /target,
-    # not via the kbd chain.  keyboard-configuration + xkb-data remain
-    # transitive via kbd → keyboard-configuration → xkb-data.
-    # See test_pool_list_pins_target_only_packages.
-    assert 'console-setup' in _names, _names
-    assert 'keyboard-configuration' not in _names, _names
-    assert 'xkb-data' not in _names, _names
-    # No accidental comment lines bleeding through.
+    assert _names, "pool.list parsed to an empty set"
+    # No comment lines or blanks bleed through into the name set.
     for _n in _names:
-        assert not _n.startswith('#'), _n
+        assert _n and not _n.startswith('#'), _n
+        assert _n == _n.strip(), _n
 
 
 

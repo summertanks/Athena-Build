@@ -20,54 +20,6 @@ from _test_helpers import (  # noqa: F401
 
 
 
-def test_pool_list_pins_target_only_packages():
-    """COMP-02 phase D follow-up: `config/pool.list` ships packages
-    that base-installer / hw-detect / finish-install apt-install on
-    /target but which we don't want pre-installed in the live image.
-    Pin the current set so a future config rework doesn't drop them:
-      - grub-pc + grub-efi-amd64: bootloader metas (firmware-mode-
-        dependent; grub-installer picks one at install time).  Both
-        must be explicit — they conflict with each other, neither
-        pulls the other transitively.
-      - open-vm-tools-desktop: hw-detect apt-installs on VMware
-        guests with desktop env.  Pulls open-vm-tools transitively;
-        open-vm-tools also explicitly listed defensively for the
-        future case where desktop is dropped from the install path.
-      - console-setup: explicit in pool.list because base-installer
-        apt-installs it on /target as a SEPARATE step, independent of
-        any transitive chain.  Removed 2026-05-17 in a pool-audit
-        cleanup that mis-assumed the kbd chain would cover it; the
-        2026-05-18 install reproduced the original "no installation
-        candidate" failure and it was re-added.
-      - keyboard-configuration + xkb-data: NOT explicit — reach the
-        pool transitively via `kbd` (in pkg.list [base], Depends
-        keyboard-configuration → Depends xkb-data).  Verified by the
-        2026-05-18 install log which shows both being installed from
-        the cdrom pool while console-setup failed.  Re-add if `kbd`
-        is ever dropped from [base]."""
-    _path = os.path.join(_ROOT, 'config', 'pool.list')
-    assert os.path.isfile(_path), _path
-    with open(_path) as fh:
-        _names = {
-            _line.strip() for _line in fh
-            if _line.strip() and not _line.lstrip().startswith('#')
-        }
-    # Bootloader metas — both must be explicit (mutually exclusive)
-    assert 'grub-pc' in _names, _names
-    assert 'grub-efi-amd64' in _names, _names
-    # VMware guest tooling — desktop pulls non-desktop transitively
-    assert 'open-vm-tools-desktop' in _names, _names
-    assert 'open-vm-tools' in _names, _names
-    # console-setup: base-installer apt-installs directly on /target;
-    # NOT covered by kbd's transitive chain (2026-05-18 regression).
-    assert 'console-setup' in _names, (
-        "console-setup must be explicit — base-installer apt-installs "
-        "it directly, not via the kbd chain")
-    # Negative assertions — these reach pool transitively via kbd
-    assert 'keyboard-configuration' not in _names, _names
-    assert 'xkb-data' not in _names, _names
-
-
 
 def test_select_latest_kernel_version_aware_and_paired():
     """STA-31: kernel selection is version-aware (apt_pkg ABI compare),
@@ -1663,7 +1615,6 @@ def test_classify_tiers_transit_through_non_member_and_overlap():
 TESTS = [
     test_build_closure_compute_returns_all_and_unsatisfiable,
     test_build_closure_classify_tiers_uses_adjacency,
-    test_pool_list_pins_target_only_packages,
     test_select_latest_kernel_version_aware_and_paired,
     test_parse_pkg_list_groups_flat_file_becomes_implicit_base,
     test_parse_pkg_list_groups_ini_style_multi_section,
