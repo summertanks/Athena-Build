@@ -2063,6 +2063,12 @@ class SourceCommandsMixin(SessionState):
                     except Exception as _e:    # noqa: BLE001
                         logger.error(
                             f"remote worker {_src.package} raised: {_e}")
+                        # surface on the console like a normal [FAIL] so the
+                        # named failures match the "N failed" total (parity
+                        # with the local worker-exception path).
+                        console.print(
+                            f"  remotebuild {_src.package} [FAIL] — "
+                            f"worker error: {_e}", tui.COLOR_ERROR)
                         _res = 'failed'
                     if _res == 'transport':
                         # host down — mark it dead + re-queue elsewhere (bundles
@@ -2523,6 +2529,16 @@ class SourceCommandsMixin(SessionState):
                             except Exception as _e:    # noqa: BLE001
                                 logger.error(
                                     f"worker for {_pkg.package} raised: {_e}")
+                                # Surface it on the console like a normal
+                                # `[FAIL]` — a worker exception (ENOSPC, an
+                                # unexpected raise) is counted in _failed, so
+                                # without this the console shows fewer named
+                                # failures than the "N failed" total (the
+                                # ENOSPC-libreoffice gap, 2026-07-08).  Name
+                                # the cause so disk vs build-error is obvious.
+                                console.print(
+                                    f"  Building {_pkg.package} [FAIL] — "
+                                    f"worker error: {_e}", tui.COLOR_ERROR)
                                 _result = 'failed'
                             if _result == 'built':
                                 _built += 1
