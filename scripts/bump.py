@@ -334,7 +334,8 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
     the exact-filename match did.
 
     Requires identical package name, architecture, and extension; the on-disk
-    version must equal the predicted version OR predicted+asg<R>u<N>.
+    version must equal the predicted version OR be a transpose of the same
+    pristine base carrying our +asg<R>u<N> / ~asg<R>u<N> layer.
     """
     if predicted_fn == ondisk_fn:
         return True
@@ -350,7 +351,18 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
         return True
     if parse_asg_suffix(_o[1]) is None:                # on-disk has no asg layer
         return False
-    return ASG_SUFFIX_RE.sub('', _o[1]) == _p[1]       # base equals prediction
+    # On-disk carries our asg layer.  Compare PRISTINE BASES, not just the
+    # asg-stripped on-disk version, to reconcile the transpose model with the
+    # predictor: transpose() rewrites only the TRAILING +debNuK/~debNuK and
+    # PRESERVES an embedded +debN (a Debian-N update backported to Debian-M —
+    # 6.16-1+deb13u1~deb12u1 -> 6.16-1+deb13u1~asg1u1), while the predictor
+    # strips to bare pristine (6.16-1).  Stripping only the asg layer left the
+    # embedded +deb13u1 behind and false-flagged the artifact as missing
+    # (source audit stale_pass, 2026-07-09).  pristine_base strips the asg
+    # layer AND any residual redistribution token, so both sides reduce to the
+    # same key.  Strictly a superset of the old asg-strip equality (when that
+    # matched, the bases match too), so no artifact that matched before stops.
+    return pristine_base(_o[1]) == pristine_base(_p[1])
 
 
 def find_matching_artifact(dst_dir: str,

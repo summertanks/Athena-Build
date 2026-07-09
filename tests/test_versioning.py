@@ -1092,6 +1092,23 @@ def test_match_pristine_base_reconciles_stamped_artifact():
     assert not match_pristine_base(pred, 'openssl_3.0.16-1+asg1u1_amd64.deb')
     assert not match_pristine_base(pred, 'openssl_3.0.15-1_amd64.udeb')
 
+    # COMPOUND version (backport-of-an-update): the predictor strips to bare
+    # pristine but transpose() keeps the EMBEDDED +debN, rewriting only the
+    # trailing ~debM.  match must reconcile the two via pristine base — else a
+    # present, correctly-transposed binary reads as missing (libhttp-daemon-
+    # perl 6.16-1+deb13u1~deb12u1 -> 6.16-1+deb13u1~asg1u1 audited stale_pass,
+    # 2026-07-09).
+    _cp = 'libhttp-daemon-perl_6.16-1_all.deb'
+    assert match_pristine_base(
+        _cp, 'libhttp-daemon-perl_6.16-1+deb13u1~asg1u1_all.deb')
+    # embedded +deb that survives strip_nmu on BOTH sides still matches
+    _shim = 'shim-signed_1.44~1+deb12u1+15.8-1_amd64.deb'
+    assert match_pristine_base(
+        _shim, 'shim-signed_1.44~1+deb12u1+15.8-1~asg1u1_amd64.deb')
+    # but a different pristine base still rejects even with an asg layer
+    assert not match_pristine_base(
+        _cp, 'libhttp-daemon-perl_6.17-1+deb13u1~asg1u1_all.deb')
+
 
 
 def test_version_module_resolution():
