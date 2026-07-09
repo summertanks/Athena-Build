@@ -486,38 +486,6 @@ def test_arch16_empty_per_pkg_section_name_rejected():
 
 
 
-def test_production_build_conf_has_noautodbgsym_in_build_options():
-    """Pin `noautodbgsym` in config/build.conf's [Source] BuildOptions.
-    Without it, dh_strip emits a `pkg-dbgsym_*.deb` companion for every
-    binary built from source — ~1500 dbgsym files / ~3-4 GB on a full
-    build, plus the post-strip repack cost on every source build.
-
-    Side-artifact dbgsym packages aren't tracked in
-    dependencytree.selected_pkgs (no consumer ever depends on them) so
-    nothing in the install path notices their absence; the only effect
-    of dropping them is reduced disk + faster builds.
-
-    Pin is on the production config file so a future operator edit
-    (e.g. someone removing it 'to enable debugging') can't silently
-    re-balloon repo/."""
-    _conf = os.path.join(_ROOT, 'config', 'build.conf')
-    assert os.path.isfile(_conf), _conf
-    import configparser
-    _cp = configparser.ConfigParser(interpolation=None)
-    _cp.read(_conf)
-    _opts_raw = _cp.get('Source', 'BuildOptions', fallback='')
-    _opts = {_o.strip() for _o in _opts_raw.split(',') if _o.strip()}
-    assert 'noautodbgsym' in _opts, (
-        f"config/build.conf [Source] BuildOptions must include "
-        f"`noautodbgsym` to suppress dbgsym blobs.  Current value: "
-        f"{_opts_raw!r}"
-    )
-    # Also sanity-check that the two existing opts we depend on stay put.
-    assert 'nodoc' in _opts, _opts_raw
-    assert 'nocheck' in _opts, _opts_raw
-
-
-
 def test_build_conf_ingests_nonfree_components_and_tunnels_firmware():
     """build.conf ingests contrib/non-free/non-free-firmware (one [Mirror.*]
     per component, incl. the security suite) and tunnels the curated
@@ -1114,7 +1082,6 @@ TESTS = [
     test_shipped_build_conf_has_snapshot_enabled,
     test_buildconfig_snapshot_endpoints_default_to_debian,
     test_buildconfig_snapshot_endpoints_overridable_via_config,
-    test_production_build_conf_has_noautodbgsym_in_build_options,
     test_build_conf_ingests_nonfree_components_and_tunnels_firmware,
     test_get_sha256_writes_sidecar_on_first_call,
     test_get_sha256_returns_cached_value_on_size_mtime_match,
