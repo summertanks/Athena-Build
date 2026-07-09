@@ -166,31 +166,54 @@ def ensure_remote_image(host: str, image_tag: str, *,
 
 
 def build_remote_image(host: str, dockerfile_path: str, image_tag: str,
-                       build_args: dict, *, ssh_key: 'str | None' = None,
+                       build_args: dict, *, rootfs_path: str,
+                       ssh_key: 'str | None' = None,
                        log=print) -> bool:
-    """Build `image_tag` ON the remote from `dockerfile_path`, streamed over ssh
-    via stdin (empty build context — matches remote_build.build_image).  Returns
-    True on success.  `container remote init` uses this to eagerly build the
-    image when NEITHER this host nor the remote has it cached, rather than
-    deferring the multi-ten-minute build to the first `source remotebuild`."""
+    """Build `image_tag` ON the remote: ship the Dockerfile + the
+    snapshot-bootstrapped base rootfs tar (the Dockerfile is FROM scratch +
+    ADD base-rootfs.tar — see base_rootfs.py) to a throwaway staging dir and
+    `docker build` it there.  Returns True on success.  `container remote
+    init` uses this to eagerly build the image when NEITHER this host nor
+    the remote has it cached, rather than deferring the multi-ten-minute
+    build to the first `source remotebuild`.  Shipping the LOCAL bootstrap
+    (rather than bootstrapping on the remote) keeps local and remote images
+    byte-identical at the base and needs no mmdebstrap on the remote."""
     _flags = [f'--build-arg {shlex.quote(f"{_k}={_v}")}'
               for _k, _v in (build_args or {}).items()]
-    # --progress=plain → line-based output; BuildKit's default TTY progress uses
-    # carriage-returns + cursor control that corrupt a curses TUI when streamed
-    # back over ssh.  Capture stdout/stderr (Popen, NOT inherited) and route each
-    # line through `log` so it never writes raw to the terminal under the TUI.
-    _cmd = (f"docker build --progress=plain -t {shlex.quote(image_tag)} "
-            f"{' '.join(_flags)} -")
+    _stage = f'/tmp/athena-imagectx-{image_tag.split(":")[-1]}'
+    _q_stage = shlex.quote(_stage)
     log(f"building image {image_tag} on {host} (this can take a while) …")
     try:
-        with open(dockerfile_path, 'rb') as _fh:
-            _proc = subprocess.Popen(
-                _ssh_base(host, ssh_key) + [_cmd], stdin=_fh,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            assert _proc.stdout is not None
-            for _line in _proc.stdout:
-                log(_line.rstrip('\n'))
-            _proc.wait()
+        _mk = subprocess.run(
+            _ssh_base(host, ssh_key) + [f'mkdir -p {_q_stage}'],
+            capture_output=True)
+        if _mk.returncode != 0:
+            log(f"build_remote_image: staging mkdir failed: "
+                f"{_mk.stderr.decode(errors='replace').strip()}")
+            return False
+        for _src, _dest in ((dockerfile_path, 'Dockerfile'),
+                            (rootfs_path, 'base-rootfs.tar')):
+            _cp = subprocess.run(
+                _scp_base(ssh_key) + [_src, f'{host}:{_stage}/{_dest}'],
+                capture_output=True)
+            if _cp.returncode != 0:
+                log(f"build_remote_image: scp {_dest} failed: "
+                    f"{_cp.stderr.decode(errors='replace').strip()}")
+                return False
+        # --progress=plain → line-based output; BuildKit's default TTY
+        # progress uses carriage-returns + cursor control that corrupt a
+        # curses TUI when streamed back over ssh.  Capture stdout/stderr
+        # (Popen, NOT inherited) and route each line through `log` so it
+        # never writes raw to the terminal under the TUI.
+        _cmd = (f"docker build --progress=plain -t {shlex.quote(image_tag)} "
+                f"{' '.join(_flags)} {_q_stage} && rm -rf {_q_stage}")
+        _proc = subprocess.Popen(
+            _ssh_base(host, ssh_key) + [_cmd],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        assert _proc.stdout is not None
+        for _line in _proc.stdout:
+            log(_line.rstrip('\n'))
+        _proc.wait()
     except OSError as _e:
         log(f"build_remote_image: {_e}")
         return False

@@ -135,8 +135,10 @@ def test_remote_build_run_container_command_shape():
         # from the image's `USER athena` and test suites read them (curl's
         # runtests.pl aborts on undefined $USER).
         assert 'USER=athena' in _argv and 'LOGNAME=athena' in _argv
-        # buildd parity: seccomp unfiltered, matching the local runner
+        # buildd parity: seccomp + apparmor unfiltered, matching the local
+        # runner (apparmor: glibc test-container mount() denial)
         assert '--security-opt' in _argv and 'seccomp=unconfined' in _argv
+        assert 'apparmor=unconfined' in _argv
         assert _argv[-3:] == ['bash', '-c', 'set -e; dpkg-buildpackage']
         # out/ was created world-writable for the container's copy-out
         assert os.path.isdir(os.path.join(_b, 'out'))
@@ -314,13 +316,15 @@ def test_remote_build_image_uses_args_and_skips_when_present():
     import remote_build
     with tempfile.TemporaryDirectory() as _b:
         with open(os.path.join(_b, 'Dockerfile'), 'w') as _fh:
-            _fh.write('FROM debian:bookworm-slim\n')
+            _fh.write('FROM scratch\nADD base-rootfs.tar /\n')
+        with open(os.path.join(_b, 'base-rootfs.tar'), 'wb') as _fh:
+            _fh.write(b'tar')
         # present → no docker build
         with mock.patch.object(remote_build, '_image_exists', return_value=True), \
                 mock.patch.object(remote_build, 'subprocess') as _sp:
             remote_build.build_image(_b, 'tag', {'RELEASE': 'bookworm'})
             _sp.run.assert_not_called()
-        # absent → docker build with --build-arg
+        # absent (rootfs bundled) → docker build with --build-arg
         with mock.patch.object(remote_build, '_image_exists', return_value=False), \
                 mock.patch.object(remote_build, 'subprocess') as _sp:
             _sp.run.return_value = mock.Mock(returncode=0)
@@ -758,6 +762,57 @@ def test_remotebuild_composes_recipe_per_slot_localmirror():
 
 
 
+def test_remote_image_build_requires_rootfs_and_uses_context():
+    """The FROM-scratch Dockerfile needs the bootstrapped base tar next to
+    it.  remote_build.build_image: (a) image present → skip; (b) image
+    absent + no base-rootfs.tar in the bundle → LOUD SystemExit naming
+    `container remote init` (per-package bundles never carry the ~250MB
+    tar); (c) tar present → docker build with a staged context dir (never
+    stdin — ADD needs a real context).  build_remote_image (init path)
+    ships Dockerfile + rootfs and builds a staging dir on the remote."""
+    from unittest import mock
+    import re
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import remote_build
+    with tempfile.TemporaryDirectory() as _b:
+        with open(os.path.join(_b, 'Dockerfile'), 'w') as _fh:
+            _fh.write('FROM scratch\nADD base-rootfs.tar /\n')
+        # (b) image absent, no tar → SystemExit with the remedy
+        with mock.patch.object(remote_build, '_image_exists',
+                               return_value=False):
+            try:
+                remote_build.build_image(_b, 'athenalinux:build-x', {})
+                raise AssertionError('expected SystemExit')
+            except SystemExit as _e:
+                assert 'container remote init' in str(_e)
+        # (c) tar present → context-dir build, no stdin
+        with open(os.path.join(_b, 'base-rootfs.tar'), 'wb') as _fh:
+            _fh.write(b'tar')
+        with mock.patch.object(remote_build, '_image_exists',
+                               return_value=False), \
+                mock.patch.object(remote_build, 'subprocess') as _sp:
+            _sp.run.return_value = mock.Mock(returncode=0)
+            remote_build.build_image(_b, 'athenalinux:build-x', {'A': '1'})
+        _argv = _sp.run.call_args[0][0]
+        assert _argv[:3] == ['docker', 'build', '-t']
+        assert _argv[-1].endswith('imagectx'), (
+            'build context must be the staged Dockerfile+tar dir')
+        assert '-' not in _argv, 'no stdin build — ADD needs a context'
+        assert _sp.run.call_args.kwargs.get('stdin') is None
+
+    # init-path orchestrator ships the rootfs and builds a remote staging dir
+    with open(os.path.join(_ROOT, 'scripts', 'remote_orchestrate.py')) as _fh:
+        _ro_src = _fh.read()
+    _fn = re.search(r'def build_remote_image\(.*?\n\ndef ', _ro_src, re.DOTALL)
+    assert _fn, 'build_remote_image not found'
+    assert 'rootfs_path' in _fn.group(0)
+    assert "'base-rootfs.tar'" in _fn.group(0)
+    # and the session caller bootstraps + passes it
+    _body = _session_source()
+    assert 'base_rootfs.ensure_base_rootfs(' in _body
+    assert 'rootfs_path=_rootfs' in _body
+
+
 def test_stage_bundle_ships_prebuild_and_run_container_mounts_it():
     """The version-independent prebuild script rides the remote bundle:
     stage_bundle copies the recipe's prebuild.sh to the bundle root, and
@@ -1010,6 +1065,7 @@ TESTS = [
     test_stage_bundle_writes_localmirror_dir_into_build_json,
     test_add_remote_persists_per_remote_local_mirror_flag,
     test_remotebuild_composes_recipe_per_slot_localmirror,
+    test_remote_image_build_requires_rootfs_and_uses_context,
     test_stage_bundle_ships_prebuild_and_run_container_mounts_it,
     test_local_mirror_is_container_workflow_not_cache_parse,
     test_container_local_mirror_update_refetches_and_refreshes,

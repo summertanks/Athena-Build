@@ -38,6 +38,7 @@ import argparse
 import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -68,8 +69,14 @@ def _image_exists(tag: str) -> bool:
 
 
 def build_image(bundle: str, tag: str, build_args: dict, out=None) -> None:
-    """Build <tag> from <bundle>/Dockerfile with an EMPTY context (the Dockerfile
-    has no COPY/ADD).  Streamed via stdin so `source/` isn't sent as context.
+    """Build <tag> from <bundle>/Dockerfile.  The Dockerfile is FROM scratch
+    + `ADD base-rootfs.tar` (the snapshot-bootstrapped base — see
+    base_rootfs.py), so a build NEEDS that tar next to the Dockerfile.
+    Per-package bundles don't carry the ~250MB tar — the image is ensured
+    up front by `container remote init` (which ships Dockerfile + rootfs and
+    builds); this fallback only fires when that image has gone missing, and
+    fails LOUDLY with the remedy rather than mid-build with a cryptic ADD
+    error.
 
     `out` (a binary file handle), when given, captures the docker output + the
     framing lines — the remote agent passes its build-log handle so the build
@@ -77,15 +84,33 @@ def build_image(bundle: str, tag: str, build_args: dict, out=None) -> None:
     if _image_exists(tag):
         _emit(out, f"image {tag} already present — skipping build")
         return
+    _rootfs = os.path.join(bundle, "base-rootfs.tar")
+    if not os.path.isfile(_rootfs):
+        _emit(out, f"image {tag} missing and no base-rootfs.tar in bundle")
+        raise SystemExit(
+            f"image {tag} not present on this host and the bundle carries no "
+            "base rootfs — run `container remote init` from the build "
+            "machine to stage the image")
     _emit(out, f"building image {tag} ...")
     _flags: list = []
     for _k, _v in (build_args or {}).items():
         _flags += ["--build-arg", f"{_k}={_v}"]
-    _dockerfile = os.path.join(bundle, "Dockerfile")
-    with open(_dockerfile, "rb") as _fh:
-        _r = subprocess.run(
-            ["docker", "build", "-t", tag, *_flags, "-"], stdin=_fh,
-            stdout=out, stderr=(subprocess.STDOUT if out is not None else None))
+    # context dir = Dockerfile + base-rootfs.tar only (never the bundle's
+    # source/ tree) — stage the pair into a scratch dir via hard links.
+    _ctx = os.path.join(bundle, "imagectx")
+    os.makedirs(_ctx, exist_ok=True)
+    for _name, _src in (("Dockerfile", os.path.join(bundle, "Dockerfile")),
+                        ("base-rootfs.tar", _rootfs)):
+        _dest = os.path.join(_ctx, _name)
+        if not os.path.exists(_dest):
+            try:
+                os.link(_src, _dest)
+            except OSError:
+                shutil.copy(_src, _dest)
+    _r = subprocess.run(
+        ["docker", "build", "-t", tag, *_flags, _ctx],
+        stdout=out, stderr=(subprocess.STDOUT if out is not None else None))
+    shutil.rmtree(_ctx, ignore_errors=True)
     if _r.returncode != 0:
         raise SystemExit(f"docker build failed (rc={_r.returncode})")
     _emit(out, f"image {tag} built")
@@ -146,10 +171,13 @@ def run_container(bundle: str, tag: str, cmd_str: str,
         # test suites read them (curl's runtests.pl aborts on undefined $USER).
         # Matches the local runner's _CONTAINER_ENV (buildcontainer.py).
         "-e", "USER=athena", "-e", "LOGNAME=athena",
-        # Buildd parity: no seccomp filter — testsuites assert KERNEL error
-        # semantics (glibc tst-personality, keyutils).  Matches the local
-        # runner's _CONTAINER_SECURITY_OPT.
+        # Buildd parity: no seccomp filter (testsuites assert KERNEL error
+        # semantics — glibc tst-personality, keyutils) and no AppArmor
+        # (its mount() denial hard-fails glibc's test-container suite once
+        # seccomp no longer masks it).  Matches the local runner's
+        # _CONTAINER_SECURITY_OPT.
         "--security-opt", "seccomp=unconfined",
+        "--security-opt", "apparmor=unconfined",
         "-v", f"{os.path.abspath(_src)}:/source:rw",
         "-v", f"{os.path.abspath(_patch)}:/patch:rw",
         "-v", f"{os.path.abspath(_out)}:/repo:rw",

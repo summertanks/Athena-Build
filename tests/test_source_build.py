@@ -632,15 +632,20 @@ def test_check_dep3_header_subject_satisfies_description():
 
 
 def test_conf15_dockerfile_pins_toolchain_to_snapshot():
-    """CONF-15: the Dockerfile MUST rewrite /etc/apt/sources.list to point
-    at OUR snapshot BEFORE any `apt-get install` runs.  Pre-CONF-15 the
-    toolchain layer pulled from live deb.debian.org which contaminated
-    dpkg-shlibdeps; this test pins the fix shape.
+    """CONF-15 (+ 2026-07-07 own-base revision): every layer of the image
+    is pinned to OUR snapshot.  The base is a `FROM scratch` +
+    `ADD base-rootfs.tar` of the mmdebstrap buildd bootstrap
+    (base_rootfs.py) — no Docker Hub pull, no doc-stripped slim base —
+    and the toolchain extras install against explicitly-written snapshot
+    sources.  Pre-CONF-15 the toolchain layer pulled from live
+    deb.debian.org which contaminated dpkg-shlibdeps.
 
     Required shape:
+      - FROM scratch + ADD base-rootfs.tar (no external base image)
       - ARG SNAPSHOT_BASEURL / ARCHIVE_NAME / SNAPSHOT_TS declared
-      - sources.list wiped THEN written with snapshot URL
-      - apt-get update + dist-upgrade run BEFORE apt-get install
+      - sources.list wiped THEN written with the three snapshot pockets,
+        BEFORE any apt-get install
+      - no live-mirror reference anywhere
       - SNAPSHOT_TS validated non-empty (fails the build, not silent)"""
     _df = os.path.join(_ROOT, 'config', 'Dockerfile')
     with open(_df) as fh:
@@ -681,30 +686,136 @@ def test_conf15_dockerfile_pins_toolchain_to_snapshot():
     # 4. The Pin-Priority 1001 preferences file is written (forces
     # downgrade when our snapshot is older than the base-image pkg set).
     assert 'Pin-Priority: 1001' in _body
-    # 5. Two-step shape: `apt-get install` (against the live mirror)
-    # runs BEFORE the sources.list rewrite + dist-upgrade.  Single-step
-    # rewrite-then-install failed at image build with ~15 "Unable to
-    # locate" errors (debhelper, python3, gettext, ...) — diagnosed but
-    # not root-caused.  Install-then-realign sidesteps it.
-    #
+    # 5. Own-base shape: FROM scratch + ADD of the mmdebstrap bootstrap —
+    # never an external registry base.  The old slim base was the one
+    # unpinned third-party layer (and its doc-stripping broke libpsl /
+    # init-system-helpers testsuites; its docker dpkg config broke dpkg's).
     # Strip comment lines so historical references in the explanatory
-    # block don't false-positive on the keyword.
+    # block don't false-positive on the keywords.
     _code_only = '\n'.join(
         _line for _line in _body.splitlines()
         if not _line.lstrip().startswith('#'))
-    _idx_install = _code_only.find('apt-get install -y')
+    assert 'FROM scratch' in _code_only, "base must be FROM scratch"
+    assert 'ADD base-rootfs.tar /' in _code_only, (
+        "base must be the bootstrapped rootfs tar (base_rootfs.py)")
+    assert 'debian:${RELEASE}-slim' not in _code_only, (
+        "no Docker Hub base image — the base is our snapshot bootstrap")
+    assert 'deb.debian.org' not in _code_only, (
+        "no live-mirror reference may survive in the Dockerfile")
+    # The snapshot-bootstrapped base is ALREADY at snapshot, so sources are
+    # written BEFORE the toolchain install (the old install-then-realign
+    # dance existed only because slim's base was at the live mirror) and no
+    # dist-upgrade realign remains.
     _idx_rewrite = _code_only.find(
         'echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}')
-    _idx_dist_upgrade = _code_only.find('--allow-downgrades dist-upgrade')
-    assert 0 < _idx_install < _idx_rewrite < _idx_dist_upgrade, (
-        "Dockerfile ordering must be: apt-get install (live) → rewrite "
-        "sources to snapshot → dist-upgrade --allow-downgrades to realign")
+    _idx_install = _code_only.find('apt-get install -y')
+    assert 0 < _idx_rewrite < _idx_install, (
+        "Dockerfile ordering must be: write snapshot sources → "
+        "apt-get install (the base is born at snapshot; no live step)")
+    assert 'dist-upgrade' not in _code_only, (
+        "no realign dist-upgrade — the bootstrapped base starts at snapshot")
+    assert 'apt-get update -o APT::Update::Error-Mode=any' in _code_only, (
+        "index-fetch failures must FAIL the update loudly — apt's default "
+        "warns and leaves empty lists (the 'Unable to locate' class)")
     # 6. SNAPSHOT_TS guard — empty TS must fail the build loudly, not
     # silently default to live URLs.
     assert '-z "${SNAPSHOT_TS}"' in _body, (
         "Dockerfile must reject an empty SNAPSHOT_TS instead of silently "
         "falling back to live mirrors")
 
+
+
+def test_base_rootfs_bootstrap_command_and_cache():
+    """base_rootfs.ensure_base_rootfs: (a) cache hit returns without
+    running mmdebstrap; (b) a bootstrap runs `mmdebstrap --variant=buildd`
+    for the config arch against the THREE snapshot pockets (same shape as
+    the Dockerfile sources), writing to a .partial then renaming — a
+    killed bootstrap never leaves a truncated tar for ADD to consume;
+    (c) a failing mmdebstrap raises RuntimeError and removes the partial."""
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import base_rootfs
+    _ts = '20260705T190150Z'
+    with tempfile.TemporaryDirectory() as _d:
+        _cfg = mock.Mock(dir_cache=_d, container_release='bookworm',
+                         arch='amd64',
+                         snapshot_baseurl='https://snapshot.debian.org/archive')
+        _out = base_rootfs.rootfs_path(_cfg, _ts)
+        assert _ts in _out and 'bookworm' in _out and 'amd64' in _out
+
+        # (a) cache hit — no subprocess
+        with open(_out, 'wb') as _fh:
+            _fh.write(b'cached')
+        with mock.patch.object(base_rootfs, 'subprocess') as _sp:
+            assert base_rootfs.ensure_base_rootfs(_cfg, _ts) == _out
+            _sp.run.assert_not_called()
+        os.remove(_out)
+
+        # (b) bootstrap — command shape + atomic rename
+        def _fake_run(cmd, **_kw):
+            with open(cmd[cmd.index('bookworm') + 1], 'wb') as _fh:
+                _fh.write(b'rootfs')
+            return mock.Mock(returncode=0, stderr=b'')
+        with mock.patch.object(base_rootfs.subprocess, 'run',
+                               side_effect=_fake_run) as _run:
+            assert base_rootfs.ensure_base_rootfs(_cfg, _ts) == _out
+        _cmd = _run.call_args[0][0]
+        assert _cmd[0] == 'mmdebstrap'
+        assert '--variant=buildd' in _cmd
+        assert '--architectures=amd64' in _cmd
+        assert '--format=tar' in _cmd, (
+            "format must be EXPLICIT — mmdebstrap infers it from the "
+            "target extension and .partial hides the .tar (rc=25)")
+        assert '--include=ca-certificates' in _cmd, (
+            "buildd variant has no trust store — https snapshot fetches "
+            "fail silently without ca-certificates (the CONF-15 anomaly)")
+        assert _cmd[_cmd.index('bookworm') + 1].endswith('.partial'), (
+            "mmdebstrap must write to .partial; rename happens on success")
+        _srcs = [_a for _a in _cmd if _a.startswith('deb ')]
+        assert len(_srcs) == 3, _srcs
+        assert any(f'/debian/{_ts} bookworm main' in _s for _s in _srcs)
+        assert any(f'{_ts} bookworm-updates main' in _s for _s in _srcs)
+        assert any(f'/debian-security/{_ts} bookworm-security main' in _s
+                   for _s in _srcs)
+        assert os.path.isfile(_out) and not os.path.exists(_out + '.partial')
+        os.remove(_out)
+
+        # (c) failure — RuntimeError, no partial left behind
+        def _fail_run(cmd, **_kw):
+            with open(cmd[cmd.index('bookworm') + 1], 'wb') as _fh:
+                _fh.write(b'trunc')
+            return mock.Mock(returncode=1, stderr=b'boom')
+        with mock.patch.object(base_rootfs.subprocess, 'run',
+                               side_effect=_fail_run):
+            try:
+                base_rootfs.ensure_base_rootfs(_cfg, _ts)
+                raise AssertionError('expected RuntimeError')
+            except RuntimeError as _e:
+                assert 'boom' in str(_e)
+        assert not os.path.exists(_out + '.partial')
+        assert not os.path.exists(_out)
+
+
+def test_image_build_stages_rootfs_context_not_config_dir():
+    """The image build assembles a minimal staging context (Dockerfile +
+    hard-linked base-rootfs.tar) and passes THAT to images.build — never
+    config/ (which must not carry the ~250MB tar, and whose whole content
+    would otherwise ship as docker context).  The staging dir is removed
+    on every exit path.  Source-grep pin."""
+    import re
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    _m = re.search(r'if _needs_build:(.*?)\n        self\.image = image',
+                   _src, re.DOTALL)
+    assert _m, 'image build block not found'
+    _blk = _m.group(1)
+    assert 'base_rootfs.ensure_base_rootfs(' in _blk
+    assert re.search(r'images\.build\(\s*\n?\s*path=_ctx', _blk), (
+        'images.build must consume the staging context, not dir_config')
+    assert 'path=config.dir_config' not in _blk
+    assert 'shutil.rmtree(_ctx, ignore_errors=True)' in _blk, (
+        'staging context must be cleaned up in the finally')
 
 
 def test_conf15_buildcontainer_image_tag_carries_snapshot_ts():
@@ -1331,6 +1442,26 @@ def test_buildcontainer_build_signature_accepts_profile_override_kwargs():
     assert sig.parameters['options_override'].kind == \
            inspect.Parameter.KEYWORD_ONLY
 
+
+
+def test_worker_exception_surfaces_console_fail():
+    """A worker exception (ENOSPC, an unexpected raise) is counted in
+    _failed, so it MUST also emit a per-package `[FAIL]` on the console —
+    else the console shows fewer named failures than the "N failed" total
+    (the ENOSPC-libreoffice gap, 2026-07-08: counted but never surfaced).
+    Both the local and remote parallel loops' `except` handlers must
+    console.print, not just logger.error."""
+    _body = _session_source()
+    import re
+    for _marker in ('worker for {_pkg.package} raised',
+                    'remote worker {_src.package} raised'):
+        _m = re.search(
+            re.escape(_marker) + r".*?(?=\n\s+_(?:result|res) = 'failed')",
+            _body, re.DOTALL)
+        assert _m, f"handler for {_marker!r} not found"
+        assert 'console.print(' in _m.group(0) and '[FAIL]' in _m.group(0), (
+            f"the {_marker!r} handler must console.print a [FAIL] line so "
+            "named console failures match the failed count")
 
 
 def test_source_audit_uses_per_source_progress_bar():
@@ -2654,7 +2785,10 @@ def test_all_containers_run_sites_carry_user_env():
             f"containers.run site missing seccomp unconfine:\n"
             f"{_m.group(1)[:300]}")
     assert "_CONTAINER_ENV = {'USER': 'athena', 'LOGNAME': 'athena'}" in _src
-    assert "_CONTAINER_SECURITY_OPT = ['seccomp=unconfined']" in _src
+    assert ("_CONTAINER_SECURITY_OPT = "
+            "['seccomp=unconfined', 'apparmor=unconfined']") in _src, (
+        "both LSM opt-outs required — seccomp for kernel errno semantics, "
+        "apparmor for test-container mount() (glibc, 2026-07-08)")
 
 
 def test_comp03_register_live_called_after_each_containers_run():
@@ -5683,6 +5817,8 @@ TESTS = [
     test_buildcontainer_token_subst_grep_rescue_or_true,
     test_buildcontainer_changelog_uses_codename_field,
     test_conf15_dockerfile_pins_toolchain_to_snapshot,
+    test_base_rootfs_bootstrap_command_and_cache,
+    test_image_build_stages_rootfs_context_not_config_dir,
     test_conf15_buildcontainer_image_tag_carries_snapshot_ts,
     test_mat04_build_container_mounts_source_and_patch_readonly,
     test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
@@ -5835,6 +5971,7 @@ TESTS = [
     test_strip_nmu_from_built_artifacts_does_not_scan_repo,
     test_buildcontainer_run_grub_mkrescue_constructs_correct_docker_call,
     test_buildcontainer_run_grub_mkrescue_propagates_failure,
+    test_worker_exception_surfaces_console_fail,
     test_source_audit_uses_per_source_progress_bar,
     test_tier3_cleanup_source_pins,
     test_cmd_source_audit_pool_remediation_is_runnable,

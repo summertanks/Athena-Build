@@ -4,7 +4,29 @@ ARG ARCHIVE_NAME=debian
 ARG SECURITY_ARCHIVE_NAME=debian-security
 ARG SNAPSHOT_TS=
 
-FROM debian:${RELEASE}-slim
+# The base is OUR OWN bootstrap, not Docker Hub's: BuildContainer runs
+# `mmdebstrap --variant=buildd` against the pinned snapshot (see
+# scripts/base_rootfs.py) and stages the resulting tar next to this
+# Dockerfile in the build context.  Every byte of the image therefore
+# comes from the snapshot at SNAPSHOT_TS.
+#
+# Why not debian:<release>-slim (the pre-2026-07 base)?  Three classes of
+# trouble, all hit in practice:
+#   1. slim images are assembled with doc/locale stripping baked in —
+#      base-layer packages exist in dpkg's database but their doc files
+#      are absent on disk (libpsl's publicsuffix test fixture,
+#      init-system-helpers' dpkg -L walk).
+#   2. docker-specific dpkg config shipped in the base broke exact-stderr
+#      package tests (dpkg src/at/chdir.at) until removed.
+#   3. the FROM line pulled whatever Docker Hub served on pull day —
+#      the one unpinned, third-party layer in an otherwise
+#      snapshot-pinned build environment.
+# The buildd variant is what sbuild chroots are made of: buildd parity
+# by construction, and the install-then-realign dance the slim base
+# required (install from live mirror, rewrite sources, dist-upgrade
+# back to snapshot) is gone — the base IS at snapshot from birth.
+FROM scratch
+ADD base-rootfs.tar /
 ARG DEBIAN_FRONTEND=noninteractive
 # Re-declare the snapshot args inside the build stage — ARGs before FROM
 # scope only to the FROM line; consumers (RUN blocks below) need them
@@ -15,83 +37,13 @@ ARG ARCHIVE_NAME
 ARG SECURITY_ARCHIVE_NAME
 ARG SNAPSHOT_TS
 
-# CONF-15 (revised — install-then-realign): pin the toolchain layer to
-# OUR snapshot, but in two steps so apt's `install` step uses the live
-# mirror it already knows packages exist on, then the snapshot view
-# realigns the installed set.
-#
-# Why two steps?  An earlier single-step attempt (rewrite sources to
-# snapshot FIRST, then `apt-get install -y <toolchain>`) failed at image
-# build with ~15 packages reported "Unable to locate" — debhelper,
-# python3, gettext, autoconf, automake, libtool, po-debconf, etc.  The
-# same TS works for per-build `apt-get install` of build-deps inside the
-# resulting image; the difference is that per-build container starts with
-# the toolchain already installed (so apt-get install <build-dep> only
-# needs to find the build-deps, not the toolchain).  At image-build time
-# the toolchain is the FIRST resolve against snapshot, and something
-# about the index at snapshot.debian.org makes those names not surface
-# despite `apt-get update` succeeding.  Diagnosed but not root-caused;
-# the install-then-realign shape sidesteps it entirely.
-#
-# Step (a) — apt-get install <toolchain> against the base image's
-# default sources.list.  This is the LIVE mirror (deb.debian.org), which
-# we know carries every toolchain package by name.  Same shape the
-# pre-CONF-15 Dockerfile used; the contamination problem CONF-15 was
-# fixing happens at PER-BUILD time, not here.
-#
-# Step (b) — wipe sources, write snapshot sources (main + -updates +
-# -security at the SAME TS), and apt-get update.  After this point the
-# container's apt view is at snapshot.
-#
-# Step (c) — `apt-get -y --allow-downgrades dist-upgrade` realigns the
-# installed package set with the snapshot view.  Pre-installed library
-# packages that are newer than snapshot get downgraded; missing ones
-# get pulled.  Pin-Priority 1001 on snapshot.debian.org origin forces
-# the downgrade direction (default priority 500 keeps installed-newer).
-#
-# After (a)+(b)+(c), the image's installed set is at snapshot.  Per-build
-# inside this image starts already-aligned; no per-build dist-upgrade
-# needed.
-#
-# Library `-dev` packages still MUST NOT be installed in step (a) —
-# their .shlibs would be embedded in fresh builds at the LIVE mirror
-# version even after the realign.  Step (a) keeps to language-agnostic
-# toolchain (build-essential, python, autoconf, etc.); -dev packages
-# come from each source's Build-Depends at per-build time.
-#
-# SNAPSHOT_TS must be passed by the build-args; an empty SNAPSHOT_TS
-# fails the build LOUDLY rather than silently leaving the image at the
-# live mirror (which would re-introduce the contamination problem).
-
-# Drop the docker-specific dpkg configuration the slim base image ships
-# (/etc/dpkg/dpkg.cfg.d/docker + docker-apt-speedup).  Two reasons:
-#   1. The path-exclude/path-include filters in `docker` are loaded by
-#      EVERY dpkg invocation; under DPKG_DEBUG they emit 19 extra
-#      "adding exclude/include filter" stderr lines, which breaks
-#      exact-stderr autotest checks in source builds (dpkg's own
-#      testsuite, src/at/chdir.at, tests 41-45).
-#   2. A real Debian buildd has no such config — the filters silently
-#      strip docs/man/locale files from every package installed in the
-#      container (toolchain + per-build build-deps), deviating from a
-#      clean build environment.  We build with docs enabled.
-# `docker-apt-speedup` (force-unsafe-io) is removed for the same
-# buildd-parity reason; the fsync speedup is not worth the deviation.
-# Removed BEFORE the toolchain install below so those packages land
-# complete, as they would on a buildd.
-RUN rm -f /etc/dpkg/dpkg.cfg.d/docker*
-
-# (a) toolchain install against the live mirror.
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y \
-        net-tools iputils-ping util-linux \
-        bc bison build-essential cpio flex ca-certificates less sudo keyboard-configuration \
-        vim gettext debhelper texinfo groff media-types gperf procps \
-        python3-minimal python3 dh-python python3-distutils python3-debian python3-gpg \
-        apt-file autoconf autotools-dev automake gettext debhelper diffstat zip libtool po-debconf; \
-    apt-get clean
-
-# (b)+(c) switch sources to OUR snapshot and realign the installed set.
+# Snapshot sources + pin, written explicitly even though mmdebstrap
+# bootstrapped from the same three pockets: the image's apt view must
+# not depend on what the bootstrap tool happened to leave behind, and
+# the Pin-Priority 1001 forces the downgrade direction for any
+# later realign (mirrors _write_snapshot_sources_cmd's per-build shape).
+# An empty SNAPSHOT_TS fails the build LOUDLY rather than silently
+# leaving the image against an unpinned view.
 RUN set -eux; \
     if [ -z "${SNAPSHOT_TS}" ]; then \
         echo "ERROR: SNAPSHOT_TS build-arg is empty — pass it from BuildContainer.__init__" >&2; \
@@ -106,9 +58,26 @@ RUN set -eux; \
         echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${SECURITY_ARCHIVE_NAME}/${SNAPSHOT_TS} ${RELEASE}-security main"; \
     } > /etc/apt/sources.list; \
     printf 'Package: *\nPin: origin snapshot.debian.org\nPin-Priority: 1001\n' \
-        > /etc/apt/preferences.d/athena-snapshot; \
-    apt-get update; \
-    apt-get -y -o Acquire::Retries=5 --allow-downgrades dist-upgrade; \
+        > /etc/apt/preferences.d/athena-snapshot
+
+# Toolchain on top of the buildd base — resolved AGAINST THE SNAPSHOT
+# (the buildd variant already carries build-essential; the list below is
+# the language-agnostic extras).  Library `-dev` packages still MUST NOT
+# be installed here — their .shlibs would be embedded in fresh builds;
+# -dev packages come from each source's Build-Depends at per-build time.
+#
+# Error-Mode=any: a failed index fetch must FAIL the update, not warn —
+# apt's default exit-0-with-warnings left empty lists and a wall of
+# "Unable to locate package" at install (the certificate-less base,
+# 2026-07-08; also the historic CONF-15 "unable to locate" anomaly).
+RUN set -eux; \
+    apt-get update -o APT::Update::Error-Mode=any; \
+    apt-get install -y -o Acquire::Retries=5 \
+        net-tools iputils-ping util-linux mount \
+        bc bison build-essential cpio flex ca-certificates less sudo keyboard-configuration \
+        vim gettext debhelper texinfo groff media-types gperf procps \
+        python3-minimal python3 dh-python python3-distutils python3-debian python3-gpg \
+        apt-file autoconf autotools-dev automake gettext debhelper diffstat zip libtool po-debconf; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 

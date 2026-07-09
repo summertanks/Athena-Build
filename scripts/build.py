@@ -41,6 +41,7 @@ from typing import Optional
 import apt_pkg
 
 # Local imports
+import base_rootfs
 import local_mirror
 import utils
 import _version
@@ -1279,11 +1280,24 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                         def _img_to_log(_m, _ilf=_ilf):
                             _ilf.write(str(_m) + '\n')
                             _ilf.flush()
-                        _built_ok = _ro.build_remote_image(
-                            _host,
-                            os.path.join(self.config.dir_config, 'Dockerfile'),
-                            _tag, self.container._image_build_args(),
-                            ssh_key=_key, log=_img_to_log)
+                        # the FROM-scratch Dockerfile consumes the
+                        # snapshot-bootstrapped base tar; bootstrap it
+                        # HERE (cached per snapshot) and ship it so the
+                        # remote base is byte-identical to the local one.
+                        try:
+                            _rootfs = base_rootfs.ensure_base_rootfs(
+                                self.config, self.container.snapshot_ts)
+                        except RuntimeError as _rfe:
+                            _img_to_log(f"base rootfs bootstrap failed: {_rfe}")
+                            _built_ok = False
+                        else:
+                            _built_ok = _ro.build_remote_image(
+                                _host,
+                                os.path.join(self.config.dir_config,
+                                             'Dockerfile'),
+                                _tag, self.container._image_build_args(),
+                                rootfs_path=_rootfs,
+                                ssh_key=_key, log=_img_to_log)
                 finally:
                     _spin.done()
                 if _built_ok:

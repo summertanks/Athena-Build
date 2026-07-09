@@ -7,6 +7,9 @@ toolchain SemVer (`scripts/_version.py`); per-commit dev versions are automatic.
 
 ## [Unreleased]
 
+- **Build container base changed from debian-slim to a custom
+  snapshot-bootstrapped rootfs** (`scripts/base_rootfs.py`).
+
 - **Per-package prebuild scripts** (`patch/source/<pkg>/prebuild.sh`; see
   `docs/patching.md`).
 

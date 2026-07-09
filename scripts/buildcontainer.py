@@ -3,11 +3,13 @@ import logging
 import os
 import shlex
 import shutil
+import tempfile
 import threading
 import time
 import uuid
 from urllib.parse import urlparse
 from typing import TYPE_CHECKING, Optional, Tuple
+import base_rootfs
 import local_mirror
 import utils
 from utils import BuildConfig, version_no_epoch
@@ -102,10 +104,15 @@ _CONTAINER_ENV = {'USER': 'athena', 'LOGNAME': 'athena'}
 # syscalls with EPERM where the bare kernel would return EINVAL etc. —
 # glibc's tst-personality/tst-clock2 and keyutils' keyctl tests assert
 # KERNEL error semantics and fail under the filter (2026-07-06 run).
-# Real Debian buildds run unfiltered; the container already grants the
-# build passwordless sudo and is treated as a throwaway sandbox
-# (MAT-04 covers the host-facing mounts), so drop the filter.
-_CONTAINER_SECURITY_OPT = ['seccomp=unconfined']
+# AppArmor's docker-default profile is the second half of the same
+# problem: with seccomp lifted, glibc's support/test-container tests get
+# past unshare() for the first time (they used to report UNSUPPORTED,
+# invisibly) and then die on the profile's mount() denial — 32 hard
+# FAILs (2026-07-08 run).  Real Debian buildds run with no LSM
+# confinement of the build; the container already grants the build
+# passwordless sudo and is treated as a throwaway sandbox (MAT-04
+# covers the host-facing mounts), so drop both filters.
+_CONTAINER_SECURITY_OPT = ['seccomp=unconfined', 'apparmor=unconfined']
 
 # serialises segregate's per-file moves from
 # every worker's scratch dir into the shared repo subdirs.  Held
@@ -324,13 +331,33 @@ class BuildContainer:
             tui.Exit(1)
 
         if _needs_build:
+            _ctx = ''
             try:
+                # The Dockerfile is FROM scratch + ADD base-rootfs.tar —
+                # the base is OUR mmdebstrap buildd bootstrap from the
+                # pinned snapshot (base_rootfs.py), not a Docker Hub pull.
+                # Assemble a minimal build context (Dockerfile + tar) in a
+                # staging dir: config/ itself must not carry the ~250MB
+                # tar, and docker would otherwise ship the whole config
+                # dir as context.  Hard-link the cached tar when possible.
+                _rootfs = base_rootfs.ensure_base_rootfs(
+                    config, self.snapshot_ts)
+                _ctx = tempfile.mkdtemp(
+                    prefix='imagectx-', dir=config.dir_temp)
+                shutil.copy(os.path.join(config.dir_config, 'Dockerfile'),
+                            os.path.join(_ctx, 'Dockerfile'))
+                _ctx_tar = os.path.join(_ctx, base_rootfs.ROOTFS_BASENAME)
+                try:
+                    os.link(_rootfs, _ctx_tar)
+                except OSError:
+                    shutil.copy(_rootfs, _ctx_tar)
                 # pass the snapshot triplet as build-args so the
-                # Dockerfile's first RUN can rewrite /etc/apt/sources.list
-                # to OUR snapshot BEFORE any `apt-get install` (so even the
-                # toolchain layer is pinned, not just per-build steps).
+                # Dockerfile's sources.list write pins the toolchain
+                # layer to OUR snapshot (the bootstrapped base already
+                # is; the explicit write keeps the image's apt view
+                # independent of the bootstrap tool's leftovers).
                 image, build_logs = self.client.images.build(
-                    path=config.dir_config, tag=_image_tag,
+                    path=_ctx, tag=_image_tag,
                     buildargs={
                         'RELEASE':              config.container_release,
                         'SNAPSHOT_BASEURL':     config.snapshot_baseurl,
@@ -412,6 +439,12 @@ class BuildContainer:
                 logger.error(f"Athena Build Docker: Error {e}")
                 tui.console.print(f"Athena Build Docker: Error {e}")
                 raise RuntimeError(f"Docker image build failed: {e}") from e
+            finally:
+                # the staging context (Dockerfile + rootfs hard-link) is
+                # consumed by the build — never leave the ~250MB copy
+                # behind in tmp/ on either exit path.
+                if _ctx:
+                    shutil.rmtree(_ctx, ignore_errors=True)
 
         self.image = image
 

@@ -196,6 +196,14 @@ else
     die "docker not found, build system requires docker"
 fi
 
+# mmdebstrap — bootstraps the build-container base rootfs from the pinned
+# snapshot (scripts/base_rootfs.py); 1.2 is the --aptopt/--variant floor.
+if [ -x "$(command -v mmdebstrap || true)" ]; then
+    require_min mmdebstrap 1.2 "$(mmdebstrap --version 2>/dev/null | head -n1 || true)"
+else
+    die "mmdebstrap not found (apt install mmdebstrap) — required to bootstrap the build-container base"
+fi
+
 # checking gpg (used by python-gnupg in verify_inrelease).
 # python-gnupg invokes `gpg`, not `gpgv`, so we check for the full binary.
 if [ -x "$(command -v gpg || true)" ]; then
