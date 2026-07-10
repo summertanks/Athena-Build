@@ -2754,6 +2754,48 @@ class MirrorCommandsMixin(SessionState):
                 _print_audit_finding(_sev, _kind, _msg, _color)
             if _pkg_crit:
                 _all_ok = False
+            # dbgsym suite (<codename>-debug): published as its OWN indexed
+            # suite (generate_repo_indexes + push_dist_tree), not declared in
+            # the primary InRelease.  Its Packages must be merged into
+            # _pkg_idx or every dbgsym coord claim false-flags as
+            # `claim_not_in_apt_index` (the claim's .deb is on the pool but in
+            # no verified index the audit looked at).  coord-head pins only
+            # the primary InRelease, so this suite is verified WITHOUT an
+            # expected sha (its own InRelease→Packages sha chain is still
+            # checked).  Fetched into a SEPARATE dir so the closure-ledger
+            # re-resolution below (which globs _fetched/apt/Packages.*) stays
+            # scoped to the primary install corpus, not dbgsyms.  If the suite
+            # isn't on the mirror (no dbgsyms built / not yet published), skip
+            # silently — the primary claim cross-check still surfaces any
+            # dbgsym claim whose index is genuinely absent.
+            _debug_suite = f'{_codename}-debug'
+            _dbg_apt = os.path.join(_fetched, 'apt-debug')
+            _dbg_rel, _dbg_ir_findings = _mirror.audit_inrelease_against_head(
+                pool_url=_url, codename=_debug_suite, expected_sha256='',
+                fetched_dir=_dbg_apt, ssh_key=_ssh_key,
+            )
+            if not (_dbg_rel is None and any(
+                    _k == 'inrelease_unreachable'
+                    for _s, _k, _m in _dbg_ir_findings)):
+                for _sev, _kind, _msg in _dbg_ir_findings:
+                    _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                              else tui.COLOR_WARNING)
+                    _print_audit_finding(_sev, _kind, _msg, _color)
+                if any(_f[0] == 'CRITICAL' for _f in _dbg_ir_findings):
+                    _all_ok = False
+                if _dbg_rel is not None:
+                    _dbg_idx, _dbg_pkg_findings = _mirror.audit_packages_chain(
+                        pool_url=_url, codename=_debug_suite,
+                        release=_dbg_rel, fetched_dir=_dbg_apt,
+                        ssh_key=_ssh_key, arches=(self.config.arch,),
+                    )
+                    for _sev, _kind, _msg in _dbg_pkg_findings:
+                        _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                                  else tui.COLOR_WARNING)
+                        _print_audit_finding(_sev, _kind, _msg, _color)
+                    if any(_f[0] == 'CRITICAL' for _f in _dbg_pkg_findings):
+                        _all_ok = False
+                    _pkg_idx.update(_dbg_idx)
             _claim_idx_crit: 'list' = []
             _ledger_crit: 'list' = []
             if _pkg_idx:

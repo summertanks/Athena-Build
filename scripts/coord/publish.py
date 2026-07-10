@@ -1280,19 +1280,39 @@ def remote_publish(
             except AttributeError:
                 _codename = ''
             if _codename:
-                _local_dist = os.path.join(
-                    config.dir_repo, 'dists', _codename)
-                _remote_dist = (
-                    pool_remote_spec.rstrip('/')
-                    + f'/dists/{_codename}')
-                _status(f"pushing dist tree dists/{_codename}/")
-                _ok_dt, _dt_detail = _transport.push_dist_tree(
-                    local_dist_dir=_local_dist,
-                    remote_dir_spec=_remote_dist,
-                    ssh_key=ssh_key,
-                )
-                if not _ok_dt:
-                    return False, f"push dist tree failed: {_dt_detail}"
+                # Push the index tree for EVERY locally-indexed suite, not
+                # just the primary codename.  The dbgsym suite
+                # `<codename>-debug` is indexed separately by
+                # generate_repo_indexes (its own InRelease/Release/Packages),
+                # and its .deb artifacts reach the remote via push_single_deb
+                # — but if we only push dists/<codename>/ here, thor-debug
+                # keeps its dbgsym .debs with NO Packages/InRelease on the
+                # remote.  Every dbgsym coord claim then reads as
+                # `claim_not_in_apt_index` in `mirror audit` (the claim's
+                # filename is on the pool but in no verified Packages index).
+                # Enumerate the convention suites (primary + -debug) and push
+                # each that is actually indexed locally (has an InRelease).
+                _suite_names = [_codename, f'{_codename}-debug']
+                for _sn in _suite_names:
+                    _local_dist = os.path.join(
+                        config.dir_repo, 'dists', _sn)
+                    if not os.path.isfile(
+                            os.path.join(_local_dist, 'InRelease')):
+                        # Suite not indexed locally (e.g. no dbgsyms built) —
+                        # nothing to publish for it.
+                        continue
+                    _remote_dist = (
+                        pool_remote_spec.rstrip('/')
+                        + f'/dists/{_sn}')
+                    _status(f"pushing dist tree dists/{_sn}/")
+                    _ok_dt, _dt_detail = _transport.push_dist_tree(
+                        local_dist_dir=_local_dist,
+                        remote_dir_spec=_remote_dist,
+                        ssh_key=ssh_key,
+                    )
+                    if not _ok_dt:
+                        return False, (
+                            f"push dist tree dists/{_sn}/ failed: {_dt_detail}")
 
         # Step 6 — sign + append every pending claim to the LOCAL jsonl
         # (state=published; the .deb is now on the remote pool because

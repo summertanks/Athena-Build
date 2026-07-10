@@ -674,24 +674,38 @@ def iter_published_packages_with_component(
     ``main/debian-installer``); ``arch`` is the ``binary-<arch>`` dir arch.
 
     Same tree walk as ``local_published_packages_text`` but per-file + with the
-    component/arch tags, for the closure-ledger producer."""
-    _root = os.path.join(config.dir_repo, 'dists', config.build_codename)
-    for _dp, _dirs, _files in os.walk(_root):
-        if 'Packages' not in _files:
+    component/arch tags, for the closure-ledger producer.
+
+    Walks the PRIMARY suite AND the ``<codename>-debug`` dbgsym suite: dbgsym
+    binaries are claimed + published (their own indexed suite), so a peer's
+    ``mirror pull`` must be able to pull them too — omitting them here makes the
+    signed closure ledger miss every dbgsym, which `mirror audit` then flags as
+    ``closure_ledger_entry_missing`` (the dbgsym is in the verified index but
+    not the ledger)."""
+    _codename = config.build_codename
+    _suite_roots = [
+        os.path.join(config.dir_repo, 'dists', _codename),
+        os.path.join(config.dir_repo, 'dists', f'{_codename}-debug'),
+    ]
+    for _root in _suite_roots:
+        if not os.path.isdir(_root):
             continue
-        _base = os.path.basename(_dp)
-        if not _base.startswith('binary-'):
-            continue
-        _arch = _base[len('binary-'):]
-        _component = os.path.relpath(os.path.dirname(_dp), _root)
-        try:
-            with open(os.path.join(_dp, 'Packages'),
-                      encoding='utf-8', errors='replace') as _fh:
-                _text = _fh.read()
-        except OSError:
-            continue
-        if _text.strip():
-            yield (_component, _arch, _text)
+        for _dp, _dirs, _files in os.walk(_root):
+            if 'Packages' not in _files:
+                continue
+            _base = os.path.basename(_dp)
+            if not _base.startswith('binary-'):
+                continue
+            _arch = _base[len('binary-'):]
+            _component = os.path.relpath(os.path.dirname(_dp), _root)
+            try:
+                with open(os.path.join(_dp, 'Packages'),
+                          encoding='utf-8', errors='replace') as _fh:
+                    _text = _fh.read()
+            except OSError:
+                continue
+            if _text.strip():
+                yield (_component, _arch, _text)
 
 
 def published_ledger_entries(config: 'BuildConfig') -> 'dict':
