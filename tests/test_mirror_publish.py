@@ -4831,6 +4831,44 @@ def test_local_mirror_plan_excludes_fork_file_urls():
 
 
 
+def test_inrelease_index_stale_detects_content_drift():
+    """apt_repo.inrelease_index_stale: True when InRelease pins a Packages
+    SHA-256 that disagrees with the on-disk Packages (or the file is gone),
+    catching the content-stale-but-mtime-fresh case the publish gate's mtime
+    walk misses (in-place `repo repair strip` → re-sign, 2026-07-10).  A
+    consistent chain, and a missing InRelease, are NOT stale."""
+    import hashlib as _hl
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo as _ar
+    with tempfile.TemporaryDirectory() as _d:
+        _pdir = os.path.join(_d, 'main', 'binary-amd64')
+        os.makedirs(_pdir)
+        _pkgs = os.path.join(_pdir, 'Packages')
+        with open(_pkgs, 'wb') as _fh:
+            _fh.write(b'Package: foo\nVersion: 1.0\n\n')
+        _sha = _hl.sha256(open(_pkgs, 'rb').read()).hexdigest()
+        _ir = os.path.join(_d, 'InRelease')
+
+        def _write_ir(sha):
+            with open(_ir, 'w') as _fh:
+                _fh.write("Origin: X\nSHA256:\n"
+                          f" {sha} 27 main/binary-amd64/Packages\n"
+                          f" {'0'*64} 40 main/binary-amd64/Packages.gz\n")
+        # (a) consistent → not stale
+        _write_ir(_sha)
+        assert _ar.inrelease_index_stale(_ir, _d) is False
+        # (b) InRelease pins a DIFFERENT sha (content drift) → stale
+        _write_ir('e' * 64)
+        assert _ar.inrelease_index_stale(_ir, _d) is True
+        # (c) pinned Packages missing on disk → stale
+        _write_ir(_sha)
+        os.remove(_pkgs)
+        assert _ar.inrelease_index_stale(_ir, _d) is True
+        # (d) missing InRelease → NOT stale (caller's own missing-check owns it)
+        os.remove(_ir)
+        assert _ar.inrelease_index_stale(_ir, _d) is False
+
+
 def test_local_mirror_index_writes_flat_apt_repo_with_origin():
     """local_mirror.index: dpkg-scanpackages → a flat Packages (./ filenames)
     plus a Release carrying Origin: AthenaLocalMirror (so the container can
@@ -4906,6 +4944,7 @@ TESTS = [
     test_local_mirror_download_withholds_marker_on_failure_cons13,
     test_local_mirror_coverage_present_missing_stale,
     test_local_mirror_plan_excludes_fork_file_urls,
+    test_inrelease_index_stale_detects_content_drift,
     test_local_mirror_index_writes_flat_apt_repo_with_origin,
     test_local_mirror_index_failure_leaves_no_valid_mirror,
     test_local_mirror_is_valid_for_keys_to_snapshot_marker,

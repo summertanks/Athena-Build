@@ -11,6 +11,7 @@ import logging
 import os
 from typing import Optional
 
+import apt_repo
 import tui
 import utils
 from tui import console, Prompt, PROMPT_YESNO, ProgressBar
@@ -1293,6 +1294,17 @@ class MirrorCommandsMixin(SessionState):
                         continue
                 if _need_index:
                     break
+        # CONTENT-staleness (not just mtime): an InRelease re-signed AFTER
+        # the Packages were regenerated (e.g. an in-place `repo repair strip`
+        # → re-sign) is mtime-fresh but pins the OLD Packages hashes — the
+        # mtime walk above passes it, then the mirror ships a self-consistent
+        # but stale index apt clients reject (2026-07-10).  Compare the
+        # InRelease Packages-pins against the on-disk Packages sha256.
+        if not _need_index and apt_repo.inrelease_index_stale(
+                _inrelease, os.path.join(self.config.dir_repo,
+                                         'dists', _codename)):
+            _need_index = True
+            _why = 'stale — InRelease pins a Packages sha that no longer matches'
         if _need_index:
             console.print(
                 f"mirror publish: local InRelease {_why} — auto-indexing "

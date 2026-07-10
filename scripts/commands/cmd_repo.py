@@ -12,6 +12,7 @@ import os
 import shutil
 
 import apt_pkg
+import apt_repo
 import arch_filter
 import repo_audit
 import tui
@@ -439,14 +440,40 @@ class RepoCommandsMixin(SessionState):
                      else os.path.join(self.config.dir_log, 'build'))
         _refreshed = utils.refresh_output_hashes(_buildlog, _repo)
 
+        # The pool debs changed, so the on-disk apt index (Packages/Release/
+        # InRelease) now describes the OLD bytes.  Strip does NOT regenerate
+        # the index (that needs the signing key + sudo), so mark it stale by
+        # removing the signed top-level Release/InRelease: the next `mirror
+        # publish` / `chroot build` auto-indexes via the InRelease-missing
+        # path and re-signs a consistent chain.  Without this, a later re-sign
+        # can leave a content-stale-but-mtime-fresh InRelease that the publish
+        # gate ships uncaught (2026-07-10).  Fire when anything was rewritten
+        # OR the index is already content-stale from a prior strip run (a
+        # same-debs re-run reports 0 rewritten but the drift persists).
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _dist = os.path.join(_repo, 'dists', _codename)
+        _inrel = os.path.join(_dist, 'InRelease')
+        _index_invalidated = False
+        if _rewritten or apt_repo.inrelease_index_stale(_inrel, _dist):
+            for _idx in ('InRelease', 'Release', 'Release.gpg'):
+                try:
+                    os.remove(os.path.join(_dist, _idx))
+                    _index_invalidated = True
+                except OSError:
+                    pass
+
         _tun_tail = (f", {_tunneled_skipped} tunneled (preserved)"
                      if _tunneled_skipped else "")
         _hash_tail = (f"  Refreshed {_refreshed['updated']} stale build-record "
                       f"output-hash set(s)." if _refreshed['updated'] else "")
+        _idx_tail = ("  Invalidated the apt index (Release/InRelease) — the "
+                     "next `mirror publish` / `chroot build` re-indexes."
+                     if _index_invalidated else "")
         console.print(
             f"Strip complete: {_rewritten} rewritten, "
             f"{_unchanged} unchanged, {_failed} failed{_tun_tail}.  "
-            f"{_total_strips} suffix(es) stripped in total.{_hash_tail}  "
+            f"{_total_strips} suffix(es) stripped in total.{_hash_tail}"
+            f"{_idx_tail}  "
             f"Run `repo audit` to confirm zero residue."
         )
 

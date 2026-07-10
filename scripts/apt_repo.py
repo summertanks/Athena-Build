@@ -14,6 +14,7 @@ Exposed surface:
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -59,6 +60,46 @@ def deb_excluded_from_minimal(filename: str) -> bool:
         return True
     if _name.startswith('linux-source-'):
         return True
+    return False
+
+
+def inrelease_index_stale(inrelease_path: str, dist_root: str) -> bool:
+    """True when the signed InRelease pins a ``Packages`` SHA-256 that
+    disagrees with the actual on-disk Packages file (or that file is gone) —
+    i.e. the index is CONTENT-stale even though it may be mtime-fresh.
+
+    The publish/chroot staleness gate is mtime-based (pool file newer than
+    InRelease → re-index); that MISSES a re-signed InRelease whose pinned
+    hashes lag the regenerated Packages (an in-place ``repo repair strip``
+    followed by a re-sign, 2026-07-10).  This content check catches it: apt
+    would reject such a repo ("Hash Sum mismatch"), and a mirror publish
+    would ship it "cleanly" while every client keeps resolving stale bytes.
+
+    Missing InRelease → False (the caller's own missing-check owns that).
+    Only uncompressed ``<comp>/binary-*/Packages`` entries are compared
+    (``.gz``/``.xz`` are derivatives; Sources indexes are not pool-gating).
+    """
+    try:
+        with open(inrelease_path, encoding='utf-8', errors='replace') as _fh:
+            _txt = _fh.read()
+    except OSError:
+        return False
+    _m = re.search(r'\nSHA256:\n(.*?)(?:\n[A-Z][A-Za-z-]*:|\Z)',
+                   _txt, re.DOTALL)
+    if not _m:
+        return False
+    for _line in _m.group(1).splitlines():
+        _parts = _line.split()
+        if len(_parts) != 3:
+            continue
+        _sha, _sz, _rel = _parts
+        if not _rel.endswith('Packages') or '/binary-' not in _rel:
+            continue
+        _fp = os.path.join(dist_root, _rel)
+        if not os.path.isfile(_fp):
+            return True                       # pinned index gone → stale
+        if utils.get_sha256(_fp) != _sha:
+            return True                       # pinned hash ≠ disk → stale
     return False
 
 
