@@ -2039,14 +2039,25 @@ def _own_claims_disk_walk(
         # local repo (or its bytes replaced under the same filename).
         if int(_c.get('seq', 0)) in _superseded:
             continue
-        if _c.get('republished_from'):
-            continue
+        # republished (tunneled passthrough) claims were previously skipped
+        # WHOLESALE here.  That silenced two legitimate cases: a tunneled .deb
+        # `repo repair strip` repacked locally (its bytes now differ from the
+        # frozen claim, but the LOCAL BUILD RECORD backs the new bytes — a
+        # sanctioned, reclaimable rewrite), and it's the only reason
+        # `mirror reclaim` couldn't reconcile a repaired tunneled package.
+        # We no longer skip up-front; instead we classify and re-suppress
+        # below for every case EXCEPT a build-record-backed local_ahead, so
+        # the old behaviour (no bitrot/pruning findings for passthrough files
+        # we don't own the upstream bytes of) is preserved untouched.
+        _republished = bool(_c.get('republished_from'))
         _fn = str(_c.get('filename') or '')
         _claim_sha = str(_c.get('sha256') or '')
         if not _fn or not _claim_sha:
             continue
         _path = _by_name.get(_fn)
         if _path is None:
+            if _republished:
+                continue      # tunneled file legitimately pruned — not ours
             _rows.append({'kind': 'missing', 'claim': _c, 'filename': _fn,
                           'remote_sha': _claim_sha, 'local_sha': '',
                           'path': '', 'error': ''})
@@ -2057,6 +2068,8 @@ def _own_claims_disk_walk(
         # silent bitrot (no size/mtime change) is still caught.
         _actual = _utils.get_sha256(_path, use_cache=False)
         if not _actual:
+            if _republished:
+                continue
             _rows.append({'kind': 'unreadable', 'claim': _c,
                           'filename': _fn, 'remote_sha': _claim_sha,
                           'local_sha': '', 'path': _path,
@@ -2064,9 +2077,16 @@ def _own_claims_disk_walk(
             continue
         if _actual == _claim_sha:
             continue
+        _kind = ('local_ahead' if _local_build_has_sha(_c, _actual)
+                 else 'sha_mismatch')
+        # A republished claim only surfaces as a reclaimable local_ahead (its
+        # drift is backed by our build record).  An UNBACKED divergence on a
+        # passthrough file isn't our bitrot to flag — suppress it exactly as
+        # the old blanket skip did.
+        if _republished and _kind != 'local_ahead':
+            continue
         _rows.append({
-            'kind': ('local_ahead' if _local_build_has_sha(_c, _actual)
-                     else 'sha_mismatch'),
+            'kind': _kind,
             'claim': _c, 'filename': _fn, 'remote_sha': _claim_sha,
             'local_sha': _actual, 'path': _path, 'error': '',
         })

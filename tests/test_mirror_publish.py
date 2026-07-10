@@ -3044,6 +3044,82 @@ def test_local_ahead_candidates_structured_and_hint_mentions_reclaim():
         assert 'bump + publish' in _ahead[0], _ahead
 
 
+def test_local_ahead_candidates_republished_repacked_is_reclaimable():
+    """A tunneled (republished_from) .deb that `repo repair strip` repacked
+    locally: its on-disk bytes now differ from the frozen claim BUT the local
+    build record backs them.  This is a sanctioned local rewrite and MUST be
+    reclaimable (was previously skipped wholesale, so `mirror reclaim` could
+    never reconcile a repaired tunneled package).  A republished claim whose
+    drift is NOT build-record-backed stays suppressed (not our bitrot to
+    flag), and an in-sync republished claim is silent."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import hashlib as _hashlib
+    import mirror as _mir
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _td:
+        _repo = os.path.join(_td, 'repo')
+        _buildlog = os.path.join(_td, 'log', 'build')
+        os.makedirs(_buildlog)
+
+        def _mk(_name, _content):
+            _p = os.path.join(_repo, 'main', _name[0], _name)
+            os.makedirs(os.path.dirname(_p), exist_ok=True)
+            with open(_p, 'wb') as _fh:
+                _fh.write(_content)
+            return _p, _hashlib.sha256(_content).hexdigest()
+
+        # (1) repaired tunneled deb — build record backs the new bytes
+        _rp_path, _rp_new = _mk('repaired_1.0_amd64.deb', b'repacked-bytes')
+        _rec = _u.new_build_record(
+            package='repaired', intended_version='1.0', patch_set_hash='')
+        _rec['phase'] = 'tunneled'
+        _rec['status'] = 'TUNNELED'
+        _rec['output_hashes'] = {'repaired_1.0_amd64.deb': _rp_new}
+        _u.write_build_record(_buildlog, _rec)
+        # (2) tunneled deb whose disk bytes drift with NO build-record backing
+        _bit_path, _ = _mk('bitrot_1.0_amd64.deb', b'corrupt-bytes')
+        # (3) tunneled deb whose disk bytes still match the claim (in sync)
+        _ok_path, _ok_sha = _mk('insync_1.0_amd64.deb', b'passthrough')
+
+        _by_builder = {
+            'athena-ours': [
+                {'package': 'repaired',
+                 'filename': 'repaired_1.0_amd64.deb',
+                 'sha256': 'a' * 64, 'claim_state': 'published', 'seq': 21,
+                 'component': 'main', 'intended_version': '1.0',
+                 'built_version': '1.0',
+                 'republished_from': {'url': 'u', 'upstream_sha256': 'v'}},
+                {'package': 'bitrot',
+                 'filename': 'bitrot_1.0_amd64.deb',
+                 'sha256': 'b' * 64, 'claim_state': 'published', 'seq': 22,
+                 'republished_from': {'url': 'u', 'upstream_sha256': 'v'}},
+                {'package': 'insync',
+                 'filename': 'insync_1.0_amd64.deb',
+                 'sha256': _ok_sha, 'claim_state': 'published', 'seq': 23,
+                 'republished_from': {'url': 'u', 'upstream_sha256': 'v'}},
+            ],
+        }
+        _cands = _mir.local_ahead_candidates(
+            _by_builder, our_builder_id='athena-ours',
+            local_repo_dir=_repo, buildlog_dir=_buildlog)
+        # ONLY the repaired tunneled deb is a reclaim candidate.
+        assert [_c['filename'] for _c in _cands] == [
+            'repaired_1.0_amd64.deb'], _cands
+        assert _cands[0]['remote_sha'] == 'a' * 64
+        assert _cands[0]['local_sha'] == _rp_new
+        assert _cands[0]['old_seq'] == 21
+        # The on-disk audit: repaired → WARNING local-ahead; the unbacked
+        # bitrot tunneled deb stays SILENT (old blanket-skip behaviour kept);
+        # in-sync is silent.  No CRITICAL for any republished file.
+        _findings = _mir.audit_own_claims_on_disk(
+            _by_builder, our_builder_id='athena-ours',
+            local_repo_dir=_repo, buildlog_dir=_buildlog)
+        _kinds = sorted(_k for _s, _k, _m in _findings)
+        assert _kinds == ['own_claim_local_ahead_of_remote'], _findings
+        assert all(_s == 'WARNING' for _s, _k, _m in _findings), _findings
+
 
 def test_audit_own_claims_on_disk_real_bitrot_still_critical():
     """Disk sha matches neither remote claim NOR local build.json →
@@ -4857,6 +4933,27 @@ def test_inrelease_index_stale_detects_content_drift():
         # (a) consistent → not stale
         _write_ir(_sha)
         assert _ar.inrelease_index_stale(_ir, _d) is False
+        # (a2) REGRESSION: a real apt-ftparchive InRelease carries MD5Sum/
+        # SHA1/SHA256/SHA512 blocks in sequence, and the SHA512 block repeats
+        # every path with a 128-hex digest.  The block-boundary regex must
+        # stop at `SHA512:` (which contains digits) — an earlier stop pattern
+        # `\n[A-Z][A-Za-z-]*:` did NOT, so `.*?` swallowed the SHA512 entries
+        # and every Packages' 128-hex SHA-512 got compared against get_sha256
+        # → a false-positive "stale" for EVERY real repo.  Correct SHA-256
+        # pins + a trailing SHA512 block ⟹ NOT stale.
+        _sha512 = _hl.sha512(open(_pkgs, 'rb').read()).hexdigest()
+        with open(_ir, 'w') as _fh:
+            _fh.write(
+                "Origin: X\n"
+                "MD5Sum:\n"
+                f" {'a'*32} 27 main/binary-amd64/Packages\n"
+                "SHA256:\n"
+                f" {_sha} 27 main/binary-amd64/Packages\n"
+                f" {'0'*64} 40 main/binary-amd64/Packages.gz\n"
+                "SHA512:\n"
+                f" {_sha512} 27 main/binary-amd64/Packages\n"
+                f" {'0'*128} 40 main/binary-amd64/Packages.gz\n")
+        assert _ar.inrelease_index_stale(_ir, _d) is False
         # (b) InRelease pins a DIFFERENT sha (content drift) → stale
         _write_ir('e' * 64)
         assert _ar.inrelease_index_stale(_ir, _d) is True
@@ -5100,6 +5197,7 @@ TESTS = [
     test_audit_own_claims_on_disk_no_our_builder_id_is_noop,
     test_audit_own_claims_on_disk_ahead_of_remote_is_warning_not_critical,
     test_local_ahead_candidates_structured_and_hint_mentions_reclaim,
+    test_local_ahead_candidates_republished_repacked_is_reclaimable,
     test_audit_own_claims_on_disk_real_bitrot_still_critical,
     test_audit_cross_mirror_head_drift_silent_when_aligned,
     test_audit_cross_mirror_head_drift_neighbours_diff_is_critical,
