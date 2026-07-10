@@ -426,12 +426,27 @@ class RepoCommandsMixin(SessionState):
         # snapshot in dir_temp is now stale.
         repo_audit.invalidate_cache()
 
+        # A repacked .deb has a NEW sha256, so its build.json output_hashes
+        # is now stale — verify_output_hashes (the chroot pre-flight
+        # RECORD↔DISK gate) would flag every rewritten file and BLOCK the
+        # build.  Recompute + update drifted records from disk so the repair
+        # leaves NO stale derived state.  Run UNCONDITIONALLY (not just when
+        # THIS invocation rewrote something): a prior strip run may already
+        # have left stale hashes that a same-debs re-run reports as
+        # 0-rewritten.  Idempotent + cached-hash cheap on a clean repo.
+        _buildlog = (self.container.buildlog_path
+                     if self.container is not None
+                     else os.path.join(self.config.dir_log, 'build'))
+        _refreshed = utils.refresh_output_hashes(_buildlog, _repo)
+
         _tun_tail = (f", {_tunneled_skipped} tunneled (preserved)"
                      if _tunneled_skipped else "")
+        _hash_tail = (f"  Refreshed {_refreshed['updated']} stale build-record "
+                      f"output-hash set(s)." if _refreshed['updated'] else "")
         console.print(
             f"Strip complete: {_rewritten} rewritten, "
             f"{_unchanged} unchanged, {_failed} failed{_tun_tail}.  "
-            f"{_total_strips} suffix(es) stripped in total.  "
+            f"{_total_strips} suffix(es) stripped in total.{_hash_tail}  "
             f"Run `repo audit` to confirm zero residue."
         )
 

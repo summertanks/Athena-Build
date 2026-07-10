@@ -1962,6 +1962,20 @@ def test_verify_output_hashes_flags_only_present_drift_not_pruned_absent():
         assert ('src', 'good_1.0-1_amd64.deb') not in _stats['mismatched']
         assert ('src', 'pruned_1.0-1_amd64.deb') not in _stats['mismatched']
 
+        # refresh_output_hashes overwrites the present-but-stale hash from
+        # disk (unlike backfill, which skips present hashes), so a following
+        # verify_output_hashes reports zero drift — the `repo repair strip`
+        # RECORD↔DISK recovery.  The pruned/absent output is left alone.
+        _rstats = _u.refresh_output_hashes(_log, _repo)
+        assert _rstats['updated'] == 1, _rstats            # only 'src' changed
+        assert _rstats['absent'] == 1, _rstats             # the pruned output
+        _refreshed = _u.read_build_record(_log, 'src')['output_hashes']
+        assert _refreshed['drift_1.0-1_amd64.deb'] == _u.get_sha256(_drift)
+        assert _refreshed['good_1.0-1_amd64.deb'] == _u.get_sha256(_good)
+        # pruned entry unchanged (file absent, placeholder kept)
+        assert _refreshed['pruned_1.0-1_amd64.deb'] == 'a' * 64
+        assert _u.verify_output_hashes(_log, _repo)['mismatched'] == []
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

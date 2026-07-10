@@ -1687,6 +1687,62 @@ def verify_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
     return _stats
 
 
+def refresh_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
+    """Recompute and UPDATE every terminal record's ``output_hashes`` from the
+    on-disk artifact — the recovery for an in-place repair (``repo repair
+    strip``) that repacked a .deb and left the record's stored SHA-256 stale.
+
+    Distinct from :func:`backfill_output_hashes` (fills MISSING hashes only,
+    skips a present-but-stale one) and :func:`verify_output_hashes`
+    (read-only, reports drift).  This one OVERWRITES a present-but-stale hash
+    with the current on-disk value, so the RECORD↔DISK integrity gate
+    (``verify_output_hashes`` in the chroot pre-flight) passes after a repair.
+
+    Same-name assumption: an in-place strip does not rename (the .deb's own
+    version is untouched — only constraint bounds change), so the record's
+    ``outputs`` filenames still match disk.  Absent outputs (pruned subset)
+    are left alone.  Uses the cached :func:`get_sha256`; a repacked file's
+    moved mtime forces the recompute, so only actually-changed files re-hash.
+
+    Returns {'scanned': int, 'updated': int, 'absent': int}.
+    """
+    _index: 'dict[str, str]' = {}
+    for _root, _dirs, _files in os.walk(repo_root):
+        for _f in _files:
+            if _f.endswith(('.deb', '.udeb')):
+                _index[_f] = os.path.join(_root, _f)
+    _stats: dict = {'scanned': 0, 'updated': 0, 'absent': 0}
+    try:
+        _entries = sorted(os.listdir(buildlog_dir))
+    except OSError:
+        return _stats
+    for _entry in _entries:
+        if not _entry.endswith(BUILD_RECORD_SUFFIX):
+            continue
+        _pkg = _entry[:-len(BUILD_RECORD_SUFFIX)]
+        _rec = read_build_record(buildlog_dir, _pkg)
+        if _rec is None:
+            continue
+        if _rec.get('status') != 'PASS' and _rec.get('phase') != 'done':
+            continue
+        _hashes = dict(_rec.get('output_hashes') or {})
+        _changed = False
+        for _o in _rec.get('outputs') or []:
+            _stats['scanned'] += 1
+            _path = _index.get(_o)
+            if _path is None:
+                _stats['absent'] += 1                  # pruned — not a fault
+                continue
+            _actual = get_sha256(_path)
+            if _hashes.get(_o) != _actual:
+                _hashes[_o] = _actual
+                _changed = True
+        if _changed:
+            update_build_record(buildlog_dir, _pkg, output_hashes=_hashes)
+            _stats['updated'] += 1
+    return _stats
+
+
 def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
     """Upgrade build.json records to current schema by hashing emitted
     .debs + initialising any new v3 fields.
