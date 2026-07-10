@@ -1670,7 +1670,17 @@ def verify_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
             continue
         # Terminal, successful records only — failed/interrupted have no
         # authoritative on-disk artifact to match against.
-        if _rec.get('status') != 'PASS' and _rec.get('phase') != 'done':
+        # Terminal records that produced artifacts: phase 'done' (local
+        # build) OR 'tunneled' (remote passthrough).  'failed' has no valid
+        # outputs.  The old gate (status=='PASS' or phase=='done') dropped
+        # tunneled records — but generate_pending_claims claims BOTH
+        # done+tunneled, and `repo repair strip` repacks tunneled .debs too,
+        # so a tunneled record's stored hashes go stale after a strip exactly
+        # like a done one.  Skipping them left the drift invisible to the
+        # verify pre-flight (chroot "hash mismatch") and hid the local-ahead
+        # bytes from `mirror reclaim`.
+        if (_rec.get('phase') not in ('done', 'tunneled')
+                and _rec.get('status') not in ('PASS', 'TUNNELED')):
             continue
         _hashes = _rec.get('output_hashes') or {}
         for _o in _rec.get('outputs') or []:
@@ -1723,7 +1733,17 @@ def refresh_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
         _rec = read_build_record(buildlog_dir, _pkg)
         if _rec is None:
             continue
-        if _rec.get('status') != 'PASS' and _rec.get('phase') != 'done':
+        # Terminal records that produced artifacts: phase 'done' (local
+        # build) OR 'tunneled' (remote passthrough).  'failed' has no valid
+        # outputs.  The old gate (status=='PASS' or phase=='done') dropped
+        # tunneled records — but generate_pending_claims claims BOTH
+        # done+tunneled, and `repo repair strip` repacks tunneled .debs too,
+        # so a tunneled record's stored hashes go stale after a strip exactly
+        # like a done one.  Skipping them left the drift invisible to the
+        # verify pre-flight (chroot "hash mismatch") and hid the local-ahead
+        # bytes from `mirror reclaim`.
+        if (_rec.get('phase') not in ('done', 'tunneled')
+                and _rec.get('status') not in ('PASS', 'TUNNELED')):
             continue
         _hashes = dict(_rec.get('output_hashes') or {})
         _changed = False
