@@ -399,14 +399,26 @@ def find_matching_artifact(dst_dir: str,
 
 def _rewrite_control_text(
         content: str,
-        version_op: 'Callable[[str], str]') -> 'tuple[str, int]':
+        version_op: 'Callable[[str], str]',
+        constraint_op: 'Optional[Callable[[str], str]]' = None
+        ) -> 'tuple[str, int]':
     """Shared scaffold for :func:`strip_nmu_from_control_text` and
     :func:`transpose_control_text`.  Applies ``version_op`` (a version-string
-    rewrite) to the Version field AND every version constraint in dep-related
-    fields of a DEBIAN/control text; records the pre-rewrite Version in
+    rewrite) to the Version field, and ``constraint_op`` (defaults to
+    ``version_op``) to every version constraint in dep-related fields of a
+    DEBIAN/control text; records the pre-rewrite Version in
     ``X-Athena-Upstream-Version`` when it changed (CVE-tracking provenance);
     and collapses the same-upstream-sibling ``>>/<<`` idiom to
     ``(= <new Version>)``.
+
+    A DISTINCT ``constraint_op`` lets the transpose scheme strip a Debian
+    binNMU / backport layer (``+bN`` / ``~bpoN+M``) from CONSTRAINT bounds —
+    which reference OTHER packages' buildd-rebuild versions that don't exist
+    in our repo — while the Version field keeps the transpose-only op so a
+    tunnelled ``X+deb…+b1`` own version is preserved per
+    :func:`transpose_deb`'s frozen-sibling-pin design.  Without this the
+    bounds retained NMU residue and 3.2k `-dev`→lib `(= X+bN)` pins failed to
+    resolve against the stripped repo (full-universe audit 2026-07-09).
 
     Walks fields line-by-line (handles multi-line continuation per the deb822
     wrap convention: a field starts at column 0 with ``Name:``; continuation
@@ -453,10 +465,12 @@ def _rewrite_control_text(
     # dep-field's value.  Operator is preserved verbatim.
     _constraint_re = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
 
+    _con_op = constraint_op if constraint_op is not None else version_op
+
     def _sub_constraint(_m: 're.Match') -> str:
         nonlocal _total
         _op, _ver = _m.group(1), _m.group(2)
-        _new_ver = version_op(_ver)
+        _new_ver = _con_op(_ver)
         if _new_ver != _ver:
             _total += 1
         return f'({_op} {_new_ver})'
@@ -825,11 +839,24 @@ def transpose_control_text(content: str, prefix: str,
     The +pP / +bN patch/force suffix is NOT applied here — that is the deb-level
     step (:func:`transpose_deb`), which restamps the collapsed sibling pins to
     the exact final version.  Idempotent on already-transposed text.  Thin
-    wrapper over :func:`_rewrite_control_text` with the per-version op =
-    transpose(v, prefix, release).
+    wrapper over :func:`_rewrite_control_text` with a transpose-only Version op
+    and a binNMU-stripping CONSTRAINT op (see below).
     """
+    def _constraint_op(_v: str) -> str:
+        # Constraint bounds reference OTHER packages' versions; a Debian
+        # binNMU (+bN) / backport (~bpoN+M) layer on them is buildd metadata
+        # that doesn't exist in our repo, so strip it BEFORE transposing the
+        # trailing +deb token (leaving +deb / embedded +deb / +nmuN / +dfsg
+        # intact — strip_binNMU is narrow).  GUARD: a bound that already
+        # carries OUR +asg force level (+asg…+bN) is ours, not Debian's —
+        # leave it to transpose() untouched so a re-normalise pass can't strip
+        # a legitimate force-rebuild pin.
+        if parse_asg_suffix(_v) is not None:
+            return transpose(_v, prefix, release)
+        return transpose(strip_binNMU(_v)[0], prefix, release)
     return _rewrite_control_text(
-        content, lambda _v: transpose(_v, prefix, release))
+        content, lambda _v: transpose(_v, prefix, release),
+        constraint_op=_constraint_op)
 
 
 # Exact-pin matcher: a `<name> (= <version>)` constraint inside a relation

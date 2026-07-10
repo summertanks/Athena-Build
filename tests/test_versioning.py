@@ -226,6 +226,38 @@ def test_transpose_control_text_version_deps_and_provenance():
 
 
 
+def test_transpose_control_text_strips_binnmu_from_constraint_bounds():
+    """Constraint bounds referencing OTHER packages' Debian binNMU (+bN) /
+    backport (~bpoN+M) versions must be STRIPPED (those versions don't exist
+    in our +asg repo), while the +deb token is still transposed.  Full-universe
+    audit 2026-07-09: without this, ~3.2k `-dev`→lib `(= X+bN)` pins fail to
+    resolve.  Applies to ALL bound operators incl. `=` (the exact-pin case);
+    the sibling `=` pins get re-stamped afterwards by transpose_deb, and
+    cross-source `=` pins must land on the target's stripped repo version.
+    GUARD: a bound already carrying OUR +asg force level is left untouched."""
+    from utils import transpose_control_text
+    _ctrl = (
+        'Package: libc6-dev\n'
+        'Version: 2.36-9+deb12u14\n'
+        'Breaks: libasyncns-dev (<= 0.8-6+b2), foo (>= 1.0+deb12u3)\n'
+        'Depends: bar (= 1.2.8-1+b1), baz (<< 3.0-1~bpo11+1)\n'
+        'Conflicts: qux (<< 9.9-9+asg1u1+b1)\n'
+        'Description: x\n'
+    )
+    _out, _n = transpose_control_text(_ctrl, 'asg', 1)
+    assert '(<= 0.8-6)' in _out          # Debian binNMU stripped
+    assert '(>= 1.0+asg1u3)' in _out     # +deb still transposed
+    assert '(= 1.2.8-1)' in _out         # binNMU stripped from an '=' pin
+    assert '(<< 3.0-1)' in _out          # ~bpo backport stripped
+    # our own force-rebuild pin (+asg…+b1) is NOT stripped by the guard
+    assert '(<< 9.9-9+asg1u1+b1)' in _out
+    # the Version field keeps the transpose-only op (no binNMU here to strip)
+    assert 'Version: 2.36-9+asg1u14' in _out
+    # idempotent: a second pass changes nothing more
+    _out2, _n2 = transpose_control_text(_out, 'asg', 1)
+    assert _n2 == 0, (_n2, _out2)
+
+
 def test_transpose_control_text_no_token_is_noop_no_provenance():
     """A pristine / +nmu version is unchanged and gets no X-upstream field."""
     from utils import transpose_control_text
@@ -1370,6 +1402,7 @@ TESTS = [
     test_transposed_version_appends_p_and_b,
     test_compute_transposed_versions_per_binary_base_uniform_p,
     test_transpose_control_text_version_deps_and_provenance,
+    test_transpose_control_text_strips_binnmu_from_constraint_bounds,
     test_transpose_control_text_no_token_is_noop_no_provenance,
     test_transpose_scheme_boundary_table_and_ordering,
     test_decide_patch_bump_count_branches,
