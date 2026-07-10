@@ -1282,6 +1282,42 @@ def test_buildcontainer_run_grub_mkrescue_constructs_correct_docker_call():
     _fake_container.remove.assert_called_once_with(force=True)
 
 
+def test_run_grub_mkrescue_mounts_localmirror_when_active():
+    """When the local build mirror is active, run_grub_mkrescue writes a
+    `file:///localmirror` apt source (via _write_snapshot_sources_cmd) and
+    apt-get update reads it BEFORE installing the grub toolchain — so the
+    container MUST bind-mount /localmirror, exactly as build() does.  Without
+    it apt fails 'file:/localmirror/./Packages File not found' and
+    grub-mkrescue exits 100 (regression once the mirror was enabled)."""
+    from unittest.mock import MagicMock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    _bc._image_tag = 'athenalinux:build-test'
+    _bc._container_labels = {}
+    import threading as _threading
+    _bc._live_lock = _threading.Lock()
+    _bc._live = {}
+    _bc.mirrors = []
+    _bc._localmirror_active = True
+    _bc.config = type('C', (), {
+        'snapshot_baseurl': 'https://snapshot.debian.org/archive',
+        'dir_localmirror': '/host/localmirror'})()
+    _bc.client = MagicMock()
+    _fc = MagicMock()
+    _fc.short_id = 'c'; _fc.wait.return_value = {'StatusCode': 0}
+    _fc.logs.return_value = b''
+    _bc.client.containers.run.return_value = _fc
+
+    _bc.run_grub_mkrescue('/some/staging', '/host/image/out.iso',
+                          password='unused')
+    _kwargs = _bc.client.containers.run.call_args.kwargs
+    # the file:///localmirror source is written into the cmd
+    assert 'file:///localmirror' in _kwargs['command'][2]
+    # ...and the mount is present, ro, matching the written source
+    assert _kwargs['volumes'].get('/host/localmirror') == {
+        'bind': '/localmirror', 'mode': 'ro'}, _kwargs['volumes']
+
 
 def test_buildcontainer_run_grub_mkrescue_propagates_failure():
     """Non-zero exit from docker container → (False, stdout, stderr)."""
@@ -5984,6 +6020,7 @@ TESTS = [
     test_backfill_output_hashes_reports_missing_files,
     test_strip_nmu_from_built_artifacts_does_not_scan_repo,
     test_buildcontainer_run_grub_mkrescue_constructs_correct_docker_call,
+    test_run_grub_mkrescue_mounts_localmirror_when_active,
     test_buildcontainer_run_grub_mkrescue_propagates_failure,
     test_worker_exception_surfaces_console_fail,
     test_source_audit_uses_per_source_progress_bar,

@@ -1856,6 +1856,20 @@ class BuildContainer:
         container = None
         try:
             assert self.client is not None
+            _grub_volumes = {
+                staging_dir: {'bind': '/staging', 'mode': 'rw'},
+                _output_dir: {'bind': '/output',  'mode': 'rw'},
+            }
+            # cmd_str writes the apt sources via _write_snapshot_sources_cmd,
+            # which — when the local build mirror is active — emits a
+            # `file:///localmirror` source that `apt-get update` reads before
+            # installing the grub toolchain.  It MUST be bind-mounted (as
+            # build() does) or apt fails "file:/localmirror/./Packages File
+            # not found" and grub-mkrescue exits 100 (regression once the
+            # local mirror was enabled, 2026-07-10).
+            if getattr(self, '_localmirror_active', False):
+                _grub_volumes[self.config.dir_localmirror] = {
+                    'bind': '/localmirror', 'mode': 'ro'}
             container = self.client.containers.run(
                 self._image_tag,
                 command=['/bin/bash', '-c', cmd_str],
@@ -1863,10 +1877,7 @@ class BuildContainer:
                 labels=self._container_labels,
                 environment=_CONTAINER_ENV,
                 security_opt=_CONTAINER_SECURITY_OPT,
-                volumes={
-                    staging_dir: {'bind': '/staging', 'mode': 'rw'},
-                    _output_dir: {'bind': '/output',  'mode': 'rw'},
-                },
+                volumes=_grub_volumes,
             )
             self._register_live(container)
             logger.info(
