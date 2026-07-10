@@ -84,8 +84,16 @@ def inrelease_index_stale(inrelease_path: str, dist_root: str) -> bool:
             _txt = _fh.read()
     except OSError:
         return False
-    _m = re.search(r'\nSHA256:\n(.*?)(?:\n[A-Z][A-Za-z-]*:|\Z)',
-                   _txt, re.DOTALL)
+    # Field boundary is a following line at column 0 (deb822: continuation
+    # lines start with a space, so the next field header is the first
+    # non-space-led line).  The previous stop `\n[A-Z][A-Za-z-]*:` could
+    # NOT match the very next block header `SHA512:` (nor `SHA1:`/`MD5Sum:`)
+    # because those contain digits — so `.*?` ran past the SHA256 block into
+    # the SHA512 entries, and every Packages then appeared twice: once with
+    # its 64-hex SHA-256 and once with a 128-hex SHA-512.  Comparing the
+    # SHA-512 line against get_sha256() ALWAYS mismatched → a false-positive
+    # "stale" verdict for every real repo (all carry a SHA512 block).
+    _m = re.search(r'\nSHA256:\n(.*?)(?:\n\S|\Z)', _txt, re.DOTALL)
     if not _m:
         return False
     for _line in _m.group(1).splitlines():
