@@ -204,6 +204,14 @@ else
     die "mmdebstrap not found (apt install mmdebstrap) — required to bootstrap the build-container base"
 fi
 
+# dpkg-source — regenerates the fork source mirror (scripts/fork_mirror.py
+# runs dpkg-source -b on every cache build/parse); ships in dpkg-dev.
+if [ -x "$(command -v dpkg-source || true)" ]; then
+    require_min dpkg-source 1.20 "$(dpkg-source --version 2>/dev/null | head -n1 || true)"
+else
+    die "dpkg-source not found (apt install dpkg-dev) — required to generate the fork source mirror"
+fi
+
 # checking gpg (used by python-gnupg in verify_inrelease).
 # python-gnupg invokes `gpg`, not `gpgv`, so we check for the full binary.
 if [ -x "$(command -v gpg || true)" ]; then

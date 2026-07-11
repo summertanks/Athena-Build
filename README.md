@@ -75,7 +75,7 @@ if sudo -l -n 2>/dev/null | grep -q '(ALL'; then echo "($(whoami) has sudo privi
 
 Now install the host packages the startup check looks for (Docker is handled separately, just below): 
 ```bash
-sudo apt install -y bash gzip wget gawk gnupg debian-archive-keyring python3 python3-apt python3-debian python3-gnupg python3-psutil python3-requests python3-docker squashfs-tools xorriso mtools grub-common grub-pc-bin grub-efi-amd64-bin rsync qemu-utils dosfstools e2fsprogs util-linux fdisk
+sudo apt install -y bash gzip wget gawk gnupg debian-archive-keyring dpkg-dev mmdebstrap python3 python3-apt python3-debian python3-gnupg python3-psutil python3-requests python3-docker squashfs-tools xorriso mtools grub-common grub-pc-bin grub-efi-amd64-bin rsync qemu-utils dosfstools e2fsprogs util-linux fdisk openssl openssh-client git
 ```
 
 Avoid using repo shipped docker. While strong recommendation is to check the [official site](https://docs.docker.com/engine/install/debian/) for any changes in steps but for simplicity sake just adding the easy way. Also, remember to add the ssh user to docker group.
