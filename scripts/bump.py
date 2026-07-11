@@ -400,25 +400,31 @@ def find_matching_artifact(dst_dir: str,
 def _rewrite_control_text(
         content: str,
         version_op: 'Callable[[str], str]',
-        constraint_op: 'Optional[Callable[[str], str]]' = None
+        constraint_op: 'Optional[Callable[[str, Optional[str]], str]]' = None
         ) -> 'tuple[str, int]':
     """Shared scaffold for :func:`strip_nmu_from_control_text` and
     :func:`transpose_control_text`.  Applies ``version_op`` (a version-string
     rewrite) to the Version field, and ``constraint_op`` (defaults to
-    ``version_op``) to every version constraint in dep-related fields of a
-    DEBIAN/control text; records the pre-rewrite Version in
-    ``X-Athena-Upstream-Version`` when it changed (CVE-tracking provenance);
-    and collapses the same-upstream-sibling ``>>/<<`` idiom to
+    ``version_op``, ignoring the name) to every version constraint in
+    dep-related fields of a DEBIAN/control text; records the pre-rewrite
+    Version in ``X-Athena-Upstream-Version`` when it changed (CVE-tracking
+    provenance); and collapses the same-upstream-sibling ``>>/<<`` idiom to
     ``(= <new Version>)``.
 
-    A DISTINCT ``constraint_op`` lets the transpose scheme strip a Debian
-    binNMU / backport layer (``+bN`` / ``~bpoN+M``) from CONSTRAINT bounds —
-    which reference OTHER packages' buildd-rebuild versions that don't exist
-    in our repo — while the Version field keeps the transpose-only op so a
-    tunnelled ``X+deb…+b1`` own version is preserved per
-    :func:`transpose_deb`'s frozen-sibling-pin design.  Without this the
-    bounds retained NMU residue and 3.2k `-dev`→lib `(= X+bN)` pins failed to
-    resolve against the stripped repo (full-universe audit 2026-07-09).
+    ``constraint_op`` receives ``(version, target_name)`` — the bound's
+    version string and the package name the constraint targets (arch
+    qualifier stripped; None when the name isn't on the same line, e.g. a
+    wrapped continuation).  A DISTINCT ``constraint_op`` lets the transpose
+    scheme strip a Debian binNMU / backport layer (``+bN`` / ``~bpoN+M``)
+    from CONSTRAINT bounds — which reference OTHER packages' buildd-rebuild
+    versions that don't exist in our repo — while the Version field keeps
+    the transpose-only op so a tunnelled ``X+deb…+b1`` own version is
+    preserved per :func:`transpose_deb`'s frozen-sibling-pin design.
+    Without this the bounds retained NMU residue and 3.2k `-dev`→lib
+    ``(= X+bN)`` pins failed to resolve against the stripped repo
+    (full-universe audit 2026-07-09).  The target NAME is what lets
+    :func:`transpose_control_text` exempt bounds aimed at tunnelled
+    binaries, whose shipped version KEEPS the layer.
 
     Walks fields line-by-line (handles multi-line continuation per the deb822
     wrap convention: a field starts at column 0 with ``Name:``; continuation
@@ -461,19 +467,28 @@ def _rewrite_control_text(
             _content, count=1, flags=re.MULTILINE,
         )
 
-    # Per-relation version-constraint rewriter: matches `(OP VERSION)` within a
-    # dep-field's value.  Operator is preserved verbatim.
-    _constraint_re = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
+    # Per-relation version-constraint rewriter: matches `name (OP VERSION)`
+    # within a dep-field's value.  The target name (with optional `:arch`
+    # qualifier) is OPTIONAL — a wrapped continuation line can open with the
+    # bare parenthesis — and is re-emitted verbatim; operator preserved.
+    _constraint_re = re.compile(
+        r'(?:([A-Za-z0-9][A-Za-z0-9.+-]*)((?::[A-Za-z0-9-]+)?\s*))?'
+        r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
 
-    _con_op = constraint_op if constraint_op is not None else version_op
+    if constraint_op is not None:
+        _con_op = constraint_op
+    else:
+        def _con_op(_v: str, _name: 'Optional[str]') -> str:
+            return version_op(_v)
 
     def _sub_constraint(_m: 're.Match') -> str:
         nonlocal _total
-        _op, _ver = _m.group(1), _m.group(2)
-        _new_ver = _con_op(_ver)
+        _name, _tail, _op, _ver = _m.groups()
+        _new_ver = _con_op(_ver, _name)
         if _new_ver != _ver:
             _total += 1
-        return f'({_op} {_new_ver})'
+        _prefix = f'{_name}{_tail}' if _name is not None else ''
+        return f'{_prefix}({_op} {_new_ver})'
 
     _new_lines: 'list[str]' = []
     _in_target = False
@@ -827,8 +842,9 @@ def compute_transposed_versions(
     }
 
 
-def transpose_control_text(content: str, prefix: str,
-                           release: int) -> 'tuple[str, int]':
+def transpose_control_text(content: str, prefix: str, release: int,
+                           keep_binnmu_names: 'Optional[frozenset]' = None
+                           ) -> 'tuple[str, int]':
     """Return (new_text, change_count) — TRANSPOSE the Version field and every
     version constraint in dep-related fields of a DEBIAN/control text (trailing
     +debNuK → +<prefix><R>uK only).  The Version's pre-transpose upstream value
@@ -836,21 +852,39 @@ def transpose_control_text(content: str, prefix: str,
     it changed.  The same-upstream-sibling ``>>/<<`` idiom is collapsed to
     ``(= <transposed Version>)``.
 
+    ``keep_binnmu_names`` — binary names whose bounds must NOT have a Debian
+    binNMU / backport layer stripped: the TUNNELLED binaries, which ship at
+    their upstream version verbatim when a ``+bN`` is trailing
+    (:func:`transpose_deb` keeps it), so a bound targeting one must keep
+    referencing it.  transpose() alone produces exactly the tunnelled
+    target's shipped version in both shapes (trailing ``+bN`` → no-op =
+    verbatim; trailing ``+deb`` → transposed).  Without the exemption the
+    frozen sibling ``=`` pins inside a tunnelled source (firmware-nonfree's
+    firmware-linux → firmware-misc-nonfree chain) go unresolvable the moment
+    upstream binNMUs it (full-universe oracle 2026-07-11: current op breaks
+    3 bounds under a simulated +b1, exempted op breaks 0, zero live-universe
+    rewrite differences).
+
     The +pP / +bN patch/force suffix is NOT applied here — that is the deb-level
     step (:func:`transpose_deb`), which restamps the collapsed sibling pins to
     the exact final version.  Idempotent on already-transposed text.  Thin
     wrapper over :func:`_rewrite_control_text` with a transpose-only Version op
     and a binNMU-stripping CONSTRAINT op (see below).
     """
-    def _constraint_op(_v: str) -> str:
+    def _constraint_op(_v: str, _name: 'Optional[str]') -> str:
         # Constraint bounds reference OTHER packages' versions; a Debian
         # binNMU (+bN) / backport (~bpoN+M) layer on them is buildd metadata
         # that doesn't exist in our repo, so strip it BEFORE transposing the
         # trailing +deb token (leaving +deb / embedded +deb / +nmuN / +dfsg
-        # intact — strip_binNMU is narrow).  GUARD: a bound that already
+        # intact — strip_binNMU is narrow).  EXEMPT: a bound targeting a
+        # tunnelled binary (keep_binnmu_names) — its shipped version KEEPS
+        # the layer, so the bound must too.  GUARD: a bound that already
         # carries OUR +asg force level (+asg…+bN) is ours, not Debian's —
         # leave it to transpose() untouched so a re-normalise pass can't strip
         # a legitimate force-rebuild pin.
+        if _name is not None and keep_binnmu_names \
+                and _name in keep_binnmu_names:
+            return transpose(_v, prefix, release)
         if parse_asg_suffix(_v) is not None:
             return transpose(_v, prefix, release)
         return transpose(strip_binNMU(_v)[0], prefix, release)
@@ -901,7 +935,8 @@ def _restamp_sibling_pins(content: str, sibling_names: 'set',
 def transpose_deb(deb_path: str, prefix: str, release: int,
                   patch_level: int = 0,
                   force_bn: 'Optional[int]' = None,
-                  sibling_names: 'Optional[set]' = None) -> dict:
+                  sibling_names: 'Optional[set]' = None,
+                  keep_binnmu_names: 'Optional[frozenset]' = None) -> dict:
     """Transpose + stamp a built .deb/.udeb in place — the single-cycle
     replacement for ``strip_nmu_from_deb`` + ``restamp_asg_deb`` on the build
     and tunnel paths.  Updates filename, DEBIAN/control Version, dep
@@ -912,7 +947,9 @@ def transpose_deb(deb_path: str, prefix: str, release: int,
 
     A binary whose only trailing token is a binNMU (a tunnelled ``X+deb…+b1``)
     transposes to a no-op on the embedded +deb and KEEPS the +bN — by design
-    (its frozen sibling pins reference that +bN).  Idempotent.
+    (its frozen sibling pins reference that +bN).  For those pins to survive
+    the constraint rewrite, pass the tunnelled binary names as
+    ``keep_binnmu_names`` (see :func:`transpose_control_text`).  Idempotent.
     """
     import subprocess
     import tempfile
@@ -941,7 +978,8 @@ def transpose_deb(deb_path: str, prefix: str, release: int,
     _ctrl_text = _ctrl_bytes.decode('utf-8', errors='replace')
 
     # Step 1: transpose Version + constraints to the K-version (no P/bN yet).
-    _k_text, _changes = transpose_control_text(_ctrl_text, prefix, release)
+    _k_text, _changes = transpose_control_text(
+        _ctrl_text, prefix, release, keep_binnmu_names=keep_binnmu_names)
     _k_ver = _extract_version(_k_text)
     if not _k_ver:
         _result['status'] = 'malformed'

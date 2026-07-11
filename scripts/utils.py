@@ -249,6 +249,27 @@ def classify_repo_subdir(filename: str) -> str:
     return 'main'
 
 
+def tunneled_binary_names(config: 'Any', cache: 'Any') -> 'frozenset[str]':
+    """Binary names produced by every ``[Source] Tunneled`` source — the
+    ``keep_binnmu_names`` set for :func:`bump.transpose_control_text` /
+    :func:`bump.transpose_deb`.
+
+    A tunnelled binary ships at its upstream version VERBATIM when a binNMU
+    layer is trailing (transpose_deb keeps the ``+bN``), so any constraint
+    bound targeting one must keep that layer instead of having it stripped.
+    Resolved via the cache's source records (``Source.binary``); returns the
+    empty set when the cache isn't loaded — callers should union in any
+    locally-known sibling names (the tunnel path knows its own filenames).
+    """
+    _names: 'set[str]' = set()
+    if cache is None or config is None:
+        return frozenset()
+    for _src_name in getattr(config, 'tunnel_packages', ()) or ():
+        for _src in cache.source_hashtable.get(_src_name) or ():
+            _names.update(getattr(_src, 'binary', ()) or ())
+    return frozenset(_names)
+
+
 def version_no_epoch(version: object) -> str:
     """Return a Debian Version's string form with the epoch stripped.
 

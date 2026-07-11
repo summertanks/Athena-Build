@@ -2000,6 +2000,11 @@ class BuildContainer:
             if _df is not None:
                 _sibling_names.add(_df[0])
 
+        # A rebuilt package's bound can target a TUNNELLED binary, whose
+        # shipped version keeps its +bN/backport layer — exempt those bounds
+        # from the constraint strip (empty set when no cache is wired).
+        _keep_bn = utils.tunneled_binary_names(self.config, self.cache)
+
         _current_paths: 'list[str]' = []
         for _path in built_files:
             _f = os.path.basename(_path)
@@ -2007,7 +2012,8 @@ class BuildContainer:
                 _r = utils.transpose_deb(
                     _path, 'asg', _release,
                     patch_level=_patch_level, force_bn=_force_bn,
-                    sibling_names=_sibling_names)
+                    sibling_names=_sibling_names,
+                    keep_binnmu_names=_keep_bn)
                 _new = _r.get('new_path', _path)
                 if _r['status'] == 'rewritten' and _new != _path:
                     logger.info(

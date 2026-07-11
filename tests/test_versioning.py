@@ -258,6 +258,63 @@ def test_transpose_control_text_strips_binnmu_from_constraint_bounds():
     assert _n2 == 0, (_n2, _out2)
 
 
+def test_transpose_control_text_keep_binnmu_names_exempts_tunneled_targets():
+    """keep_binnmu_names: a bound whose TARGET is a tunnelled binary keeps its
+    Debian binNMU/backport layer — the tunnelled target ships that version
+    VERBATIM (transpose_deb keeps a trailing +bN), so stripping the bound
+    orphans it.  Full-universe oracle 2026-07-11: firmware-nonfree's frozen
+    sibling `=` chain (firmware-linux → firmware-misc-nonfree) breaks under a
+    simulated buildd +b1 without the exemption, resolves with it, and the
+    exemption is a zero-difference no-op on the live universe.  Non-listed
+    targets still strip; arch-qualified names match on the base name; a kept
+    target's trailing +debNuK still transposes; idempotent."""
+    from utils import transpose_control_text
+    _keep = frozenset({'firmware-misc-nonfree', 'shim-signed-common'})
+    _ctrl = (
+        'Package: firmware-linux-nonfree\n'
+        'Version: 20230210-5+b1\n'
+        'Depends: firmware-misc-nonfree (= 20230210-5+b1), bar (= 1.2.8-1+b1)\n'
+        'Recommends: shim-signed-common:amd64 (>= 1.40~bpo11+1), '
+        'shim-signed-common (>= 1.44-1+deb12u1)\n'
+        'Description: x\n'
+    )
+    _out, _n = transpose_control_text(_ctrl, 'asg', 1,
+                                      keep_binnmu_names=_keep)
+    # tunnelled sibling pin: +b1 KEPT (the target ships it verbatim)
+    assert 'firmware-misc-nonfree (= 20230210-5+b1)' in _out
+    # non-tunnelled '=' pin: still stripped (597a2ca semantics untouched)
+    assert 'bar (= 1.2.8-1)' in _out
+    # arch-qualified tunnelled target: backport layer kept, qualifier intact
+    assert 'shim-signed-common:amd64 (>= 1.40~bpo11+1)' in _out
+    # kept target with a TRAILING +deb token: still transposed
+    assert 'shim-signed-common (>= 1.44-1+asg1u1)' in _out
+    # own Version: trailing token is a binNMU → transpose no-op (tunnel shape)
+    assert 'Version: 20230210-5+b1' in _out
+    # idempotent
+    _out2, _n2 = transpose_control_text(_out, 'asg', 1,
+                                        keep_binnmu_names=_keep)
+    assert _n2 == 0, (_n2, _out2)
+
+
+def test_tunneled_binary_names_resolves_from_cache():
+    """utils.tunneled_binary_names maps every [Source] Tunneled source to its
+    binary names via cache.source_hashtable (the keep_binnmu_names feed for
+    the transpose call sites); empty-safe on a missing cache/config and on
+    sources the cache doesn't know."""
+    import types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    _src = types.SimpleNamespace(
+        binary=['firmware-misc-nonfree', 'firmware-linux'])
+    _cache = types.SimpleNamespace(
+        source_hashtable={'firmware-nonfree': [_src]})
+    _cfg = types.SimpleNamespace(tunnel_packages=['firmware-nonfree', 'ghost'])
+    assert _u.tunneled_binary_names(_cfg, _cache) == frozenset(
+        {'firmware-misc-nonfree', 'firmware-linux'})
+    assert _u.tunneled_binary_names(_cfg, None) == frozenset()
+    assert _u.tunneled_binary_names(None, _cache) == frozenset()
+
+
 def test_transpose_control_text_no_token_is_noop_no_provenance():
     """A pristine / +nmu version is unchanged and gets no X-upstream field."""
     from utils import transpose_control_text
@@ -922,6 +979,47 @@ def test_transpose_deb_tunnel_keeps_binnmu_and_rewrites_trailing_deb():
 
 
 
+def test_transpose_deb_tunnel_keep_binnmu_preserves_frozen_sibling_pin():
+    """Tunnel call shape + keep_binnmu_names: a tunnelled deb whose frozen
+    sibling `=` pin carries the buildd +b1 keeps the pin VERBATIM — both
+    sides ship +b1, so the deb is byte-stable ('unchanged').  Without the
+    keep set the constraint strip rewrites the pin to a version the sibling
+    never ships (the transpose_deb docstring's frozen-pin rationale defeated
+    by 597a2ca's strip) — pinned in both directions so neither regresses."""
+    import subprocess
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import transpose_deb
+    if not _have_dpkg_deb():
+        print("SKIP test_transpose_deb_tunnel_keep_binnmu_pin (no dpkg-deb)")
+        return
+    _pin = 'firmware-misc-nonfree (= 20230210-5+b1)'
+    with tempfile.TemporaryDirectory() as _tmp:
+        for _sub, _keep, _want_status, _want_dep in (
+                ('keep', frozenset({'firmware-misc-nonfree'}), 'unchanged',
+                 _pin),
+                ('strip', None, 'rewritten',
+                 'firmware-misc-nonfree (= 20230210-5)')):
+            _work = os.path.join(_tmp, f'src-{_sub}')
+            os.makedirs(os.path.join(_work, 'DEBIAN'))
+            with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as _fh:
+                _fh.write('Package: firmware-linux\n'
+                          'Version: 20230210-5+b1\n'
+                          'Architecture: all\nMaintainer: T <t@l>\n'
+                          f'Depends: {_pin}\n'
+                          'Description: frozen sibling pin\n')
+            _p = os.path.join(_tmp, f'{_sub}-firmware-linux_20230210-5+b1_all.deb')
+            subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _p],
+                           check=True, capture_output=True)
+            _r = transpose_deb(_p, 'asg', 1, keep_binnmu_names=_keep)
+            assert _r['status'] == _want_status, (_sub, _r)
+            _deps = subprocess.run(
+                ['dpkg-deb', '-f', _r['new_path'], 'Depends'],
+                check=True, capture_output=True, text=True).stdout.strip()
+            assert _want_dep in _deps, (_sub, _deps)
+
+
+
 def test_transpose_fork_athena_version_is_noop():
     """Coverage gap (audit #16): a fork version (Model A — changelog-verbatim,
     ending +athenaN with an EMBEDDED +deb before it) must pass through transpose
@@ -1403,6 +1501,8 @@ TESTS = [
     test_compute_transposed_versions_per_binary_base_uniform_p,
     test_transpose_control_text_version_deps_and_provenance,
     test_transpose_control_text_strips_binnmu_from_constraint_bounds,
+    test_transpose_control_text_keep_binnmu_names_exempts_tunneled_targets,
+    test_tunneled_binary_names_resolves_from_cache,
     test_transpose_control_text_no_token_is_noop_no_provenance,
     test_transpose_scheme_boundary_table_and_ordering,
     test_decide_patch_bump_count_branches,
@@ -1425,6 +1525,7 @@ TESTS = [
     test_strip_nmu_from_deb_idempotent,
     test_transpose_deb_round_trip,
     test_transpose_deb_tunnel_keeps_binnmu_and_rewrites_trailing_deb,
+    test_transpose_deb_tunnel_keep_binnmu_preserves_frozen_sibling_pin,
     test_transpose_fork_athena_version_is_noop,
     test_restamp_sibling_pins_force_bn_branch,
     test_version_no_epoch_strips_epoch_from_debian_version,

@@ -318,6 +318,17 @@ class TunnelCommandsMixin(SessionState):
                     f"version for {src_pkg.package}")
             _release = None
 
+        # Bounds targeting a tunnelled binary must KEEP their +bN/backport
+        # layer (the target ships it verbatim): full tunnelled set from the
+        # cache, unioned with THIS source's own binary names so the frozen
+        # sibling `=` pins are covered even pre-`cache parse`.
+        _keep_bn = set(utils.tunneled_binary_names(
+            self.config, getattr(self, 'cache', None)))
+        for _ups_fn in (_upstream_paths or {}):
+            _pf = utils.parse_deb_filename(_ups_fn)
+            if _pf is not None:
+                _keep_bn.add(_pf[0])
+
         _final_paths: 'dict[str, str]' = {}
         _final_to_upstream: 'dict[str, str]' = {}
         _stamps_count = 0
@@ -327,7 +338,9 @@ class TunnelCommandsMixin(SessionState):
                 if _release is not None:
                     _b = os.path.basename(_ups_path)
                     try:
-                        _r = utils.transpose_deb(_ups_path, 'asg', _release)
+                        _r = utils.transpose_deb(
+                            _ups_path, 'asg', _release,
+                            keep_binnmu_names=frozenset(_keep_bn))
                         _new_path = _r.get('new_path', _ups_path)
                         if (_r.get('status') == 'rewritten'
                                 and _new_path != _ups_path):
