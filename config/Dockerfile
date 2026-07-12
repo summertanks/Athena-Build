@@ -66,6 +66,12 @@ RUN set -eux; \
 # be installed here — their .shlibs would be embedded in fresh builds;
 # -dev packages come from each source's Build-Depends at per-build time.
 #
+# fakeroot EXPLICIT: dpkg-buildpackage runs as user athena, so any source
+# without Rules-Requires-Root:no needs it.  The old slim base got it as a
+# RECOMMENDS of dpkg-dev; the buildd bootstrap disables recommends, so it
+# silently vanished and the first old-style rebuild failed exit 25
+# ("fakeroot not found", the fork set, 2026-07-12).  Never rely on
+# Recommends for build-critical tools.
 # Error-Mode=any: a failed index fetch must FAIL the update, not warn —
 # apt's default exit-0-with-warnings left empty lists and a wall of
 # "Unable to locate package" at install (the certificate-less base,
@@ -75,6 +81,7 @@ RUN set -eux; \
     apt-get install -y -o Acquire::Retries=5 \
         net-tools iputils-ping util-linux mount \
         bc bison build-essential cpio flex ca-certificates less sudo keyboard-configuration \
+        fakeroot \
         vim gettext debhelper texinfo groff media-types gperf procps \
         python3-minimal python3 dh-python python3-distutils python3-debian python3-gpg \
         apt-file autoconf autotools-dev automake gettext debhelper diffstat zip libtool po-debconf; \
