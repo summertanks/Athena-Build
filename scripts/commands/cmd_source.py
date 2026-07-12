@@ -446,7 +446,9 @@ class SourceCommandsMixin(SessionState):
         error (append-only).  Tunnelled sources are republished verbatim
         regardless of version shape (force_class).
 
-        Usage: source emit [<pkg>…] [force]"""
+        Usage: source emit [<pkg>…] [force] | source emit verify"""
+        if args and args[0] == 'verify':
+            return self._source_emit_verify()
         _force = 'force' in args
         _names = [a for a in args
                   if not a.startswith('-') and a != 'force']
@@ -492,6 +494,69 @@ class SourceCommandsMixin(SessionState):
             f"skipped={_skipped} failed={_failed}",
             tui.COLOR_HIGHLIGHT if not _failed else tui.COLOR_ERROR)
         return _failed == 0
+
+    def _source_emit_verify(self) -> bool:
+        """`source emit verify` — READ-ONLY sweep of the emitted source pool:
+          - records with no emit yet (run `source emit`)
+          - emitted files missing from the pool / sha-drifted
+          - orphan files in dists/<codename>/*/source/ no record references
+        Never writes; the MUTATOR is plain `source emit`."""
+        import source_emit as _se
+        _blog = os.path.join(self.config.dir_log, 'build')
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _ok = _unemitted = _missing = _drift = 0
+        _referenced: 'set[str]' = set()
+        for _f in sorted(os.listdir(_blog)):
+            if not _f.endswith('.build.json'):
+                continue
+            _src = _f[:-len('.build.json')]
+            _rec = utils.read_build_record(_blog, _src)
+            if _rec is None or _rec.get('phase') not in ('done', 'tunneled'):
+                continue
+            _hashes = _rec.get('source_output_hashes') or {}
+            if not _hashes:
+                _unemitted += 1
+                console.print(f"  {_src}: no source emit recorded",
+                              tui.COLOR_WARNING)
+                continue
+            _comp = str(_rec.get('component') or 'main')
+            _dir = os.path.join(self.config.dir_repo, 'dists', _codename,
+                                _comp, 'source')
+            _bad = False
+            for _fn, _sha in _hashes.items():
+                _referenced.add(_fn)
+                _p = os.path.join(_dir, _fn)
+                if not os.path.isfile(_p):
+                    console.print(f"  {_src}: {_fn} MISSING from pool",
+                                  tui.COLOR_ERROR)
+                    _missing += 1
+                    _bad = True
+                elif _se._sha256(_p) != _sha:
+                    console.print(f"  {_src}: {_fn} sha DRIFT vs record",
+                                  tui.COLOR_ERROR)
+                    _drift += 1
+                    _bad = True
+            if not _bad:
+                _ok += 1
+        _orphans = 0
+        import glob as _glob
+        for _p in _glob.glob(os.path.join(
+                self.config.dir_repo, 'dists', _codename, '*', 'source',
+                '*')):
+            _fn = os.path.basename(_p)
+            if not os.path.isfile(_p) or _fn.startswith(
+                    ('Sources', 'Release')):
+                continue                         # indexes, not pool files
+            if _fn not in _referenced:
+                console.print(f"  orphan: {os.path.relpath(_p, self.config.dir_repo)}",
+                              tui.COLOR_WARNING)
+                _orphans += 1
+        console.print(
+            f"source emit verify: ok={_ok} unemitted={_unemitted} "
+            f"missing={_missing} drift={_drift} orphans={_orphans}",
+            tui.COLOR_HIGHLIGHT if not (_missing or _drift)
+            else tui.COLOR_ERROR)
+        return not (_missing or _drift)
 
     def _emit_one_source(self, src: str, force: bool = False) -> str:
         """Emit the published source package for ONE source from its build

@@ -1303,6 +1303,89 @@ def audit_packages_chain(
     return _index, _findings
 
 
+def audit_sources_chain(
+    pool_url: str, codename: str, release: 'Any',
+    fetched_dir: str, ssh_key: 'Optional[str]' = None,
+) -> 'tuple[dict[str, dict], list[tuple[str, str, str]]]':
+    """MAT-02 stage 4 — the Sources side of :func:`audit_packages_chain`:
+    for each ``<component>/source/Sources`` the verified InRelease declares,
+    pull and verify its SHA-256 against the pin, then parse it.
+
+    Returns ``(sources_index, findings)`` where ``sources_index`` maps each
+    referenced source FILE basename (.dsc / .orig.tar.* / .debian.tar.* /
+    .diff.gz) → dict with ``sha256``, ``size``, ``source``, ``version``,
+    ``component`` — the per-file view the stage-5 claim cross-check joins
+    against.  An InRelease with no source indexes yields an empty index and
+    no findings (sources not yet published — legitimate)."""
+    import hashlib as _hashlib
+    import os as _os
+    import re as _re
+    from coord import transport as _transport
+
+    _findings: 'list[tuple[str, str, str]]' = []
+    _index: 'dict[str, dict]' = {}
+    _sha256_block = release.get('SHA256') if release is not None else None
+    if not _sha256_block:
+        return _index, _findings          # packages chain already flagged it
+    _by_name = {str(_e.get('name')): _e for _e in _sha256_block
+                if _e.get('name')}
+    _targets = [(_m.group(1), _n) for _n in sorted(_by_name)
+                for _m in [_re.match(r'^(.+)/source/Sources$', _n)] if _m]
+    for _comp, _rel in _targets:
+        _pin = _by_name[_rel]
+        _remote = pool_url.rstrip('/') + f"/dists/{codename}/{_rel}"
+        _rsync_spec, _ = rsync_spec_for_url(_remote)
+        _local = _os.path.join(
+            fetched_dir, f"Sources.{_comp.replace('/', '_')}")
+        _ok, _detail = _transport.pull_single_file(
+            remote_spec=_rsync_spec, local_path=_local, ssh_key=ssh_key)
+        if not _ok:
+            _findings.append((
+                'CRITICAL', 'sources_unreachable',
+                f"could not pull {_rel}: {_detail}"))
+            continue
+        try:
+            with open(_local, 'rb') as _fh:
+                _data = _fh.read()
+        except OSError as _e:
+            _findings.append((
+                'CRITICAL', 'sources_unreadable',
+                f"local {_local} unreadable: {_e}"))
+            continue
+        _actual = _hashlib.sha256(_data).hexdigest()
+        _expected = str(_pin.get('sha256', ''))
+        if _expected and _actual != _expected:
+            _findings.append((
+                'CRITICAL', 'sources_sha_mismatch',
+                f"on-pool {_rel} sha256={_actual[:12]} disagrees "
+                f"with InRelease pin={_expected[:12]}"))
+            continue
+        from debian.deb822 import Sources as _Sources
+        try:
+            _stream = iter(_Sources.iter_paragraphs(
+                _data, use_apt_pkg=False))
+        except Exception as _e:
+            _findings.append((
+                'CRITICAL', 'sources_parse_failed',
+                f"could not parse {_rel}: {type(_e).__name__}: {_e}"))
+            continue
+        for _para in _stream:
+            _srcname = str(_para.get('Package') or '')
+            _ver = str(_para.get('Version') or '')
+            for _row in (_para.get('Checksums-Sha256') or []):
+                _fname = str(_row.get('name') or '')
+                if not _fname:
+                    continue
+                _index[_os.path.basename(_fname)] = {
+                    'source':    _srcname,
+                    'version':   _ver,
+                    'sha256':    str(_row.get('sha256') or ''),
+                    'size':      str(_row.get('size') or ''),
+                    'component': _comp,
+                }
+    return _index, _findings
+
+
 def _superseded_seqs(claims: 'list[dict]') -> 'set[int]':
     """Per-builder supersession fold — thin alias for the canonical
     `coord.schema.superseded_seqs` (centralised the fold so every

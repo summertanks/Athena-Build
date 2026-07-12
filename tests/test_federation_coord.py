@@ -1932,6 +1932,72 @@ def test_remote_publish_validates_under_lock_before_push():
 
 
 
+def test_audit_sources_chain_verifies_and_indexes_source_files():
+    """MAT-02 stage 4: audit_sources_chain pulls every <comp>/source/Sources
+    the verified InRelease declares, verifies the sha pin, and indexes every
+    referenced source FILE (dsc + tarballs) for the claim cross-check.
+    A sha mismatch is CRITICAL; a release with no source indexes yields an
+    empty index and no findings (sources not yet published)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import hashlib as _hashlib
+    from unittest.mock import patch
+    import mirror as _mir
+    from coord import transport as _tx
+
+    _sources = (
+        'Package: demo\n'
+        'Version: 1.0-1+asg1u1\n'
+        'Directory: pool\n'
+        'Files:\n'
+        ' 0123456789abcdef0123456789abcdef 100 demo_1.0-1+asg1u1.dsc\n'
+        'Checksums-Sha256:\n'
+        f' {"a" * 64} 100 demo_1.0-1+asg1u1.dsc\n'
+        f' {"b" * 64} 200 demo_1.0.orig.tar.gz\n'
+        '\n').encode()
+    _pin = _hashlib.sha256(_sources).hexdigest()
+
+    def _fake_pull(*, remote_spec, local_path, ssh_key=None):
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, 'wb') as _fh:
+            _fh.write(_sources)
+        return True, ''
+
+    _release = {'SHA256': [
+        {'name': 'main/source/Sources', 'sha256': _pin, 'size': '9'},
+        {'name': 'main/binary-amd64/Packages', 'sha256': 'c' * 64,
+         'size': '9'},
+    ]}
+    with tempfile.TemporaryDirectory() as _td:
+        with patch.object(_tx, 'pull_single_file', side_effect=_fake_pull):
+            _idx, _findings = _mir.audit_sources_chain(
+                pool_url='file:///fake', codename='thor',
+                release=_release, fetched_dir=_td)
+        assert _findings == [], _findings
+        assert _idx['demo_1.0-1+asg1u1.dsc']['sha256'] == 'a' * 64
+        assert _idx['demo_1.0.orig.tar.gz']['size'] == '200'
+        assert _idx['demo_1.0.orig.tar.gz']['source'] == 'demo'
+        assert _idx['demo_1.0.orig.tar.gz']['component'] == 'main'
+        # sha mismatch → CRITICAL, nothing indexed from that file
+        _release_bad = {'SHA256': [
+            {'name': 'main/source/Sources', 'sha256': 'd' * 64,
+             'size': '9'}]}
+        with patch.object(_tx, 'pull_single_file', side_effect=_fake_pull):
+            _idx2, _f2 = _mir.audit_sources_chain(
+                pool_url='file:///fake', codename='thor',
+                release=_release_bad, fetched_dir=_td)
+        assert _idx2 == {}
+        assert any(_k == 'sources_sha_mismatch' and _s == 'CRITICAL'
+                   for _s, _k, _m in _f2), _f2
+        # no source indexes declared → clean empty
+        _idx3, _f3 = _mir.audit_sources_chain(
+            pool_url='file:///fake', codename='thor',
+            release={'SHA256': [{'name': 'main/binary-amd64/Packages',
+                                 'sha256': 'c' * 64, 'size': '9'}]},
+            fetched_dir=_td)
+        assert _idx3 == {} and _f3 == []
+
+
 def test_audit_inrelease_against_head_sha_match_returns_parsed_release():
     """Happy path: InRelease pulls successfully, sha matches the
     coord-head pin, deb822.Release parses cleanly, no findings."""
@@ -5190,6 +5256,7 @@ TESTS = [
     test_snapshot_divergence_note,
     test_publish_lock_records_and_reports_holder,
     test_remote_publish_validates_under_lock_before_push,
+    test_audit_sources_chain_verifies_and_indexes_source_files,
     test_audit_inrelease_against_head_sha_match_returns_parsed_release,
     test_audit_inrelease_against_head_sha_mismatch_critical,
     test_audit_ownership_summary_buckets_correctly,

@@ -1528,7 +1528,9 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                         'records so next `source build` rebuilds.',
             'emit':     'publish-side SOURCE packages (MAT-02): emit the '
                         '.dsc + tarballs for built/tunnelled sources into '
-                        'the repo source pool: `source emit [<pkg>…]`',
+                        'the repo source pool: `source emit [<pkg>…] '
+                        '[force]`; `source emit verify` is the read-only '
+                        'pool check',
             'fork':     'manage fork packages: `source fork <pkg>` '
                         'creates or reloads; `source fork <pkg> '
                         'enabled|disabled` toggles the .disabled marker',

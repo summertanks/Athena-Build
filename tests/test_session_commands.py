@@ -76,6 +76,21 @@ def test_source_emit_command_wired_and_record_safe():
         _t = _fh.read()
     assert 'self._emit_after_build(' in _t, \
         'tunnel success path must emit the verbatim source'
+    # stage 4: `source emit verify` is READ-ONLY (rule: read-only-named
+    # actions never call destructive helpers) and the mirror audit driver
+    # verifies the Sources chain of the primary suite.
+    _vm = _re.search(r'def _source_emit_verify\(self.*?(?=\n    def )', _c,
+                     _re.DOTALL)
+    assert _vm, '_source_emit_verify not found'
+    assert 'write_build_record' not in _vm.group(0), \
+        'verify must never write records'
+    assert 'emit_source' not in _vm.group(0), \
+        'verify must never emit'
+    _mp = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_mirror.py')
+    with open(_mp) as _fh:
+        _mi = _fh.read()
+    assert 'audit_sources_chain' in _mi, \
+        'mirror audit must verify the Sources chain'
 
 
 def test_startup_banner_runs_config_check():

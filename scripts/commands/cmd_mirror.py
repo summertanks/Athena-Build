@@ -2822,6 +2822,30 @@ class MirrorCommandsMixin(SessionState):
                 _print_audit_finding(_sev, _kind, _msg, _color)
             if _pkg_crit:
                 _all_ok = False
+            # Sources chain (MAT-02 stage 4): every <comp>/source/Sources the
+            # verified InRelease declares — pulled, sha-verified against the
+            # pin, parsed.  An InRelease without source indexes (sources not
+            # yet published) yields no findings.  The per-file index feeds
+            # the stage-5 claim cross-check; kept for that join.
+            _src_idx: 'dict[str, dict]' = {}
+            if _release is not None:
+                _src_idx, _src_findings = _mirror.audit_sources_chain(
+                    pool_url=_url, codename=_codename, release=_release,
+                    fetched_dir=os.path.join(_fetched, 'apt'),
+                    ssh_key=_ssh_key,
+                )
+                _src_crit = [_f for _f in _src_findings
+                             if _f[0] == 'CRITICAL']
+                for _sev, _kind, _msg in _src_findings:
+                    _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                              else tui.COLOR_WARNING)
+                    _print_audit_finding(_sev, _kind, _msg, _color)
+                if _src_crit:
+                    _all_ok = False
+                if _src_idx:
+                    console.print(
+                        f"  sources index: {len(_src_idx)} source file(s) "
+                        "verified in the InRelease chain")
             # dbgsym suite (<codename>-debug): published as its OWN indexed
             # suite (generate_repo_indexes + push_dist_tree), not declared in
             # the primary InRelease.  Its Packages must be merged into
