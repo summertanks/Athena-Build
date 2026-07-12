@@ -270,14 +270,33 @@ update.
 
 ## 7. Build container & toolchain
 
-### 7.1 Snapshot-pinned apt can't always bootstrap itself
-Installing the toolchain layer directly from the snapshot fails
+### 7.1 Snapshot-pinned apt can't always bootstrap itself — SUPERSEDED
+Installing the toolchain layer directly from the snapshot failed
 "Unable to locate package" for ~15 packages.
 **Incident (CONF-15):** Dockerfile had to install from the live mirror
 first, then rewrite sources to the snapshot and `dist-upgrade` to
 realign.
-**Rule:** toolchain layer = install-then-realign, never
-snapshot-first single step.
+**Superseded (2026-07):** the base is now our own
+`mmdebstrap --variant=buildd` bootstrap from the pinned snapshot
+(`scripts/base_rootfs.py`; `config/Dockerfile` is `FROM scratch` +
+`ADD base-rootfs.tar`), so the image is at snapshot from birth and the
+install-then-realign dance is gone.  The root cause of the "unable to
+locate" wall was apt's exit-0-with-warnings default on a failed index
+fetch — see 7.1a.
+
+### 7.1a The buildd base has no CA store, and apt update "succeeds" without lists
+Two traps in the mmdebstrap base, both hit on 2026-07-08:
+- The buildd variant ships **no `ca-certificates`** — an https snapshot
+  URL fails every index fetch until the bootstrap includes it
+  (`--include=ca-certificates` in `base_rootfs.py`; Docker Hub's slim
+  base lacked it too, which is why CONF-15's live-mirror step was plain
+  http).
+- `apt-get update` **exits 0 with warnings** on a failed fetch, leaving
+  empty package lists and a wall of "Unable to locate package" at
+  install time (also the historic CONF-15 anomaly).
+**Rule:** every scripted `apt-get update` in the container layers runs
+with `-o APT::Update::Error-Mode=any` so a failed fetch fails the
+build at the update, not later at the install.
 
 ### 7.2 debconf must be silenced before the first dpkg call, not at it
 `DEBIAN_FRONTEND=noninteractive` alone is not enough in a fresh chroot.

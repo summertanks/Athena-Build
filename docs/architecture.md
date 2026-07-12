@@ -50,7 +50,7 @@ After the artifact lands, two more stages handle distribution:
 
 | Stage | Command | Purpose |
 |---|---|---|
-| 9. Repo index | _(automatic)_ | `dpkg-scanpackages` over `repo/dists/<codename>{,-debug}/`, `apt-ftparchive release`, GPG-sign `Release` + clearsign `InRelease`.  Run automatically by `chroot build` / `mirror publish` when the `InRelease` is missing — not a separate operator command. |
+| 9. Repo index | _(automatic)_ | `dpkg-scanpackages` over `repo/dists/<codename>{,-debug}/`, `apt-ftparchive release`, GPG-sign `Release` + clearsign `InRelease`.  Run automatically by `chroot build` / `mirror publish` when the `InRelease` is missing or stale (mtime-stale vs the pool, or content-stale: pinned `Packages` sha ≠ disk) — not a separate operator command. |
 | 10. Mirror publish | `mirror publish [<name>]` | Per-file `.deb` push + Ed25519-signed claims + tier-1 GPG-signed `coord-head` to every configured mirror (or one).  Federation-gated; first-publish bootstraps the peer.  See [`docs/mirror-setup.md`](mirror-setup.md). |
 
 For incremental updates (advance the snapshot, rebuild only the changed

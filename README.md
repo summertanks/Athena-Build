@@ -267,13 +267,18 @@ Selected 962 source packages
 #### 5. `container local init` — build the workshop
 
 Every package is compiled inside a clean Debian container, so your host stays
-untouched. This builds that container image once:
+untouched. The image's base layer is not pulled from Docker Hub — it is
+bootstrapped from the pinned snapshot with `mmdebstrap --variant=buildd`
+(the same rootfs flavour sbuild chroots are made of), so every byte of the
+build environment comes from the snapshot. This builds that image once:
 
 ```
 athena-build> container local init
 [INFO] Docker endpoint=localhost engine=29.5.3 os=linux arch=amd64
+[INFO] base rootfs: bootstrapping base-rootfs.tar
 Step 1/21 : ARG RELEASE=bookworm
-Step 6/21 : FROM debian:bookworm-slim
+Step 6/21 : FROM scratch
+Step 7/21 : ADD base-rootfs.tar /
 …
 Step 18/21 : RUN useradd -G sudo -ms /bin/bash athena
 Step 21/21 : LABEL athena.dockerfile.sha256=b571012d95c2…
