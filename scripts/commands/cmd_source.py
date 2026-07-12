@@ -438,12 +438,19 @@ class SourceCommandsMixin(SessionState):
         `source_output_hashes`, SEPARATE from the .deb keys).
 
         Retroactive: needs NO rebuild — emits from `source/` +
-        `patch/source/` (+ `fork/source/repo/` for forks).  Idempotent:
-        an existing identical file is skipped; same-name different-bytes
-        is a hard error (append-only).  Tunnelled sources are republished
-        verbatim regardless of version shape (force_class)."""
+        `patch/source/` (+ `fork/source/repo/` for forks).  Idempotent
+        with a FAST PATH: a record whose prior emit is fully on disk with
+        matching sha256 is skipped without re-deriving (add `force` to
+        reproduce + byte-verify everything); an existing identical file
+        is skipped at placement; same-name different-bytes is a hard
+        error (append-only).  Tunnelled sources are republished verbatim
+        regardless of version shape (force_class).
+
+        Usage: source emit [<pkg>…] [force]"""
         import source_emit as _se
-        _names = [a for a in args if not a.startswith('-')]
+        _force = 'force' in args
+        _names = [a for a in args
+                  if not a.startswith('-') and a != 'force']
         _blog = os.path.join(self.config.dir_log, 'build')
         _all = sorted(
             os.path.basename(_f)[:-len('.build.json')]
@@ -475,6 +482,18 @@ class SourceCommandsMixin(SessionState):
                 _skipped += 1
                 _bar.step(1)
                 continue
+            # Fast path: the record says this source was already emitted
+            # and every file is on disk with a matching sha — trust the
+            # HMAC-signed record + disk hash instead of re-deriving the
+            # whole emit (a re-emit source costs an extract+repack cycle).
+            # `force` re-derives everything (byte-verifying re-run).
+            if not _force and self._emit_already_placed(_rec, _codename):
+                if (_rec.get('source_emit_class') or '') == 'verbatim':
+                    _verbatim += 1
+                else:
+                    _emitted += 1
+                _bar.step(1)
+                continue
             _dsc = _se.find_dsc(_src, _search)
             if _dsc is None:
                 console.print(
@@ -497,9 +516,9 @@ class SourceCommandsMixin(SessionState):
             _comp = str(_rec.get('component') or 'main')
             _out_dir = os.path.join(
                 self.config.dir_repo, 'dists', _codename, _comp, 'source')
-            _force = ('verbatim'
-                      if (_rec.get('phase') == 'tunneled'
-                          or _src in _tunneled) else None)
+            _fclass = ('verbatim'
+                       if (_rec.get('phase') == 'tunneled'
+                           or _src in _tunneled) else None)
             try:
                 _res = _se.emit_source(
                     _dsc, _out_dir,
@@ -511,7 +530,7 @@ class SourceCommandsMixin(SessionState):
                     patch_level=_p,
                     work_root=_work_root,
                     keep_binnmu_names=_keep,
-                    force_class=_force)
+                    force_class=_fclass)
             except _se.SourceEmitError as _e:
                 console.print(f"  {_src}: emit FAILED — {_e}",
                               tui.COLOR_ERROR)
@@ -531,6 +550,26 @@ class SourceCommandsMixin(SessionState):
             f"skipped={_skipped} failed={_failed}",
             tui.COLOR_HIGHLIGHT if not _failed else tui.COLOR_ERROR)
         return _failed == 0
+
+    def _emit_already_placed(self, record, codename) -> bool:
+        """True when the record carries a prior emit whose files are ALL
+        present in the repo source pool with matching sha256 — the
+        `source emit` fast path.  Any missing/mismatched file → False
+        (re-derive)."""
+        import source_emit as _se
+        _hashes = record.get('source_output_hashes') or {}
+        if not _hashes:
+            return False
+        _comp = str(record.get('component') or 'main')
+        _dir = os.path.join(
+            self.config.dir_repo, 'dists', codename, _comp, 'source')
+        for _fn, _sha in _hashes.items():
+            _p = os.path.join(_dir, _fn)
+            if not os.path.isfile(_p):
+                return False
+            if _se._sha256(_p) != _sha:
+                return False
+        return True
 
     def cmd_source_repair(self, *args):
         """Align build records with current source state.  MUTATOR.
