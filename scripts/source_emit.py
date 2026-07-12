@@ -154,7 +154,7 @@ def patches_for(patch_root: str, source: str, version: str) -> 'List[str]':
     `patch/source/<src>/<version-noepoch>/*.patch` — the same set the build
     applies.  Empty when unpatched."""
     _noepoch = version.split(':', 1)[-1]
-    return sorted(glob.glob(
+    return sorted(os.path.abspath(_p) for _p in glob.glob(
         os.path.join(patch_root, source, _noepoch, '*.patch')))
 
 
@@ -175,6 +175,24 @@ def classify(dsc_info: 'Dict[str, Any]', patched: bool,
     if _n:
         return 'reemit'
     return 'verbatim'
+
+
+# `+++ b/<path>` targets of a unified diff — the fold classifier: a patch
+# touching upstream files cannot ride out-of-band in a 3.0 (quilt) source
+# (dpkg-source -b refuses "unexpected upstream changes"); it must fold into
+# debian/patches + series.  debian/-only patches stay out-of-band (a series
+# patch may not modify debian/).
+_DIFF_TARGET_RE = re.compile(r'^\+\+\+ (\S+)', re.MULTILINE)
+
+
+def _patch_targets(patch_text: str) -> 'List[str]':
+    _out = []
+    for _t in _DIFF_TARGET_RE.findall(patch_text):
+        if _t == '/dev/null':
+            continue
+        _t = re.sub(r'^[ab]/', '', _t)
+        _out.append(_t)
+    return _out
 
 
 def _changelog_top_date(changelog_text: str) -> 'Optional[str]':
@@ -271,12 +289,40 @@ def emit_source(dsc_path: str, out_dir: str, *,
             if os.path.isfile(_p) and not os.path.isfile(
                     os.path.join(_work, _f)):
                 shutil.copy2(_p, os.path.join(_work, _f))
+        _fold: 'List[str]' = []
+        _is_quilt = '3.0 (quilt)' in (_info.get('format') or '')
         for _p in _patches:
             _r = _run(['patch', '-p1', '-N', '-i', _p], cwd=_tree)
             if _r.returncode != 0:
                 raise SourceEmitError(
                     f'{_src}: patch {os.path.basename(_p)} failed: '
                     f'{_r.stdout.decode(errors="replace")[-300:]}')
+            if not _is_quilt:
+                continue          # 1.0/native absorb upstream changes natively
+            with open(_p, encoding='utf-8', errors='replace') as _fh:
+                _targets = _patch_targets(_fh.read())
+            _up = [_t for _t in _targets if not _t.startswith('debian/')]
+            if not _up:
+                continue          # debian/-only: stays out-of-band
+            if len(_up) != len(_targets):
+                raise SourceEmitError(
+                    f'{_src}: patch {os.path.basename(_p)} touches BOTH '
+                    'upstream and debian/ paths — split it (a quilt series '
+                    'patch may not modify debian/)')
+            _fold.append(_p)
+        if _fold:
+            # CONF-03 mini-fold: an upstream-touching patch must be PART of
+            # the quilt series or dpkg-source -b refuses the residual diff.
+            # It is already applied to the tree; registering it in series
+            # makes the tree state exactly series-applied — zero residue.
+            _pdir = os.path.join(_tree, 'debian', 'patches')
+            os.makedirs(_pdir, exist_ok=True)
+            _series = os.path.join(_pdir, 'series')
+            with open(_series, 'a', encoding='utf-8') as _fh:
+                for _p in _fold:
+                    shutil.copy2(_p, os.path.join(_pdir,
+                                                  os.path.basename(_p)))
+                    _fh.write(os.path.basename(_p) + '\n')
         # D4: transpose EVERY literal relation constraint in debian/control.
         _ctrl_path = os.path.join(_tree, 'debian', 'control')
         with open(_ctrl_path, encoding='utf-8', errors='replace') as _fh:

@@ -529,6 +529,86 @@ def test_source_emit_classify_verbatim_and_reemit():
             assert 'append-only' in str(_e)
 
 
+def test_source_emit_quilt_fold_for_upstream_touching_patches():
+    """CONF-03 mini-fold (MAT-02 stage 6): a 3.0 (quilt) source whose Athena
+    patch touches UPSTREAM files folds that patch into debian/patches +
+    series at emit (dpkg-source -b otherwise refuses the residual diff —
+    the cryptsetup/curl class); the emitted source extracts with the patch
+    applied.  A patch touching both upstream and debian/ raises (a series
+    patch may not modify debian/)."""
+    import subprocess
+    import tarfile
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import source_emit as SE
+    if not _have_dpkg_deb():
+        print("SKIP test_source_emit_quilt_fold (no dpkg tools)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        # upstream tarball
+        _up = os.path.join(_tmp, 'quilty-1.0')
+        os.makedirs(_up)
+        with open(os.path.join(_up, 'runme.sh'), 'w') as _f:
+            _f.write('#!/bin/sh\necho upstream\n')
+        with tarfile.open(os.path.join(_tmp, 'quilty_1.0.orig.tar.gz'),
+                          'w:gz') as _t:
+            _t.add(_up, arcname='quilty-1.0')
+        # debianized tree -> input dsc at +deb12u1 (forces reemit class)
+        os.makedirs(os.path.join(_up, 'debian', 'source'))
+        with open(os.path.join(_up, 'debian', 'source', 'format'), 'w') as _f:
+            _f.write('3.0 (quilt)\n')
+        with open(os.path.join(_up, 'debian', 'control'), 'w') as _f:
+            _f.write('Source: quilty\nMaintainer: T <t@l>\n\n'
+                     'Package: quilty\nArchitecture: all\n'
+                     'Description: quilt fold fixture\n body\n')
+        with open(os.path.join(_up, 'debian', 'changelog'), 'w') as _f:
+            _f.write('quilty (1.0-1+deb12u1) bookworm; urgency=medium\n\n'
+                     '  * Fixture.\n\n'
+                     ' -- Up Stream <up@stream>  '
+                     'Sun, 06 Jul 2026 00:00:00 +0000\n')
+        subprocess.run(['dpkg-source', '-b', _up], cwd=_tmp,
+                       check=True, capture_output=True)
+        _dsc = os.path.join(_tmp, 'quilty_1.0-1+deb12u1.dsc')
+        # our patch set: touches the UPSTREAM file
+        _proot = os.path.join(_tmp, 'patchroot')
+        _pdir = os.path.join(_proot, 'quilty', '1.0-1+deb12u1')
+        os.makedirs(_pdir)
+        with open(os.path.join(_pdir, '9001-fix.patch'), 'w') as _f:
+            _f.write('--- a/runme.sh\n+++ b/runme.sh\n'
+                     '@@ -1,2 +1,2 @@\n #!/bin/sh\n'
+                     '-echo upstream\n+echo asgard\n')
+        _out = os.path.join(_tmp, 'out')
+        _r = SE.emit_source(_dsc, _out, patch_root=_proot, patch_level=1)
+        assert _r['status'] == 'emitted', _r
+        assert _r['version'] == '1.0-1+asg1u1+p1'
+        # emitted source extracts; our patch is IN the series and applied
+        _x = os.path.join(_tmp, 'x')
+        os.makedirs(_x)
+        subprocess.run(
+            ['dpkg-source', '--no-check', '-x',
+             os.path.join(_out, 'quilty_1.0-1+asg1u1+p1.dsc'),
+             os.path.join(_x, 't')], check=True, capture_output=True)
+        _series = open(os.path.join(_x, 't', 'debian', 'patches',
+                                    'series')).read()
+        assert '9001-fix.patch' in _series
+        assert 'echo asgard' in open(
+            os.path.join(_x, 't', 'runme.sh')).read()
+        # mixed upstream+debian patch → hard error
+        with open(os.path.join(_pdir, '9002-mixed.patch'), 'w') as _f:
+            _f.write('--- a/runme.sh\n+++ b/runme.sh\n'
+                     '@@ -1,2 +1,2 @@\n #!/bin/sh\n'
+                     '-echo asgard\n+echo mixed\n'
+                     '--- a/debian/control\n+++ b/debian/control\n'
+                     '@@ -1,2 +1,2 @@\n Source: quilty\n'
+                     '-Maintainer: T <t@l>\n+Maintainer: M <m@l>\n')
+        try:
+            SE.emit_source(_dsc, os.path.join(_tmp, 'out2'),
+                           patch_root=_proot, patch_level=2)
+            raise AssertionError('mixed patch must raise')
+        except SE.SourceEmitError as _e:
+            assert 'BOTH upstream and debian/' in str(_e)
+
+
 def test_source_emit_environment_mode_helpers():
     """MAT-02 D4b: os-release ID parsing + the transpose-mode decision —
     debian container → transpose applies; the native distribution → it must
@@ -1800,6 +1880,7 @@ TESTS = [
     test_transpose_deb_source_annotation_cases,
     test_transpose_source_relations_build_fields_and_substvars,
     test_source_emit_classify_verbatim_and_reemit,
+    test_source_emit_quilt_fold_for_upstream_touching_patches,
     test_source_emit_environment_mode_helpers,
     test_source_emit_backfill_helpers,
     test_tunneled_binary_names_resolves_from_cache,
