@@ -1732,14 +1732,20 @@ class MirrorCommandsMixin(SessionState):
           1. Fetch coord-head + keyring + claims to cache/mirror/<n>/fetched
           2. tier-1 verify coord-head; Ed25519-verify every claim sig
           3. Walk verified claims of OUR current snapshot pin:
-               - skip if claim.builder == our builder-id (skip-own security
-                 rule — we can't legitimately accept a peer's claim that
-                 it's the file we built)
+               - claim.builder == our builder-id: skip when the file is on
+                 disk (skip-own security rule — a peer's claim about a file
+                 we built is never accepted, and a present local file is
+                 never overwritten).  When the file is MISSING from repo/,
+                 RESTORE it: download and sha-verify against our OWN
+                 Ed25519-signed claim (fresh-machine / wiped-pool recovery
+                 without a full rebuild).  A local build record pinning a
+                 DIFFERENT sha blocks the restore — that is local-ahead
+                 state awaiting `mirror reclaim`, not loss.
                - skip if local repo already has the file
                - else download .deb to its predicted local path; verify
                  Against the claim; abort that file on mismatch
-          4. Report counts (downloaded, skipped-own, skipped-present,
-             verify-mismatch).
+          4. Report counts (downloaded, restored-own, skipped-own,
+             skipped-present, verify-mismatch).
 
         This is the read-only / forward-only side of the federation: we
         pull-back what peers have published.  It does NOT touch the
@@ -1851,7 +1857,7 @@ class MirrorCommandsMixin(SessionState):
             # set (supersession fold, NO snapshot filter — the obsolescence
             # fold already leaves one live version per filename).
             _dl = _skip_own = _skip_present = _mismatch = _failed = 0
-            _refreshed = _no_claim = 0
+            _refreshed = _no_claim = _restored_own = 0
             # collect successfully-downloaded
             # claims per package so we can write a single local
             # build.json record per source.  Indexed by package name;
@@ -1935,6 +1941,67 @@ class MirrorCommandsMixin(SessionState):
                     _per_pkg_downloads.setdefault(_pkg_name, []).append(
                         (_claim, _builder))
 
+            def _restore_own_file(_fn, _claim,
+                                  _pool_spec=_pool_spec, _ssh_key=_ssh_key):
+                """Skip-own with restore-missing: a PRESENT local file is
+                never touched (the local build is the authority for our
+                packages), but an own file MISSING from repo/ is downloaded
+                back and verified against OUR OWN Ed25519-signed claim sha —
+                so a wiped/fresh repo (machine migration) restores without a
+                full rebuild.  GUARD: when the local build record pins a
+                DIFFERENT sha for this filename, the local state is AHEAD of
+                the published claim (a sanctioned repack awaiting `mirror
+                reclaim`); restoring the older remote bytes would clobber
+                that intent — skip loudly instead.  No build record is
+                written here: our own records are already authoritative."""
+                nonlocal _skip_own, _restored_own, _mismatch, _failed
+                _expected_sha = str(_claim.get('sha256') or '')
+                _comp = str(_claim.get('component') or 'main')
+                _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
+                _local_path = os.path.join(_dst_dir, _fn)
+                if os.path.isfile(_local_path):
+                    _skip_own += 1
+                    return
+                _src_name = str(_claim.get('package') or '')
+                if _src_name:
+                    _rec = utils.read_build_record(
+                        os.path.join(self.config.dir_log, 'build'), _src_name)
+                    _rec_sha = ((_rec.get('output_hashes') or {}).get(_fn)
+                                if _rec else None)
+                    if _rec_sha and _rec_sha != _expected_sha:
+                        console.print(
+                            f"  {_fn}: NOT restored — local build record "
+                            f"pins {_rec_sha[:12]}, published claim "
+                            f"{_expected_sha[:12]} (local-ahead; rebuild or "
+                            "`mirror reclaim`, don't clobber)",
+                            tui.COLOR_WARNING)
+                        _skip_own += 1
+                        return
+                _rel = os.path.relpath(_local_path, self.config.dir_repo)
+                _remote_file = _pool_spec.rstrip('/') + '/' + _rel
+                _ok, _detail = _transport.pull_single_file(
+                    remote_spec=_remote_file, local_path=_local_path,
+                    ssh_key=_ssh_key)
+                if not _ok:
+                    console.print(
+                        f"  {_fn}: restore failed — {_detail}",
+                        tui.COLOR_ERROR)
+                    _failed += 1
+                    return
+                _h = utils.get_sha256(_local_path, use_cache=False)
+                if _h != _expected_sha:
+                    console.print(
+                        f"  {_fn}: restore SHA-256 mismatch (our claim "
+                        f"{_expected_sha[:12]} vs downloaded {_h[:12]}) "
+                        "— removing.", tui.COLOR_ERROR)
+                    try:
+                        os.unlink(_local_path)
+                    except OSError:
+                        pass
+                    _mismatch += 1
+                    return
+                _restored_own += 1
+
             # Fetch + verify the signed closure ledger (head-pinned).
             import coord.config_manifest as _cfgman
             _ledger_sha = str(_head.get('closure_ledger_sha256') or '')
@@ -1987,7 +2054,7 @@ class MirrorCommandsMixin(SessionState):
                     _bar.label(_fn.split('_', 1)[0])     # binary package name
                     _claim, _builder = _claim_by_fn.get(_fn, (None, ''))
                     if _claim is not None and _claim.get('builder') == _bid:
-                        _skip_own += 1                   # a file WE built
+                        _restore_own_file(_fn, _claim)   # a file WE built
                     elif _claim is None:
                         # ledger names a file no live claim covers — anomaly
                         # (audit catches it); can't record provenance, skip.
@@ -2012,7 +2079,7 @@ class MirrorCommandsMixin(SessionState):
                 for _fn, (_c, _builder) in _claim_by_fn.items():
                     _bar.label(_fn.split('_', 1)[0])     # binary package name
                     if _c.get('builder') == _bid:
-                        _skip_own += 1
+                        _restore_own_file(_fn, _c)
                     else:
                         _pull_file(
                             _fn, str(_c.get('sha256') or ''),
@@ -2048,6 +2115,7 @@ class MirrorCommandsMixin(SessionState):
                 f"  downloaded={_dl} skipped_own={_skip_own} "
                 f"skipped_present={_skip_present} "
                 f"verify_mismatch={_mismatch} failed={_failed}"
+                + (f" restored_own={_restored_own}" if _restored_own else '')
                 + (f" refreshed={_refreshed}" if _refreshed else '')
                 + (f" no_claim={_no_claim}" if _no_claim else '')
                 + (f" retired_own={_retired}" if _retired else ''),
