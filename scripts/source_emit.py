@@ -100,6 +100,21 @@ def patch_level_from_version(version: str) -> int:
     return int(_m.group(1)) if _m else 0
 
 
+def patch_level_from_outputs(outputs: 'List[str]') -> int:
+    """The uniform +pP carried by a record's OUTPUT filenames (0 when
+    absent) — the shipped truth.  Older records' intended_version predates
+    the transpose stamp (bash: intended 5.2.15-2, shipped
+    bash_5.2.15-2+asg1u0+p1_amd64.deb), so filename versions are the
+    authority; P is uniform per source, so max() is exact."""
+    from bump import parse_deb_filename
+    _p = 0
+    for _f in outputs or []:
+        _r = parse_deb_filename(os.path.basename(_f))
+        if _r is not None:
+            _p = max(_p, patch_level_from_version(_r[1]))
+    return _p
+
+
 def find_dsc(source: str, search_dirs: 'List[str]') -> 'Optional[str]':
     """Locate `<source>_*.dsc` across *search_dirs* (upstream `source/`,
     fork `fork/source/repo/`).  Multiple versions → the highest (Debian
@@ -210,10 +225,9 @@ def emit_source(dsc_path: str, out_dir: str, *,
     _info = parse_dsc(dsc_path)
     _src, _upver = _info['source'], _info['version']
     _patches = patches_for(patch_root, _src, _upver) if patch_root else []
-    if _patches and patch_level <= 0:
-        raise SourceEmitError(
-            f'{_src}: patches present but patch_level={patch_level} — the '
-            'emitted version must carry the binaries\' uniform +pP')
+    # NOTE: patches with patch_level=0 is a legitimate shape — the emitted
+    # version must match what the binaries SHIPPED at (the record is the
+    # authority), and pre-scheme patched builds shipped without +p.
     # force_class='verbatim': the TUNNELLED path — we redistribute
     # upstream's binaries unmodified, so the source republishes verbatim
     # regardless of its version shape (MAT-02 D1); the binaries' Source:

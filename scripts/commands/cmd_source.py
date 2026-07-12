@@ -460,6 +460,10 @@ class SourceCommandsMixin(SessionState):
         _search = [self.config.dir_source,
                    self.config.dir_fork_source_repo]
         _tunneled = set(getattr(self.config, 'tunnel_packages', ()) or ())
+        # extraction workspace on DISK — the tempdir default is the
+        # tmpfs /tmp, which firefox-esr's 3+ GB tree overflows (ENOSPC).
+        _work_root = os.path.join(self.config.dir_cache, 'source-emit')
+        os.makedirs(_work_root, exist_ok=True)
         _emitted = _verbatim = _skipped = _failed = 0
         _bar = ProgressBar(label='source emit',
                            maxvalue=max(len(_targets), 1),
@@ -479,9 +483,17 @@ class SourceCommandsMixin(SessionState):
                 _failed += 1
                 _bar.step(1)
                 continue
-            _p = _se.patch_level_from_version(
-                str(_rec.get('intended_version')
-                    or _rec.get('built_version') or ''))
+            # P: the OUTPUT filenames are the shipped truth (older
+            # records' intended_version predates the transpose stamp).
+            _p = _se.patch_level_from_outputs(_rec.get('outputs') or [])
+            if _p == 0:
+                _p = _se.patch_level_from_version(
+                    str(_rec.get('intended_version')
+                        or _rec.get('built_version') or ''))
+            # patches applied iff the BUILD applied them (record hash);
+            # a patch dir added after the build must not leak in.
+            _was_patched = (_rec.get('patch_set_hash') or '') not in (
+                '', utils.EMPTY_PATCH_SET_HASH)
             _comp = str(_rec.get('component') or 'main')
             _out_dir = os.path.join(
                 self.config.dir_repo, 'dists', _codename, _comp, 'source')
@@ -493,9 +505,11 @@ class SourceCommandsMixin(SessionState):
                     _dsc, _out_dir,
                     codename=_codename,
                     distribution=str(self.config.build_distribution),
-                    patch_root=os.path.join(
-                        self.config.working_dir, 'patch', 'source'),
+                    patch_root=(os.path.join(
+                        self.config.working_dir, 'patch', 'source')
+                        if _was_patched else ''),
                     patch_level=_p,
+                    work_root=_work_root,
                     keep_binnmu_names=_keep,
                     force_class=_force)
             except _se.SourceEmitError as _e:

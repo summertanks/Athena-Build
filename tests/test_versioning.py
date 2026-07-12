@@ -557,6 +557,12 @@ def test_source_emit_backfill_helpers():
     assert SE.patch_level_from_version('5.2.15-2+asg1u0+p1') == 1
     assert SE.patch_level_from_version('1.0-2') == 0
     assert SE.patch_level_from_version('') == 0
+    # outputs are the shipped truth (bash: intended 5.2.15-2, shipped +p1)
+    assert SE.patch_level_from_outputs(
+        ['bash_5.2.15-2+asg1u0+p1_amd64.deb',
+         'bash-doc_5.2.15-2+asg1u0+p1_all.deb']) == 1
+    assert SE.patch_level_from_outputs(['x_1.0-2_amd64.deb']) == 0
+    assert SE.patch_level_from_outputs([]) == 0
     with tempfile.TemporaryDirectory() as _tmp:
         _a = os.path.join(_tmp, 'a')
         _b = os.path.join(_tmp, 'b')
