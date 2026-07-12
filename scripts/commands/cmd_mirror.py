@@ -1888,7 +1888,7 @@ class MirrorCommandsMixin(SessionState):
                 # Component pinned on the claim/ledger (defaults to 'main' for
                 # pre-component publishers).  Without it a non-free-firmware
                 # pull lands at main/binary-arch/ and the remote URL 404s.
-                _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
+                _dst_dir = self._artifact_dest_dir(_fn, _comp)
                 _local_path = os.path.join(_dst_dir, _fn)
                 if os.path.isfile(_local_path):
                     # a reclaim REWROTE the bytes under this filename — the
@@ -1957,7 +1957,7 @@ class MirrorCommandsMixin(SessionState):
                 nonlocal _skip_own, _restored_own, _mismatch, _failed
                 _expected_sha = str(_claim.get('sha256') or '')
                 _comp = str(_claim.get('component') or 'main')
-                _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
+                _dst_dir = self._artifact_dest_dir(_fn, _comp)
                 _local_path = os.path.join(_dst_dir, _fn)
                 if os.path.isfile(_local_path):
                     _skip_own += 1
@@ -2583,12 +2583,17 @@ class MirrorCommandsMixin(SessionState):
             if not _items:
                 continue
             _claims = [_c for _c, _ in _items]
-            _outputs = sorted({str(_c.get('filename') or '') for _c in _claims
-                               if _c.get('filename')})
-            _output_hashes = {
-                str(_c.get('filename') or ''): str(_c.get('sha256') or '')
-                for _c in _claims if _c.get('filename')
-            }
+            _all_fns = {str(_c.get('filename') or ''):
+                        str(_c.get('sha256') or '')
+                        for _c in _claims if _c.get('filename')}
+            # MAT-02 stage 5: SOURCE artifacts land under the source keys —
+            # the .deb keys are routed through the deb destination map by
+            # every consumer (chroot preflight, hash refresh, reclaim).
+            _src_fns = {_fn: _sha for _fn, _sha in _all_fns.items()
+                        if utils.is_source_artifact(_fn)}
+            _output_hashes = {_fn: _sha for _fn, _sha in _all_fns.items()
+                              if _fn not in _src_fns}
+            _outputs = sorted(_output_hashes)
             # republished_from is per-file; collect across the package's
             # claims.  Empty when none are tunneled.
             _republished_from: 'dict[str, dict]' = {}
@@ -2653,6 +2658,8 @@ class MirrorCommandsMixin(SessionState):
                 'output_count':     len(_outputs),
                 'outputs':          _outputs,
                 'output_hashes':    _output_hashes,
+                'source_outputs':   sorted(_src_fns),
+                'source_output_hashes': dict(_src_fns),
                 'republished_from': _republished_from,
                 # Set for tunneled adoptions too — see docstring: an
                 # adopted tunnel is NOT re-claimed (only the original
@@ -2891,6 +2898,10 @@ class MirrorCommandsMixin(SessionState):
             _claim_idx_crit: 'list' = []
             _ledger_crit: 'list' = []
             if _pkg_idx:
+                # MAT-02 stage 5: source claims resolve against the
+                # verified Sources chain — merge its per-file index so a
+                # source claim doesn't false-flag claim_not_in_apt_index.
+                _pkg_idx.update(_src_idx)
                 _claim_idx_findings = _mirror.audit_claims_vs_packages(
                     _by_builder, _pkg_idx)
                 _claim_idx_crit = [_f for _f in _claim_idx_findings
@@ -2944,7 +2955,8 @@ class MirrorCommandsMixin(SessionState):
                     except OSError:
                         pass
                     _lg_findings = _mirror.audit_closure_ledger(
-                        _signed_ledger, _pkg_idx, _cbins, '\n'.join(_texts))
+                        _signed_ledger, _pkg_idx, _cbins, '\n'.join(_texts),
+                        src_idx=_src_idx)
                     _ledger_crit = [_f for _f in _lg_findings
                                     if _f[0] == 'CRITICAL']
                     for _sev, _kind, _msg in _lg_findings[:10]:
@@ -3631,6 +3643,16 @@ class MirrorCommandsMixin(SessionState):
             f"(was {_local or 'unset'}) — re-run `cache build` + `cache parse`",
             tui.COLOR_WARNING)
         return _adopt
+
+    def _artifact_dest_dir(self, filename: str, component: str) -> str:
+        """Local destination dir for a pulled/restored pool artifact:
+        source artifacts (MAT-02) route to dists/<codename>/<comp>/source/;
+        binaries route through the .deb destination map."""
+        if utils.is_source_artifact(filename):
+            _codename = str(self.config.build_codename).strip('"').strip("'")
+            return os.path.join(self.config.dir_repo, 'dists', _codename,
+                                component, 'source')
+        return self.config.deb_dest_for_filename(filename, component)
 
     def _fetched_canonical_lists(self, fetched_dir) -> 'Optional[dict]':
         """The fetched canonical manifest's raw list texts

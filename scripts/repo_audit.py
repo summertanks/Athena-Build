@@ -732,6 +732,49 @@ def published_ledger_entries(config: 'BuildConfig') -> 'dict':
                 str(_v.get('package') or ''), _build_arch))}
 
 
+def published_source_ledger_entries(config: 'BuildConfig') -> 'dict':
+    """Per-FILE ledger entries for the published SOURCE pool (MAT-02
+    stage 5): walk every ``dists/<codename>/<comp>/source/Sources`` index
+    and emit one entry per referenced file (dsc + tarballs), keyed
+    ``"<filename>|source"`` — the pull walks ledger entries per-file, so
+    per-file keys adopt naturally; ``arch='source'`` keeps them out of the
+    binary latest-per-(pkg,arch) recomputation in audit_closure_ledger."""
+    import glob as _glob
+    _codename = str(getattr(config, 'build_codename', '')).strip('"').strip("'")
+    _out: dict = {}
+    for _sf in _glob.glob(os.path.join(
+            config.dir_repo, 'dists', _codename, '*', 'source', 'Sources')):
+        _comp = os.path.basename(os.path.dirname(os.path.dirname(_sf)))
+        try:
+            with open(_sf) as _fh:
+                for _sec in apt_pkg.TagFile(_fh):
+                    _pkg = (_sec.get('Package') or '').strip()
+                    _ver = (_sec.get('Version') or '').strip()
+                    for _line in (_sec.get('Checksums-Sha256')
+                                  or '').strip().splitlines():
+                        _parts = _line.split()
+                        if len(_parts) != 3:
+                            continue
+                        _sha, _size, _name = _parts
+                        _fn = os.path.basename(_name)
+                        try:
+                            _sz = int(_size)
+                        except ValueError:
+                            _sz = 0
+                        _out[f'{_fn}|source'] = {
+                            'filename':  _fn,
+                            'sha256':    _sha,
+                            'size':      _sz,
+                            'version':   _ver,
+                            'component': _comp,
+                            'package':   _pkg,
+                            'arch':      'source',
+                        }
+        except OSError:
+            continue
+    return _out
+
+
 def repo_state_from_packages_text(packages_text: str) -> RepoState:
     """Build a RepoState (packages + provides_index) from raw Packages text —
     no dpkg-scanpackages / disk scan.  Highest version per name wins (same

@@ -149,6 +149,19 @@ SOURCE_RELATION_FIELDS = _NMU_STRIP_FIELDS + (
 )
 
 
+# Source-package pool artifact (MAT-02): .dsc / tarballs / 1.0 diff /
+# upstream signature.  `.tar.` (with the trailing dot) matches every
+# compression (orig.tar.gz, debian.tar.xz, native x_1.0.tar.xz) while
+# index files (Sources.gz, Packages.xz) never match.
+_SOURCE_ARTIFACT_RE = re.compile(r'(?:\.dsc|\.diff\.gz|\.asc)$|\.tar\.')
+
+
+def is_source_artifact(filename: str) -> bool:
+    """True when *filename* is a source-package pool artifact (as opposed
+    to a binary .deb/.udeb or an index file)."""
+    return bool(_SOURCE_ARTIFACT_RE.search(filename))
+
+
 def normalize_repo_filename(filename: str) -> str:
     """Map an upstream Packages-index Filename to its repo/main on-disk
     form.  Strips both layers our build pipeline removes:

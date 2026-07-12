@@ -433,6 +433,15 @@ def push_dist_tree(
         '--delete',
         '--exclude=*.deb',
         '--exclude=*.udeb',
+        # MAT-02: SOURCE pool artifacts live inside dists/<codename>/
+        # <comp>/source/ — same append-only discipline as the .debs
+        # (pushed per-claim, never transferred/deleted by the dist-tree
+        # pass).  Index files (Sources, Sources.gz/.xz) match none of
+        # these patterns and still sync + reap normally.
+        '--exclude=*.dsc',
+        '--exclude=*.tar.*',
+        '--exclude=*.diff.gz',
+        '--exclude=*.asc',
     ]
     _ssh = _ssh_arg(ssh_key)
     if _ssh is not None:

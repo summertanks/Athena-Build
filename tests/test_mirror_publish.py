@@ -4542,6 +4542,38 @@ def test_mirror_pull_progress_is_byte_sized_with_pkg_label():
 
 
 
+def test_mirror_pull_routes_and_records_source_artifacts():
+    """MAT-02 stage 5 wiring pins:
+      - _pull_file and _restore_own_file route through _artifact_dest_dir
+        (source artifacts land in dists/<codename>/<comp>/source/)
+      - the pull record writer splits source artifacts into
+        source_outputs/source_output_hashes (never the .deb keys)
+      - push_dist_tree excludes source artifacts from the --delete rsync
+        (append-only source pool, like the .debs)
+      - the audit merges the verified Sources index into the claim
+        cross-check and feeds it to the ledger validation."""
+    import re
+    _p = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_mirror.py')
+    with open(_p) as _fh:
+        _c = _fh.read()
+    assert _c.count('self._artifact_dest_dir(') >= 2, \
+        'pull + restore paths must route through _artifact_dest_dir'
+    _m = re.search(r'def _mirror_pull_write_build_records\(.*?(?=\n    def )',
+                   _c, re.DOTALL)
+    assert _m and 'source_output_hashes' in _m.group(0), \
+        'pull record writer must split source artifacts to the source keys'
+    assert '_pkg_idx.update(_src_idx)' in _c, \
+        'claims cross-check must include the Sources index'
+    assert 'src_idx=_src_idx' in _c, \
+        'ledger validation must receive the Sources index'
+    _tp = os.path.join(_ROOT, 'scripts', 'coord', 'transport.py')
+    with open(_tp) as _fh:
+        _t = _fh.read()
+    for _pat in ('--exclude=*.dsc', '--exclude=*.tar.*',
+                 '--exclude=*.diff.gz', '--exclude=*.asc'):
+        assert _pat in _t, f'push_dist_tree must exclude {_pat}'
+
+
 def test_mirror_pull_restores_missing_own_files():
     """Skip-own with restore-missing (2026-07-12): an OWN claim's file that
     is MISSING from repo/ is downloaded back and verified against our own
@@ -5261,6 +5293,7 @@ TESTS = [
     test_cmd_mirror_dispatch_routes_reclaim,
     test_mirror_pull_progress_is_byte_sized_with_pkg_label,
     test_mirror_pull_restores_missing_own_files,
+    test_mirror_pull_routes_and_records_source_artifacts,
     test_mirror_pull_canonical_apply_has_local_ahead_guard,
     test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base,
     test_cmd_mirror_summary_we_own_counts_non_retracted_claims,

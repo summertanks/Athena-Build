@@ -244,6 +244,37 @@ def generate_pending_claims(
                 republished_from=_rfrom,
                 component=_comp,
             ))
+        # MAT-02 stage 5 — SOURCE artifacts (source_outputs /
+        # source_output_hashes, written by `source emit`) are claimed like
+        # any output: same component, sizes filled from the pool scan.  No
+        # foreign-arch filter (they aren't binaries).  republished_from
+        # stays None even for tunnelled sources: WE selected and published
+        # the verbatim upstream files, so we own their lifecycle
+        # (deprecate/reclaim) — the no-owner projection is a BINARY
+        # passthrough concept.
+        _src_hashes = _rec.get('source_output_hashes') or {}
+        for _fn in (_rec.get('source_outputs') or []):
+            if _fn in _known:
+                continue
+            _sha = _src_hashes.get(_fn)
+            if not isinstance(_sha, str) or not _sha:
+                continue
+            _pending.append(_schema.new_claim(
+                builder=builder_id,
+                seq=0,
+                package=_pkg,
+                intended_version=str(_rec.get('intended_version', '')),
+                built_version=str(_rec.get('built_version', '')),
+                filename=_fn,
+                sha256=_sha,
+                size=0,  # filled by fill_sizes_from_pool
+                snapshot=snapshot_pin,
+                built_at=str(_rec.get('finished')
+                             or _rec.get('started') or ''),
+                claim_state=_schema.CLAIM_STATE_PENDING,
+                republished_from=None,
+                component=_comp,
+            ))
     _pending.sort(key=lambda _c: (_c['package'], _c['filename']))
     return _pending
 
@@ -1524,6 +1555,11 @@ def remote_publish(
             import repo_audit as _repo_audit
             try:
                 _entries = _repo_audit.published_ledger_entries(config)
+                # MAT-02 stage 5: the ledger must carry the published
+                # SOURCE files too (peers pull off the ledger) — per-FILE
+                # entries keyed '<filename>|source'.
+                _entries.update(
+                    _repo_audit.published_source_ledger_entries(config))
             except Exception:                              # noqa: BLE001
                 _entries = {}     # robust — never abort publish over the ledger
             if _entries:
