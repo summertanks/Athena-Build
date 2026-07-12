@@ -362,7 +362,8 @@ def asg_filename(filename: str, release: int, n: int) -> str:
     return f'{_pkg}_{apply_asg_suffix(_ver, release, n)}_{_arch}{_ext}'
 
 
-def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
+def match_pristine_base(predicted_fn: str, ondisk_fn: str,
+                        allow_binnmu: bool = False) -> bool:
     """True when an on-disk artifact is the dep-tree's predicted (pristine)
     filename, optionally carrying a trailing +asg<R>u<N> on its version
     segment.  Reconciles the pristine filename the predictor computes
@@ -373,6 +374,14 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
     Requires identical package name, architecture, and extension; the on-disk
     version must equal the predicted version OR be a transpose of the same
     pristine base carrying our +asg<R>u<N> / ~asg<R>u<N> layer.
+
+    ``allow_binnmu`` — the TUNNELLED acceptance (callers pass it ONLY for a
+    record classified 'tunneled'): a tunnelled binNMU keeps its upstream
+    ``+bN`` on disk by design (transpose_deb frozen-sibling-pin rule;
+    ffmpegthumbnailer, 2026-07-12), so an on-disk version reducing to the
+    same pristine base with a trailing binNMU marker also matches.  Rebuilt
+    sources must NOT pass this (a stale upstream-suffixed leftover would
+    wrongly satisfy the skip gate), hence opt-in.
     """
     if predicted_fn == ondisk_fn:
         return True
@@ -387,6 +396,10 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
     if _o[1] == _p[1]:                                 # exact (pristine) match
         return True
     if parse_asg_suffix(_o[1]) is None:                # on-disk has no asg layer
+        if allow_binnmu and strip_binNMU(_o[1])[1]:
+            # tunnelled +bN acceptance: same pristine base, upstream
+            # binNMU layer kept on disk (see docstring).
+            return pristine_base(_o[1]) == pristine_base(_p[1])
         return False
     # On-disk carries our asg layer.  Compare PRISTINE BASES, not just the
     # asg-stripped on-disk version, to reconcile the transpose model with the
@@ -404,7 +417,8 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
 
 def find_matching_artifact(dst_dir: str,
                            predicted_filename: str,
-                           dir_listing: 'Optional[list]' = None) -> 'Optional[str]':
+                           dir_listing: 'Optional[list]' = None,
+                           allow_binnmu: bool = False) -> 'Optional[str]':
     """Return the on-disk path of `predicted_filename` in `dst_dir`, or of an
     +asg<R>u<N>-stamped variant of it (match_pristine_base), else None.
 
@@ -426,7 +440,8 @@ def find_matching_artifact(dst_dir: str,
         _entries = os.listdir(dst_dir) if dir_listing is None else dir_listing
         for _cand in _entries:
             if (_cand.endswith(('.deb', '.udeb'))
-                    and match_pristine_base(predicted_filename, _cand)
+                    and match_pristine_base(predicted_filename, _cand,
+                                            allow_binnmu=allow_binnmu)
                     and os.path.isfile(os.path.join(dst_dir, _cand))):
                 return os.path.join(dst_dir, _cand)
     except OSError:

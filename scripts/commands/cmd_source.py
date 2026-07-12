@@ -337,7 +337,11 @@ class SourceCommandsMixin(SessionState):
         _all_present = True
         for _f in _expected:
             _dst_dir = self.config.deb_dest_for_filename(_f, _comp)
-            _match = utils.find_matching_artifact(_dst_dir, _f)
+            # tunnelled acceptance: a tunnelled binNMU keeps +bN on disk —
+            # MUST mirror check_build's gate exactly or build and audit
+            # diverge (the ffmpegthumbnailer stale_pass, 2026-07-12).
+            _match = utils.find_matching_artifact(
+                _dst_dir, _f, allow_binnmu=_record_tunneled)
             if _match is None:
                 _all_present = False
                 break

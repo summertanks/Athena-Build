@@ -296,6 +296,36 @@ def test_transpose_control_text_keep_binnmu_names_exempts_tunneled_targets():
     assert _n2 == 0, (_n2, _out2)
 
 
+def test_match_pristine_base_tunneled_binnmu_acceptance():
+    """The tunnelled acceptance (allow_binnmu): an on-disk artifact keeping
+    its upstream +bN (a tunnelled binNMU — transpose_deb keeps it for the
+    frozen sibling pins) matches the pristine prediction ONLY when the
+    caller opts in (record=tunneled).  The default stays strict, and a
+    +debNuK leftover WITHOUT a binNMU marker never matches even with the
+    flag — only the binNMU layer is excused, not general NMU residue."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import match_pristine_base
+    _pred = 'ffmpegthumbnailer_2.2.2+git20220218+dfsg-1_amd64.deb'
+    _disk = 'ffmpegthumbnailer_2.2.2+git20220218+dfsg-1+b1_amd64.deb'
+    assert match_pristine_base(_pred, _disk) is False          # strict default
+    assert match_pristine_base(_pred, _disk, allow_binnmu=True) is True
+    # stacked update+binNMU tunnel shape reduces to the same base
+    assert match_pristine_base(
+        'x_1.0-2_amd64.deb', 'x_1.0-2+deb12u1+b1_amd64.deb',
+        allow_binnmu=True) is True
+    # NMU residue without a binNMU marker: never accepted, flag or not
+    assert match_pristine_base(
+        'x_1.0-2_amd64.deb', 'x_1.0-2+deb12u1_amd64.deb',
+        allow_binnmu=True) is False
+    # the +asg path is unaffected by the flag
+    assert match_pristine_base(
+        'x_1.0-2_amd64.deb', 'x_1.0-2+asg1u1_amd64.deb') is True
+    # different base never matches
+    assert match_pristine_base(
+        'x_1.0-2_amd64.deb', 'x_1.0-3+b1_amd64.deb',
+        allow_binnmu=True) is False
+
+
 def test_source_package_version_predictor():
     """MAT-02 D2: the published source's version == its binaries' version
     minus any force-+bN layer (the source never moves on a forced rebuild)."""
@@ -1874,6 +1904,7 @@ TESTS = [
     test_transpose_control_text_version_deps_and_provenance,
     test_transpose_control_text_strips_binnmu_from_constraint_bounds,
     test_transpose_control_text_keep_binnmu_names_exempts_tunneled_targets,
+    test_match_pristine_base_tunneled_binnmu_acceptance,
     test_source_package_version_predictor,
     test_transpose_ceiling_dot_tail_transposes,
     test_transpose_constraint_strips_legacy_binnmu_bound,

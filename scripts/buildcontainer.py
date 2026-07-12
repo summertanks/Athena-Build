@@ -2264,8 +2264,15 @@ class BuildContainer:
         _record = utils.read_build_record(self.buildlog_path, src_pkg.package)
         if _record is None:
             return False
-        if utils.classify_build_record(_record) not in ('ok', 'tunneled'):
+        _cls = utils.classify_build_record(_record)
+        if _cls not in ('ok', 'tunneled'):
             return False
+        # A tunnelled binNMU keeps its upstream +bN on disk (transpose_deb
+        # frozen-pin rule) — the pristine prediction only matches with the
+        # tunnelled acceptance.  Without it, the package re-tunnels EVERY
+        # run and source audit reads stale_pass (ffmpegthumbnailer,
+        # 2026-07-12).  Rebuilt records keep the strict gate.
+        _allow_bn = (_cls == 'tunneled')
 
         # Component (from origin mirror) so a non-main package's binaries are
         # located in their component dir — e.g. a TUNNELED firmware package
@@ -2287,7 +2294,8 @@ class BuildContainer:
             # cause: a stamped/ABI-variant on-disk file never matched, so the
             # source was rebuilt every run.
             _dst_dir = self.config.deb_dest_for_filename(_file, _comp)
-            _filename = utils.find_matching_artifact(_dst_dir, _file)
+            _filename = utils.find_matching_artifact(
+                _dst_dir, _file, allow_binnmu=_allow_bn)
             if _filename is None:
                 return False
             if not self.is_ar_file(_filename):

@@ -36,6 +36,28 @@ from _test_helpers import (  # noqa: F401
 
 
 
+def test_tunneled_binnmu_gate_parity_check_build_vs_audit():
+    """check_build (the skip gate) and _source_state (the audit classifier)
+    must apply the tunnelled +bN acceptance IDENTICALLY — keyed on the
+    record classifying 'tunneled' — or build and audit diverge (the
+    ffmpegthumbnailer stale_pass/re-tunnel loop, 2026-07-12)."""
+    import re as _re
+    _bp = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bp) as _fh:
+        _b = _fh.read()
+    _m = _re.search(r'def check_build\(self.*?(?=\n    def )', _b, _re.DOTALL)
+    assert _m, 'check_build not found'
+    assert "_allow_bn = (_cls == 'tunneled')" in _m.group(0)
+    assert 'allow_binnmu=_allow_bn' in _m.group(0)
+    _cp = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_source.py')
+    with open(_cp) as _fh:
+        _c = _fh.read()
+    _m2 = _re.search(r'def _source_state\(self.*?(?=\n    def )', _c,
+                     _re.DOTALL)
+    assert _m2, '_source_state not found'
+    assert 'allow_binnmu=_record_tunneled' in _m2.group(0)
+
+
 def test_source_emit_command_wired_and_record_safe():
     """MAT-02 stage 3: `source emit` is dispatched from the source group and
     the backfill writes SOURCE artifacts under separate record keys — never
@@ -8897,6 +8919,7 @@ def test_do_tunnel_records_provenance_and_outputs():
 
 TESTS = [
     test_init_remote_builds_image_and_gates_localmirror,
+    test_tunneled_binnmu_gate_parity_check_build_vs_audit,
     test_source_emit_command_wired_and_record_safe,
     test_startup_banner_runs_config_check,
     test_container_init_remote_ensures_image,
