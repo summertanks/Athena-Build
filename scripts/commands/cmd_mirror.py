@@ -3608,15 +3608,83 @@ class MirrorCommandsMixin(SessionState):
             tui.COLOR_WARNING)
         return _adopt
 
+    def _fetched_canonical_lists(self, fetched_dir) -> 'Optional[dict]':
+        """The fetched canonical manifest's raw list texts
+        ({pkg, pool, live, installer} → str), or None when absent/unparseable.
+        UNVERIFIED read — used only for local-drift comparison and backups;
+        the actual apply still goes through the sha-verified path."""
+        import json as _json
+        import coord.config_manifest as _cfgman
+        try:
+            with open(_cfgman.manifest_path(fetched_dir), 'rb') as _fh:
+                _doc = _json.loads(_fh.read().decode('utf-8'))
+        except (OSError, ValueError, UnicodeDecodeError):
+            return None
+        _lists = _doc.get('lists')
+        return _lists if isinstance(_lists, dict) else None
+
+    def _local_lists_drift(self, fetched_dir) -> 'list[tuple[str, str]]':
+        """(label, local_path) pairs whose CURRENT local content differs from
+        the fetched canonical's text — i.e. what an apply would overwrite."""
+        _lists = self._fetched_canonical_lists(fetched_dir) or {}
+        _out: 'list[tuple[str, str]]' = []
+        for _label, _path in (
+                ('pkg', self.config.pkglist_path),
+                ('pool', self.config.poollist_path),
+                ('live', self.config.livelist_path),
+                ('installer', self.config.installerlist_path)):
+            try:
+                with open(_path, encoding='utf-8') as _fh:
+                    _cur = _fh.read()
+            except OSError:
+                _cur = ''
+            if _cur != (_lists.get(_label, '') or ''):
+                _out.append((_label, _path))
+        return _out
+
     def _apply_canonical_config(self, fetched_dir, head):
         """Verify + apply the mirror's canonical pkg.list/pool.list (from the
         fetched coord tree) against the signed head's config_sha256.  Silent
         no-op when the head carries no config pin (owner hasn't published one
-        yet); loud on a verified apply or a verify failure."""
+        yet); loud on a verified apply or a verify failure.
+
+        LOCAL-AHEAD GUARD (2026-07-12): when the fetched pin EQUALS our own
+        local coord-head's config_sha256, the federation carries nothing we
+        don't already know — an apply would only clobber local
+        not-yet-published selection edits (a `cache select` addition was
+        silently reverted by the next `mirror pull`; the ffmpegthumbnailer
+        incident).  Skip the overwrite (and the selection.state reseed) and
+        keep local state.  A genuinely NEW remote pin still applies, but any
+        differing local list is backed up to `<path>.pre-pull` first so
+        operator edits stay recoverable."""
+        import shutil
+        import signing
         import coord.config_manifest as _cfgman
+        import coord.head as _head_mod
         _sha = head.get('config_sha256') if isinstance(head, dict) else None
         if not _sha:
             return
+        _local_head = _head_mod.read_coord_head(
+            self.config.dir_coord, signing.signing_home(self.config))
+        _local_sha = (_local_head or {}).get('config_sha256')
+        if _local_sha and str(_local_sha) == str(_sha):
+            _drift = self._local_lists_drift(fetched_dir)
+            if _drift:
+                _names = ', '.join(_l for _l, _ in _drift)
+                console.print(
+                    f"  config: unchanged on mirror — local selection edits "
+                    f"KEPT ({_names}); `mirror publish` propagates them",
+                    tui.COLOR_INFO)
+            else:
+                console.print("  config: unchanged (matches local)",
+                              tui.COLOR_INFO)
+            return
+        _drift = self._local_lists_drift(fetched_dir)
+        for _label, _path in _drift:
+            try:
+                shutil.copy2(_path, _path + '.pre-pull')
+            except OSError:
+                pass
         _ok, _detail, _payload = _cfgman.apply_canonical_config(
             fetched_dir, str(_sha),
             self.config.pkglist_path, self.config.poollist_path,
@@ -3624,6 +3692,12 @@ class MirrorCommandsMixin(SessionState):
         console.print(
             f"  config: {_detail if _ok else 'NOT applied (' + _detail + ')'}",
             tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_WARNING)
+        if _ok and _drift:
+            _names = ', '.join(_l for _l, _ in _drift)
+            console.print(
+                f"  config: local edits OVERWRITTEN by the new federation "
+                f"config ({_names}) — pre-pull copies at <list>.pre-pull",
+                tui.COLOR_WARNING)
         if _ok and _payload is not None:
             self._seed_selection_from_payload(_payload)
         if _ok:
