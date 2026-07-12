@@ -148,3 +148,4 @@ firmware-brcm80211
 #   GPU + broad misc device firmware
 firmware-amd-graphics
 firmware-misc-nonfree
+ffmpegthumbnailer
