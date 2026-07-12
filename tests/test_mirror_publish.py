@@ -4542,6 +4542,49 @@ def test_mirror_pull_progress_is_byte_sized_with_pkg_label():
 
 
 
+def test_mirror_pull_restores_missing_own_files():
+    """Skip-own with restore-missing (2026-07-12): an OWN claim's file that
+    is MISSING from repo/ is downloaded back and verified against our own
+    signed claim sha (fresh-machine recovery), while a PRESENT own file is
+    never touched and a build record pinning a DIFFERENT sha blocks the
+    restore (local-ahead awaiting reclaim).  Pins:
+      - both walk branches route own claims through _restore_own_file
+        (no bare `_skip_own += 1` remains at the walk level)
+      - the restore path sha-verifies and unlinks on mismatch
+      - the local-ahead guard reads the build record's output_hashes
+      - the restore path writes NO build record (own records are already
+        authoritative — no _per_pkg_downloads append)"""
+    import re
+    _p = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_mirror.py')
+    with open(_p) as _fh:
+        _body = _fh.read()
+    _m = re.search(r'def cmd_mirror_pull\(self.*?(?=\n    def )',
+                   _body, re.DOTALL)
+    assert _m, "cmd_mirror_pull not found"
+    _src = _m.group(0)
+    assert '_restore_own_file(_fn, _claim)' in _src, \
+        "ledger walk must route own claims through _restore_own_file"
+    assert '_restore_own_file(_fn, _c)' in _src, \
+        "fallback walk must route own claims through _restore_own_file"
+    # after the closure defs, the walk bodies must not bare-skip own claims
+    _walks = _src.split('# Fetch + verify the signed closure ledger', 1)[1]
+    assert '_skip_own += 1' not in _walks, \
+        "walk level must not bare-skip own claims anymore"
+    _rof = re.search(
+        r'def _restore_own_file\(.*?(?=\n            # Fetch \+ verify)',
+        _src, re.DOTALL)
+    assert _rof, "_restore_own_file closure not found"
+    _r = _rof.group(0)
+    assert 'read_build_record' in _r and 'output_hashes' in _r, \
+        "local-ahead guard must consult the build record hashes"
+    assert 'get_sha256' in _r and 'os.unlink' in _r, \
+        "restore must sha-verify and remove a mismatched download"
+    _r_body = _r.split('"""', 2)[2]        # past the docstring
+    assert '_per_pkg_downloads' not in _r_body, \
+        "restore path must not write build records for own files"
+
+
+
 def test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base():
     """Phase 8 publish gate: BLOCK when build snapshot.current < mirror.base.
     Surfaces an actionable error + leaves no state change."""
@@ -5185,6 +5228,7 @@ TESTS = [
     test_cmd_mirror_dispatch_routes_audit_and_query,
     test_cmd_mirror_dispatch_routes_reclaim,
     test_mirror_pull_progress_is_byte_sized_with_pkg_label,
+    test_mirror_pull_restores_missing_own_files,
     test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base,
     test_cmd_mirror_summary_we_own_counts_non_retracted_claims,
     test_cmd_mirror_query_reports_no_match,
