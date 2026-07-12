@@ -447,7 +447,6 @@ class SourceCommandsMixin(SessionState):
         regardless of version shape (force_class).
 
         Usage: source emit [<pkg>…] [force]"""
-        import source_emit as _se
         _force = 'force' in args
         _names = [a for a in args
                   if not a.startswith('-') and a != 'force']
@@ -477,72 +476,15 @@ class SourceCommandsMixin(SessionState):
                            label_width=26, bar_width=20)
         for _src in _targets:
             _bar.label(_src)
-            _rec = utils.read_build_record(_blog, _src)
-            if _rec is None or _rec.get('phase') not in ('done', 'tunneled'):
-                _skipped += 1
-                _bar.step(1)
-                continue
-            # Fast path: the record says this source was already emitted
-            # and every file is on disk with a matching sha — trust the
-            # HMAC-signed record + disk hash instead of re-deriving the
-            # whole emit (a re-emit source costs an extract+repack cycle).
-            # `force` re-derives everything (byte-verifying re-run).
-            if not _force and self._emit_already_placed(_rec, _codename):
-                if (_rec.get('source_emit_class') or '') == 'verbatim':
-                    _verbatim += 1
-                else:
-                    _emitted += 1
-                _bar.step(1)
-                continue
-            _dsc = _se.find_dsc(_src, _search)
-            if _dsc is None:
-                console.print(
-                    f"  {_src}: no .dsc found (run `source sync`) — skipped",
-                    tui.COLOR_WARNING)
-                _failed += 1
-                _bar.step(1)
-                continue
-            # P: the OUTPUT filenames are the shipped truth (older
-            # records' intended_version predates the transpose stamp).
-            _p = _se.patch_level_from_outputs(_rec.get('outputs') or [])
-            if _p == 0:
-                _p = _se.patch_level_from_version(
-                    str(_rec.get('intended_version')
-                        or _rec.get('built_version') or ''))
-            # patches applied iff the BUILD applied them (record hash);
-            # a patch dir added after the build must not leak in.
-            _was_patched = (_rec.get('patch_set_hash') or '') not in (
-                '', utils.EMPTY_PATCH_SET_HASH)
-            _comp = str(_rec.get('component') or 'main')
-            _out_dir = os.path.join(
-                self.config.dir_repo, 'dists', _codename, _comp, 'source')
-            _fclass = ('verbatim'
-                       if (_rec.get('phase') == 'tunneled'
-                           or _src in _tunneled) else None)
-            try:
-                _res = _se.emit_source(
-                    _dsc, _out_dir,
-                    codename=_codename,
-                    distribution=str(self.config.build_distribution),
-                    patch_root=(os.path.join(
-                        self.config.working_dir, 'patch', 'source')
-                        if _was_patched else ''),
-                    patch_level=_p,
-                    work_root=_work_root,
-                    keep_binnmu_names=_keep,
-                    force_class=_fclass)
-            except _se.SourceEmitError as _e:
-                console.print(f"  {_src}: emit FAILED — {_e}",
-                              tui.COLOR_ERROR)
-                _failed += 1
-                _bar.step(1)
-                continue
-            _se.apply_emit_to_record(_rec, _res)
-            utils.write_build_record(_blog, _rec)
-            if _res['status'] == 'verbatim':
+            _st = self._emit_one_source(_src, force=_force)
+            if _st in ('verbatim', 'fast-verbatim'):
                 _verbatim += 1
-            else:
+            elif _st in ('emitted', 'fast-emitted'):
                 _emitted += 1
+            elif _st == 'skipped':
+                _skipped += 1
+            else:
+                _failed += 1
             _bar.step(1)
         _bar.close()
         console.print(
@@ -550,6 +492,89 @@ class SourceCommandsMixin(SessionState):
             f"skipped={_skipped} failed={_failed}",
             tui.COLOR_HIGHLIGHT if not _failed else tui.COLOR_ERROR)
         return _failed == 0
+
+    def _emit_one_source(self, src: str, force: bool = False) -> str:
+        """Emit the published source package for ONE source from its build
+        record (the shared body of `source emit` and the per-build hook).
+        Returns 'verbatim' | 'emitted' | 'fast-verbatim' | 'fast-emitted' |
+        'skipped' (no terminal record) | 'failed'."""
+        import source_emit as _se
+        _blog = os.path.join(self.config.dir_log, 'build')
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _rec = utils.read_build_record(_blog, src)
+        if _rec is None or _rec.get('phase') not in ('done', 'tunneled'):
+            return 'skipped'
+        # Fast path: prior emit fully on disk with matching sha — trust the
+        # HMAC-signed record + disk hash instead of re-deriving (a re-emit
+        # source costs an extract+repack cycle).  `force` re-derives.
+        if not force and self._emit_already_placed(_rec, _codename):
+            return ('fast-verbatim'
+                    if (_rec.get('source_emit_class') or '') == 'verbatim'
+                    else 'fast-emitted')
+        _dsc = _se.find_dsc(src, [self.config.dir_source,
+                                  self.config.dir_fork_source_repo])
+        if _dsc is None:
+            console.print(
+                f"  {src}: no .dsc found (run `source sync`) — skipped",
+                tui.COLOR_WARNING)
+            return 'failed'
+        # P: the OUTPUT filenames are the shipped truth (older records'
+        # intended_version predates the transpose stamp).
+        _p = _se.patch_level_from_outputs(_rec.get('outputs') or [])
+        if _p == 0:
+            _p = _se.patch_level_from_version(
+                str(_rec.get('intended_version')
+                    or _rec.get('built_version') or ''))
+        # patches applied iff the BUILD applied them (record hash); a patch
+        # dir added after the build must not leak in.
+        _was_patched = (_rec.get('patch_set_hash') or '') not in (
+            '', utils.EMPTY_PATCH_SET_HASH)
+        _comp = str(_rec.get('component') or 'main')
+        _out_dir = os.path.join(
+            self.config.dir_repo, 'dists', _codename, _comp, 'source')
+        _fclass = ('verbatim'
+                   if (_rec.get('phase') == 'tunneled'
+                       or src in (getattr(self.config, 'tunnel_packages',
+                                          ()) or ())) else None)
+        # extraction workspace on DISK — the tempdir default is the tmpfs
+        # /tmp, which firefox-esr's 3+ GB tree overflows (ENOSPC).
+        _work_root = os.path.join(self.config.dir_cache, 'source-emit')
+        os.makedirs(_work_root, exist_ok=True)
+        try:
+            _res = _se.emit_source(
+                _dsc, _out_dir,
+                codename=_codename,
+                distribution=str(self.config.build_distribution),
+                patch_root=(os.path.join(
+                    self.config.working_dir, 'patch', 'source')
+                    if _was_patched else ''),
+                patch_level=_p,
+                work_root=_work_root,
+                keep_binnmu_names=utils.tunneled_binary_names(
+                    self.config, self.cache),
+                force_class=_fclass)
+        except _se.SourceEmitError as _e:
+            console.print(f"  {src}: emit FAILED — {_e}", tui.COLOR_ERROR)
+            return 'failed'
+        _se.apply_emit_to_record(_rec, _res)
+        utils.write_build_record(_blog, _rec)
+        return str(_res['status'])
+
+    def _emit_after_build(self, src: str) -> None:
+        """Per-build hook (MAT-02 stage 3b): keep the published source pool
+        current as builds land, instead of relying on the backfill.
+        BEST-EFFORT — an emit problem must never fail a successful build;
+        the record simply lacks source_outputs and the next `source emit`
+        (or the audit) picks it up."""
+        try:
+            _st = self._emit_one_source(src)
+            if _st == 'failed':
+                logger.warning(f"source emit (post-build) {src}: failed — "
+                               "run `source emit` to retry")
+            else:
+                logger.info(f"source emit (post-build) {src}: {_st}")
+        except Exception as _e:                           # noqa: BLE001
+            logger.warning(f"source emit (post-build) {src}: {_e}")
 
     def _emit_already_placed(self, record, codename) -> bool:
         """True when the record carries a prior emit whose files are ALL
@@ -1814,6 +1839,7 @@ class SourceCommandsMixin(SessionState):
                     f"asg-bump: {_src_pkg.package} built but its +asg uN "
                     f"artifact is still absent — bump predicate/stamper "
                     f"mismatch; shipped unstamped this generation")
+            self._emit_after_build(_src_pkg.package)
             return ('built', 0)
         if _build_result:
             # Guard B: the build reported PASS but check_build
@@ -2059,6 +2085,7 @@ class SourceCommandsMixin(SessionState):
         _shutil.rmtree(_scratch, ignore_errors=True)
         logger.info(
             f"remotebuild {_src.package} [PASS] — {len(_final)} artifact(s)")
+        self._emit_after_build(_src.package)
         return ('built', 0)
 
     def _remotebuild_fanout(self, packages, remotes, profile_override, force,

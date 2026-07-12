@@ -512,6 +512,10 @@ class TunnelCommandsMixin(SessionState):
                 _origin = sorted(_upstream_urls.values())[0].rsplit('/', 1)[0]
                 console.print(f"    origin    {_shorten_origin(_origin)}/")
 
+        if _success:
+            # MAT-02 stage 3b: keep the published source pool current — the
+            # tunnelled source republishes verbatim (best-effort).
+            self._emit_after_build(src_pkg.package)
         return _success
 
 

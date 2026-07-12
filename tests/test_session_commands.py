@@ -50,9 +50,10 @@ def test_source_emit_command_wired_and_record_safe():
     with open(_cp) as _fh:
         _c = _fh.read()
     import re as _re
-    _m = _re.search(r'def cmd_source_emit\(self.*?(?=\n    def )', _c,
+    assert 'cmd_source_emit' in _c, 'cmd_source_emit not found'
+    _m = _re.search(r'def _emit_one_source\(self.*?(?=\n    def )', _c,
                     _re.DOTALL)
-    assert _m, 'cmd_source_emit not found'
+    assert _m, '_emit_one_source not found'
     _src = _m.group(0)
     assert 'apply_emit_to_record' in _src and 'write_build_record' in _src
     assert "force_class" in _src and "'tunneled'" in _src, \
@@ -60,6 +61,21 @@ def test_source_emit_command_wired_and_record_safe():
     assert "_rec['outputs']" not in _src and \
         "_rec['output_hashes']" not in _src, \
         'emit must not touch the .deb output keys'
+    # stage 3b: the per-build hook keeps the source pool current — wired on
+    # the local build, remotebuild and tunnel success paths, and BEST-EFFORT
+    # (an emit problem must never fail a successful build).
+    _hm = _re.search(r'def _emit_after_build\(self.*?(?=\n    def )', _c,
+                     _re.DOTALL)
+    assert _hm, '_emit_after_build not found'
+    assert 'except Exception' in _hm.group(0), \
+        'post-build emit must be best-effort'
+    assert _c.count('self._emit_after_build(') >= 2, \
+        'local build + remotebuild success paths must emit'
+    _tp = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_tunnel.py')
+    with open(_tp) as _fh:
+        _t = _fh.read()
+    assert 'self._emit_after_build(' in _t, \
+        'tunnel success path must emit the verbatim source'
 
 
 def test_startup_banner_runs_config_check():
