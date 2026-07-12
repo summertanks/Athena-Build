@@ -296,6 +296,128 @@ def test_transpose_control_text_keep_binnmu_names_exempts_tunneled_targets():
     assert _n2 == 0, (_n2, _out2)
 
 
+def test_source_package_version_predictor():
+    """MAT-02 D2: the published source's version == its binaries' version
+    minus any force-+bN layer (the source never moves on a forced rebuild)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import source_package_version
+    assert source_package_version('2.36-9+deb12u14', 'asg', 1) \
+        == '2.36-9+asg1u14'
+    assert source_package_version('5.2.15-2', 'asg', 1) == '5.2.15-2'
+    assert source_package_version('5.2.15-2', 'asg', 1, 1) \
+        == '5.2.15-2+asg1u0+p1'
+    assert source_package_version('1:2.39.5-0+deb12u3', 'asg', 1, 2) \
+        == '1:2.39.5-0+asg1u3+p2'
+
+
+def test_transpose_ceiling_dot_tail_transposes():
+    """Oracle-2 class 2: a punctuation-only tail after the debNuK ordinal
+    (`.0` apt-ceiling, `.1~`) must not block the transpose — erlang's
+    `<< X+deb12u1.0` / mosquitto's `<< X+deb12u1.1~` ceilings otherwise
+    stay Debian-flavoured and wrongly ADMIT our +asg versions (asg < deb),
+    allowing version skew upstream forbids."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import transpose
+    assert transpose('1:25.2.3+dfsg-1+deb12u1.0', 'asg', 1) \
+        == '1:25.2.3+dfsg-1+asg1u1.0'
+    assert transpose('2.0.11-1.2+deb12u1.1~', 'asg', 1) \
+        == '2.0.11-1.2+asg1u1.1~'
+    # plain forms unchanged in behaviour
+    assert transpose('2.36-9+deb12u14', 'asg', 1) == '2.36-9+asg1u14'
+    assert transpose('0.8.0-2+deb12u1~', 'asg', 1) == '0.8.0-2+asg1u1~'
+    # dot-tail on a NON-deb token: untouched
+    assert transpose('1.0-2+b1.0', 'asg', 1) == '1.0-2+b1.0'
+
+
+def test_transpose_constraint_strips_legacy_binnmu_bound():
+    """Oracle-2 class 1: the legacy no-'+' binNMU form in a CONSTRAINT bound
+    (gnome-contacts' `libfolks-dev (>= 0.15.5-2b)`) is stripped so the floor
+    lands on the version our repo actually ships; the Version field is never
+    touched by the legacy strip (bounds-only rule)."""
+    from utils import transpose_control_text
+    _ctrl = (
+        'Package: gnome-contacts\n'
+        'Version: 43.1-2b\n'                     # pathological, NOT stripped
+        'Depends: libfolks-dev (>= 0.15.5-2b), other (>= 1.0-2b1)\n'
+        'Description: x\n'
+    )
+    _out, _n = transpose_control_text(_ctrl, 'asg', 1)
+    assert '(>= 0.15.5-2)' in _out
+    assert 'other (>= 1.0-2)' in _out
+    assert 'Version: 43.1-2b' in _out            # Version field untouched
+    _out2, _n2 = transpose_control_text(_out, 'asg', 1)
+    assert _n2 == 0, (_n2, _out2)
+
+
+def test_transpose_deb_source_annotation_cases():
+    """MAT-02 D3: the binary's Source: reference must point at the PUBLISHED
+    source package's version.
+      (a) tunnel: explicit source_version stamps the UPSTREAM source version
+          (tunnelled sources are republished verbatim);
+      (b) cross-base annotation: an upstream `Source: n (v+debNuK)` is
+          transposed (+ uniform +pP);
+      (c) forced rebuild: +bN is binary-only — the stamp is sans-+bN;
+      (d) a re-normalise pass over (b)'s output (P=0 — the only repeated
+          shape in production; transpose_deb is never re-invoked with P>0
+          on its own output) is a no-op: the already-stamped annotation is
+          kept verbatim, not double-suffixed."""
+    import subprocess
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import transpose_deb
+    if not _have_dpkg_deb():
+        print("SKIP test_transpose_deb_source_annotation_cases (no dpkg-deb)")
+        return
+
+    def _mk(_tmp, tag, ctrl, fname):
+        _work = os.path.join(_tmp, f'src-{tag}')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as _fh:
+            _fh.write(ctrl)
+        _p = os.path.join(_tmp, fname)
+        subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _p],
+                       check=True, capture_output=True)
+        return _p
+
+    def _field(path, field):
+        return subprocess.run(
+            ['dpkg-deb', '-f', path, field],
+            check=True, capture_output=True, text=True).stdout.strip()
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        # (a) tunnel stamp: version transposes ~deb→~asg, Source pins upstream
+        _a = _mk(_tmp, 'a',
+                 'Package: shim-signed\nVersion: 1.44~1+deb12u1\n'
+                 'Architecture: amd64\nMaintainer: T <t@l>\nDescription: x\n',
+                 'shim-signed_1.44~1+deb12u1_amd64.deb')
+        _ra = transpose_deb(_a, 'asg', 1, source_version='1.44~1+deb12u1')
+        assert _ra['status'] == 'rewritten', _ra
+        assert _field(_ra['new_path'], 'Source') \
+            == 'shim-signed (1.44~1+deb12u1)'
+        assert _field(_ra['new_path'], 'Version') == '1.44~1+asg1u1'
+        # (b) cross-base annotation transposed + patch level
+        _b = _mk(_tmp, 'b',
+                 'Package: comerr-dev\nVersion: 2.1-1.47.0-2+deb12u1\n'
+                 'Source: e2fsprogs (1.47.0-2+deb12u1)\n'
+                 'Architecture: amd64\nMaintainer: T <t@l>\nDescription: x\n',
+                 'comerr-dev_2.1-1.47.0-2+deb12u1_amd64.deb')
+        _rb = transpose_deb(_b, 'asg', 1, patch_level=1)
+        assert _field(_rb['new_path'], 'Source') \
+            == 'e2fsprogs (1.47.0-2+asg1u1+p1)'
+        assert _field(_rb['new_path'], 'Version') == '2.1-1.47.0-2+asg1u1+p1'
+        # (d) re-normalise pass (P=0) over (b)'s output: no-op
+        _rb2 = transpose_deb(_rb['new_path'], 'asg', 1)
+        assert _rb2['status'] == 'unchanged', _rb2
+        # (c) force: binary gets +bN, Source stamp is sans-+bN
+        _c = _mk(_tmp, 'c',
+                 'Package: relinked\nVersion: 1.0-2\n'
+                 'Architecture: amd64\nMaintainer: T <t@l>\nDescription: x\n',
+                 'relinked_1.0-2_amd64.deb')
+        _rc = transpose_deb(_c, 'asg', 1, force_bn=1)
+        assert _field(_rc['new_path'], 'Version') == '1.0-2+asg1u0+b1'
+        assert _field(_rc['new_path'], 'Source') == 'relinked (1.0-2)'
+
+
 def test_tunneled_binary_names_resolves_from_cache():
     """utils.tunneled_binary_names maps every [Source] Tunneled source to its
     binary names via cache.source_hashtable (the keep_binnmu_names feed for
@@ -1502,6 +1624,10 @@ TESTS = [
     test_transpose_control_text_version_deps_and_provenance,
     test_transpose_control_text_strips_binnmu_from_constraint_bounds,
     test_transpose_control_text_keep_binnmu_names_exempts_tunneled_targets,
+    test_source_package_version_predictor,
+    test_transpose_ceiling_dot_tail_transposes,
+    test_transpose_constraint_strips_legacy_binnmu_bound,
+    test_transpose_deb_source_annotation_cases,
     test_tunneled_binary_names_resolves_from_cache,
     test_transpose_control_text_no_token_is_noop_no_provenance,
     test_transpose_scheme_boundary_table_and_ordering,

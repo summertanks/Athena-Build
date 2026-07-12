@@ -42,6 +42,7 @@ from bump import (
     compute_transposed_versions as compute_transposed_versions,
     decide_patch_bump_count as decide_patch_bump_count,
     strip_binNMU as strip_binNMU,
+    source_package_version as source_package_version,
     strip_nmu_from_control_text as strip_nmu_from_control_text,
     strip_nmu_from_deb as strip_nmu_from_deb,
     strip_nmu_suffix as strip_nmu_suffix,

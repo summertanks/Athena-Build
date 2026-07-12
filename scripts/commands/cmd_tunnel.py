@@ -338,9 +338,13 @@ class TunnelCommandsMixin(SessionState):
                 if _release is not None:
                     _b = os.path.basename(_ups_path)
                     try:
+                        # source_version: tunnelled sources are republished
+                        # VERBATIM (MAT-02 D1), so the binary's Source:
+                        # reference must pin the UPSTREAM source version.
                         _r = utils.transpose_deb(
                             _ups_path, 'asg', _release,
-                            keep_binnmu_names=frozenset(_keep_bn))
+                            keep_binnmu_names=frozenset(_keep_bn),
+                            source_version=str(src_pkg.version))
                         _new_path = _r.get('new_path', _ups_path)
                         if (_r.get('status') == 'rewritten'
                                 and _new_path != _ups_path):
