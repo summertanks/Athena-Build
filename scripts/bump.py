@@ -138,6 +138,16 @@ _NMU_STRIP_FIELDS = (
     'Enhances', 'Provides', 'Conflicts', 'Breaks', 'Replaces',
 )
 
+# The SOURCE-side relation field set (MAT-02 D4): a source package's
+# debian/control (and its .dsc) additionally carries the build relations.
+# `+asg` sorts BELOW `+deb`, so an untransposed Build-Depends floor
+# referencing a Debian update is unsatisfiable against our repo — the
+# emitted native source must have these rewritten like everything else.
+SOURCE_RELATION_FIELDS = _NMU_STRIP_FIELDS + (
+    'Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch',
+    'Build-Conflicts', 'Build-Conflicts-Indep', 'Build-Conflicts-Arch',
+)
+
 
 def normalize_repo_filename(filename: str) -> str:
     """Map an upstream Packages-index Filename to its repo/main on-disk
@@ -414,7 +424,8 @@ def find_matching_artifact(dst_dir: str,
 def _rewrite_control_text(
         content: str,
         version_op: 'Callable[[str], str]',
-        constraint_op: 'Optional[Callable[[str, Optional[str]], str]]' = None
+        constraint_op: 'Optional[Callable[[str, Optional[str]], str]]' = None,
+        fields: 'Optional[tuple]' = None
         ) -> 'tuple[str, int]':
     """Shared scaffold for :func:`strip_nmu_from_control_text` and
     :func:`transpose_control_text`.  Applies ``version_op`` (a version-string
@@ -504,12 +515,13 @@ def _rewrite_control_text(
         _prefix = f'{_name}{_tail}' if _name is not None else ''
         return f'{_prefix}({_op} {_new_ver})'
 
+    _fields = fields if fields is not None else _NMU_STRIP_FIELDS
     _new_lines: 'list[str]' = []
     _in_target = False
     for _line in _content.splitlines(keepends=True):
         if _line and _line[0] not in (' ', '\t'):
             _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
-            _in_target = _m is not None and _m.group(1) in _NMU_STRIP_FIELDS
+            _in_target = _m is not None and _m.group(1) in _fields
         # (continuation lines inherit the surrounding _in_target state)
         if _in_target:
             _new_lines.append(_constraint_re.sub(_sub_constraint, _line))
@@ -856,6 +868,48 @@ def compute_transposed_versions(
     }
 
 
+def _make_transpose_constraint_op(prefix: str, release: int,
+                                  keep_binnmu_names: 'Optional[frozenset]'):
+    """The shared CONSTRAINT op of the transpose scheme (one home —
+    transpose_control_text and transpose_source_relations must never
+    drift): strip the Debian binNMU/backport layer (modern +bN/~bpoN+M and
+    the legacy bare-`Nb` bound form) then transpose, EXCEPT bounds whose
+    target is a tunnelled binary (shipped verbatim — keep the layer) and
+    bounds already carrying OUR +asg chain (a force-rebuild pin)."""
+    def _constraint_op(_v: str, _name: 'Optional[str]') -> str:
+        if _name is not None and keep_binnmu_names \
+                and _name in keep_binnmu_names:
+            return transpose(_v, prefix, release)
+        if parse_asg_suffix(_v) is not None:
+            return transpose(_v, prefix, release)
+        _stripped = strip_binNMU(_v)[0]
+        _stripped = _LEGACY_BINNMU_BOUND_RE.sub('', _stripped)
+        return transpose(_stripped, prefix, release)
+    return _constraint_op
+
+
+def transpose_source_relations(content: str, prefix: str, release: int,
+                               keep_binnmu_names: 'Optional[frozenset]' = None
+                               ) -> 'tuple[str, int]':
+    """Transpose every literal version constraint in a SOURCE control text —
+    a source-tree ``debian/control`` (multi-stanza) or a ``.dsc`` body — over
+    the SOURCE field set: the nine runtime relation fields PLUS
+    ``Build-Depends*`` / ``Build-Conflicts*`` (MAT-02 D4).
+
+    Same constraint op as :func:`transpose_control_text` (binNMU/backport/
+    legacy strip, tunnelled-target exemption, +asg guard).  Substvars
+    (``${binary:Version}`` …) pass through untouched.  A source control has
+    no ``Version:`` field (the version lives in the changelog), so the
+    version op and the provenance X-field never fire on it; on a ``.dsc``
+    body the Version field transposes, which matches the emitted source's
+    version.  Idempotent."""
+    return _rewrite_control_text(
+        content, lambda _v: transpose(_v, prefix, release),
+        constraint_op=_make_transpose_constraint_op(
+            prefix, release, keep_binnmu_names),
+        fields=SOURCE_RELATION_FIELDS)
+
+
 def source_package_version(source_version: str, prefix: str, release: int,
                            patch_level: int = 0) -> str:
     """The version the PUBLISHED source package carries (MAT-02 D2):
@@ -928,28 +982,10 @@ def transpose_control_text(content: str, prefix: str, release: int,
     wrapper over :func:`_rewrite_control_text` with a transpose-only Version op
     and a binNMU-stripping CONSTRAINT op (see below).
     """
-    def _constraint_op(_v: str, _name: 'Optional[str]') -> str:
-        # Constraint bounds reference OTHER packages' versions; a Debian
-        # binNMU (+bN) / backport (~bpoN+M) layer on them is buildd metadata
-        # that doesn't exist in our repo, so strip it BEFORE transposing the
-        # trailing +deb token (leaving +deb / embedded +deb / +nmuN / +dfsg
-        # intact — strip_binNMU is narrow).  EXEMPT: a bound targeting a
-        # tunnelled binary (keep_binnmu_names) — its shipped version KEEPS
-        # the layer, so the bound must too.  GUARD: a bound that already
-        # carries OUR +asg force level (+asg…+bN) is ours, not Debian's —
-        # leave it to transpose() untouched so a re-normalise pass can't strip
-        # a legitimate force-rebuild pin.
-        if _name is not None and keep_binnmu_names \
-                and _name in keep_binnmu_names:
-            return transpose(_v, prefix, release)
-        if parse_asg_suffix(_v) is not None:
-            return transpose(_v, prefix, release)
-        _stripped = strip_binNMU(_v)[0]
-        _stripped = _LEGACY_BINNMU_BOUND_RE.sub('', _stripped)
-        return transpose(_stripped, prefix, release)
     return _rewrite_control_text(
         content, lambda _v: transpose(_v, prefix, release),
-        constraint_op=_constraint_op)
+        constraint_op=_make_transpose_constraint_op(
+            prefix, release, keep_binnmu_names))
 
 
 # Exact-pin matcher: a `<name> (= <version>)` constraint inside a relation

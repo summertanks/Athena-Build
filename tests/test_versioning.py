@@ -418,6 +418,133 @@ def test_transpose_deb_source_annotation_cases():
         assert _field(_rc['new_path'], 'Source') == 'relinked (1.0-2)'
 
 
+def test_transpose_source_relations_build_fields_and_substvars():
+    """MAT-02 D4: the SOURCE field set — Build-Depends*/Build-Conflicts* are
+    transposed alongside the runtime fields in a multi-stanza source
+    debian/control; substvars pass through; unrelated fields untouched;
+    idempotent.  (The binary transpose path's field set is unchanged.)"""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from bump import transpose_source_relations
+    _ctrl = (
+        'Source: demo\n'
+        'Build-Depends: debhelper-compat (= 13),\n'
+        ' libfoo-dev (>= 1.2-3+deb12u1) [amd64] <!nocheck>,\n'
+        ' libbar-dev (= 2.0-1+b3)\n'
+        'Build-Conflicts: oldtool (<< 5.5+deb12u2)\n'
+        'Build-Depends-Indep: docgen (>= 0.15.5-2b)\n'
+        '\n'
+        'Package: demo-bin\n'
+        'Architecture: any\n'
+        'Depends: ${shlibs:Depends}, demo-data (= ${source:Version}),\n'
+        ' other (>= 1.0-1+deb12u1)\n'
+        'Description: source-relations coverage\n'
+    )
+    _out, _n = transpose_source_relations(_ctrl, 'asg', 1)
+    assert 'libfoo-dev (>= 1.2-3+asg1u1) [amd64] <!nocheck>' in _out
+    assert 'libbar-dev (= 2.0-1)' in _out            # +b3 stripped
+    assert 'oldtool (<< 5.5+asg1u2)' in _out         # Build-Conflicts too
+    assert 'docgen (>= 0.15.5-2)' in _out            # legacy Nb stripped
+    assert 'debhelper-compat (= 13)' in _out         # no layer → unchanged
+    assert '${shlibs:Depends}' in _out               # substvars untouched
+    assert 'demo-data (= ${source:Version})' in _out
+    assert 'other (>= 1.0-1+asg1u1)' in _out         # binary stanza Depends
+    _out2, _n2 = transpose_source_relations(_out, 'asg', 1)
+    assert _n2 == 0, (_n2, _out2)
+
+
+def _make_native_source(tmp, name, version, build_depends=''):
+    """Fixture: a minimal 3.0 (native) source package; returns its .dsc."""
+    import subprocess
+    _tree = os.path.join(tmp, f'{name}-tree')
+    os.makedirs(os.path.join(_tree, 'debian', 'source'))
+    with open(os.path.join(_tree, 'debian', 'source', 'format'), 'w') as _f:
+        _f.write('3.0 (native)\n')
+    _bd = f'Build-Depends: {build_depends}\n' if build_depends else ''
+    with open(os.path.join(_tree, 'debian', 'control'), 'w') as _f:
+        _f.write(f'Source: {name}\nMaintainer: T <t@l>\n{_bd}\n'
+                 f'Package: {name}\nArchitecture: all\n'
+                 'Description: emit fixture\n fixture body\n')
+    with open(os.path.join(_tree, 'debian', 'changelog'), 'w') as _f:
+        _f.write(f'{name} ({version}) bookworm; urgency=medium\n\n'
+                 '  * Fixture entry.\n\n'
+                 ' -- Up Stream <up@stream>  Sun, 06 Jul 2026 00:00:00 +0000\n')
+    subprocess.run(['dpkg-source', '-b', _tree], cwd=tmp,
+                   check=True, capture_output=True)
+    _noepoch = version.split(':', 1)[-1]
+    return os.path.join(tmp, f'{name}_{_noepoch}.dsc')
+
+
+def test_source_emit_classify_verbatim_and_reemit():
+    """MAT-02 D1/D2 end-to-end on the emit engine:
+      - pristine source → verbatim: bytes in out_dir identical to input
+      - pristine source with a Debian-layer Build-Depends literal → DEMOTED
+        to reemit (D1 demotion rule)
+      - +debNuK source → reemit at the transposed version with a synthesized
+        top changelog entry, transposed relations, and DETERMINISTIC output
+        (two independent emits byte-identical)
+      - append-only: a same-name different-bytes collision in out_dir raises"""
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import source_emit as SE
+    if not _have_dpkg_deb():
+        print("SKIP test_source_emit_classify_verbatim_and_reemit (no dpkg)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        # verbatim
+        _dsc = _make_native_source(_tmp, 'pristine', '1.0')
+        _out1 = os.path.join(_tmp, 'out1')
+        _r = SE.emit_source(_dsc, _out1)
+        assert _r['status'] == 'verbatim', _r
+        assert _r['version'] == '1.0'
+        for _f, _sha in _r['files'].items():
+            assert SE._sha256(os.path.join(_tmp, _f)) == _sha, _f
+        # demotion: pristine version, Debian-layer literal in Build-Depends
+        _dsc2 = _make_native_source(_tmp, 'demoted', '2.0',
+                                    'libx-dev (>= 1.2-3+deb12u1)')
+        _r2 = SE.emit_source(_dsc2, _out1)
+        assert _r2['status'] == 'emitted', _r2
+        assert _r2['version'] == '2.0'
+        # transposed reemit, deterministic
+        _dsc3 = _make_native_source(_tmp, 'moved', '3.0+deb12u2',
+                                    'liby-dev (= 4.0-1+b2)')
+        _outa = os.path.join(_tmp, 'outa')
+        _outb = os.path.join(_tmp, 'outb')
+        _ra = SE.emit_source(_dsc3, _outa)
+        _rb = SE.emit_source(_dsc3, _outb)
+        assert _ra['status'] == 'emitted' and _ra['version'] == '3.0+asg1u2'
+        assert 'moved_3.0+asg1u2.dsc' in _ra['files'], _ra['files']
+        assert _ra['files'] == _rb['files'], 'non-deterministic emit'
+        _newdsc = os.path.join(_outa, 'moved_3.0+asg1u2.dsc')
+        _txt = open(_newdsc).read()
+        assert 'liby-dev (= 4.0-1)' in _txt          # build-dep transposed
+        assert 'Version: 3.0+asg1u2' in _txt
+        # append-only conflict
+        _victim = os.path.join(_outa, 'moved_3.0+asg1u2.dsc')
+        with open(_victim, 'a') as _f:
+            _f.write('# corrupted\n')
+        try:
+            SE.emit_source(_dsc3, _outa)
+            raise AssertionError('same-name different-bytes must raise')
+        except SE.SourceEmitError as _e:
+            assert 'append-only' in str(_e)
+
+
+def test_source_emit_environment_mode_helpers():
+    """MAT-02 D4b: os-release ID parsing + the transpose-mode decision —
+    debian container → transpose applies; the native distribution → it must
+    not (callers refuse loudly on mismatch)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import source_emit as SE
+    _deb = 'PRETTY_NAME="Debian GNU/Linux 12"\nID=debian\n'
+    _asg = 'PRETTY_NAME="Asgard 1 (thor)"\nID=asgard\nID_LIKE=debian\n'
+    assert SE.environment_id(_deb) == 'debian'
+    assert SE.environment_id(_asg) == 'asgard'
+    assert SE.environment_id('no id here') == ''
+    assert SE.transpose_applies('debian', 'asgard') is True
+    assert SE.transpose_applies('asgard', 'asgard') is False
+    assert SE.transpose_applies('asgard', 'Asgard') is False
+
+
 def test_tunneled_binary_names_resolves_from_cache():
     """utils.tunneled_binary_names maps every [Source] Tunneled source to its
     binary names via cache.source_hashtable (the keep_binnmu_names feed for
@@ -1628,6 +1755,9 @@ TESTS = [
     test_transpose_ceiling_dot_tail_transposes,
     test_transpose_constraint_strips_legacy_binnmu_bound,
     test_transpose_deb_source_annotation_cases,
+    test_transpose_source_relations_build_fields_and_substvars,
+    test_source_emit_classify_verbatim_and_reemit,
+    test_source_emit_environment_mode_helpers,
     test_tunneled_binary_names_resolves_from_cache,
     test_transpose_control_text_no_token_is_noop_no_provenance,
     test_transpose_scheme_boundary_table_and_ordering,
