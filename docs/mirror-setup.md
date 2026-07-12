@@ -817,15 +817,23 @@ publish reconciles them.
 
 ### `mirror pull` semantics
 
-`mirror pull` fills in what OTHER builders published; it is not a
-backup of your own work.  Rules worth internalising:
+`mirror pull` fills in what OTHER builders published, and restores our
+own published files that have gone missing locally.  Rules worth
+internalising:
 
-- **Skip-own (security rule).**  Pull NEVER downloads a claim signed
-  by our own builder id — the local build is the authority for our
-  packages.  Consequence: pull is NOT a restore path for our own lost
-  files.  Recovery from a wiped local pool is rebuild + `mirror
-  reclaim` (the rebuilt bytes won't match the published claim), or a
-  deliberate manual copy off the mirror.
+- **Skip-own (security rule), with restore-missing.**  A claim signed
+  by our own builder id never overwrites a PRESENT local file — the
+  local build is the authority for our packages, and a peer's claim
+  about a file we built is never accepted.  A file MISSING from the
+  local repo is different: pull downloads it back and verifies it
+  against our OWN Ed25519-signed claim sha (`restored_own=N` in the
+  summary), so a wiped pool or a fresh machine restores without a full
+  rebuild.  One guard: when the local build record pins a DIFFERENT
+  sha for the filename, the local state is *ahead* of the published
+  claim (a sanctioned repack awaiting `mirror reclaim`) — the restore
+  is refused loudly rather than clobbering the newer intent.  Restored
+  files get no new build record; our own records are already
+  authoritative.
 - **End-of-life states are skipped.**  Claims in `retracted` /
   `deprecated` / `obsolete` are never downloaded.
 - **Snapshot auto-adopt (forward-only).**  Pull reads the signed
