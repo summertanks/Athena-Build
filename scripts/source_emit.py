@@ -92,6 +92,48 @@ def parse_dsc(dsc_path: str) -> 'Dict[str, Any]':
             'body': _d.dump()}
 
 
+def patch_level_from_version(version: str) -> int:
+    """The uniform patch level P encoded in a shipped version's `+pP` tail
+    (0 when absent) — how the backfill recovers the P a build carried
+    without re-deriving the patch-set history."""
+    _m = re.search(r'\+p(\d+)', version or '')
+    return int(_m.group(1)) if _m else 0
+
+
+def find_dsc(source: str, search_dirs: 'List[str]') -> 'Optional[str]':
+    """Locate `<source>_*.dsc` across *search_dirs* (upstream `source/`,
+    fork `fork/source/repo/`).  Multiple versions → the highest (Debian
+    version compare via python-debian, no apt_pkg init needed)."""
+    _hits: 'List[str]' = []
+    for _d in search_dirs:
+        _hits.extend(glob.glob(os.path.join(_d, f'{source}_*.dsc')))
+    if not _hits:
+        return None
+    if len(_hits) == 1:
+        return _hits[0]
+    from debian.debian_support import Version as _V
+
+    def _ver(_p: str) -> '_V':
+        _raw = os.path.basename(_p)[len(source) + 1:-len('.dsc')]
+        return _V(_raw.replace('%3a', ':'))
+    return max(_hits, key=_ver)
+
+
+def apply_emit_to_record(record: 'Dict[str, Any]',
+                         result: 'Dict[str, Any]') -> 'Dict[str, Any]':
+    """Fold an emit result into a build record — under SEPARATE keys
+    (`source_outputs` / `source_output_hashes` / `source_emit_class`), never
+    `outputs`/`output_hashes`: every existing consumer of those (chroot
+    preflight, verify/refresh_output_hashes, reclaim's disk walk) locates
+    files through the .deb destination map and would misread a `.dsc`.
+    Claims/ledger read the new keys deliberately (MAT-02 stage 5).
+    Returns the mutated record (caller re-signs via write_build_record)."""
+    record['source_outputs'] = sorted(result.get('files') or {})
+    record['source_output_hashes'] = dict(result.get('files') or {})
+    record['source_emit_class'] = result.get('class', '')
+    return record
+
+
 def patches_for(patch_root: str, source: str, version: str) -> 'List[str]':
     """Our patch set for (source, version): sorted
     `patch/source/<src>/<version-noepoch>/*.patch` — the same set the build
@@ -151,6 +193,7 @@ def emit_source(dsc_path: str, out_dir: str, *,
                 patch_root: str = '',
                 patch_level: int = 0,
                 keep_binnmu_names: 'Optional[frozenset]' = None,
+                force_class: 'Optional[str]' = None,
                 work_root: 'Optional[str]' = None) -> 'Dict[str, Any]':
     """Produce the published source package for *dsc_path* into *out_dir*.
 
@@ -161,7 +204,8 @@ def emit_source(dsc_path: str, out_dir: str, *,
     (decide_patch_bump_count); the emitted version is
     source_package_version(upstream, P).  `keep_binnmu_names` is the
     tunnelled-binary exemption set, passed through to the relation
-    rewrite."""
+    rewrite.  `force_class='verbatim'` bypasses classify — the tunnelled
+    path (upstream source republished verbatim)."""
     import tempfile
     _info = parse_dsc(dsc_path)
     _src, _upver = _info['source'], _info['version']
@@ -170,7 +214,11 @@ def emit_source(dsc_path: str, out_dir: str, *,
         raise SourceEmitError(
             f'{_src}: patches present but patch_level={patch_level} — the '
             'emitted version must carry the binaries\' uniform +pP')
-    _class = classify(_info, bool(_patches), prefix, release)
+    # force_class='verbatim': the TUNNELLED path — we redistribute
+    # upstream's binaries unmodified, so the source republishes verbatim
+    # regardless of its version shape (MAT-02 D1); the binaries' Source:
+    # stamp (transpose_deb source_version) points at it.
+    _class = force_class or classify(_info, bool(_patches), prefix, release)
     _new_ver = source_package_version(_upver, prefix, release,
                                       patch_level=patch_level)
     os.makedirs(out_dir, exist_ok=True)
@@ -184,8 +232,12 @@ def emit_source(dsc_path: str, out_dir: str, *,
                 raise SourceEmitError(f'{_src}: referenced file missing: {_f}')
             _b, _sha = _place(_p, out_dir)
             _out[_b] = _sha
+        # a verbatim source PUBLISHES at its upstream version (for the
+        # pristine class the two are equal; for the tunnelled force-class
+        # the upstream version is the whole point — it is what the
+        # binaries' Source: stamp references).
         return {'status': 'verbatim', 'class': _class, 'source': _src,
-                'version': _new_ver, 'files': _out}
+                'version': _upver, 'files': _out}
 
     # ---- re-emit path ----
     with tempfile.TemporaryDirectory(prefix='source-emit-',

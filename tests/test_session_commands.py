@@ -36,6 +36,32 @@ from _test_helpers import (  # noqa: F401
 
 
 
+def test_source_emit_command_wired_and_record_safe():
+    """MAT-02 stage 3: `source emit` is dispatched from the source group and
+    the backfill writes SOURCE artifacts under separate record keys — never
+    the .deb-routed outputs/output_hashes (chroot preflight, hash refresh
+    and reclaim would misread a .dsc)."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as _fh:
+        _b = _fh.read()
+    assert "'emit':" in _b and 'cmd_source_emit' in _b, \
+        'source group must route emit -> cmd_source_emit'
+    _cp = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_source.py')
+    with open(_cp) as _fh:
+        _c = _fh.read()
+    import re as _re
+    _m = _re.search(r'def cmd_source_emit\(self.*?(?=\n    def )', _c,
+                    _re.DOTALL)
+    assert _m, 'cmd_source_emit not found'
+    _src = _m.group(0)
+    assert 'apply_emit_to_record' in _src and 'write_build_record' in _src
+    assert "force_class" in _src and "'tunneled'" in _src, \
+        'tunnelled records must republish verbatim (force_class)'
+    assert "_rec['outputs']" not in _src and \
+        "_rec['output_hashes']" not in _src, \
+        'emit must not touch the .deb output keys'
+
+
 def test_startup_banner_runs_config_check():
     """Startup banner is now `config check` (build identity + mirror
     reachability) — the old static Arch/Parent/Build/Mode header is retired."""
@@ -8840,6 +8866,7 @@ def test_do_tunnel_records_provenance_and_outputs():
 
 TESTS = [
     test_init_remote_builds_image_and_gates_localmirror,
+    test_source_emit_command_wired_and_record_safe,
     test_startup_banner_runs_config_check,
     test_container_init_remote_ensures_image,
     test_container_two_level_command_surface_wired,

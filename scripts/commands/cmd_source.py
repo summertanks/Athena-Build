@@ -427,6 +427,97 @@ class SourceCommandsMixin(SessionState):
             _findings.append((_p.package, _audit_state, _record_state))
         return _findings
 
+    def cmd_source_emit(self, *args):
+        """`source emit [<pkg>…]` — publish-side SOURCE packages (MAT-02
+        stage 3 backfill): for every built/tunnelled build record (or the
+        named subset), produce the published source package into
+        `dists/<codename>/<comp>/source/` via the source_emit engine —
+        pristine sources republished byte-verbatim, everything else
+        re-emitted deterministically at the binaries' version — and fold
+        the result into the build record (`source_outputs` /
+        `source_output_hashes`, SEPARATE from the .deb keys).
+
+        Retroactive: needs NO rebuild — emits from `source/` +
+        `patch/source/` (+ `fork/source/repo/` for forks).  Idempotent:
+        an existing identical file is skipped; same-name different-bytes
+        is a hard error (append-only).  Tunnelled sources are republished
+        verbatim regardless of version shape (force_class)."""
+        import source_emit as _se
+        _names = [a for a in args if not a.startswith('-')]
+        _blog = os.path.join(self.config.dir_log, 'build')
+        _all = sorted(
+            os.path.basename(_f)[:-len('.build.json')]
+            for _f in os.listdir(_blog) if _f.endswith('.build.json'))
+        _targets = _names or _all
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _keep = utils.tunneled_binary_names(self.config, self.cache)
+        if not _keep and self.cache is None:
+            console.print(
+                "source emit: cache not loaded — tunnelled-target bound "
+                "exemption degraded to empty (safe for the current archive; "
+                "run after `cache build` for full fidelity)",
+                tui.COLOR_WARNING)
+        _search = [self.config.dir_source,
+                   self.config.dir_fork_source_repo]
+        _tunneled = set(getattr(self.config, 'tunnel_packages', ()) or ())
+        _emitted = _verbatim = _skipped = _failed = 0
+        _bar = ProgressBar(label='source emit',
+                           maxvalue=max(len(_targets), 1),
+                           label_width=26, bar_width=20)
+        for _src in _targets:
+            _bar.label(_src)
+            _rec = utils.read_build_record(_blog, _src)
+            if _rec is None or _rec.get('phase') not in ('done', 'tunneled'):
+                _skipped += 1
+                _bar.step(1)
+                continue
+            _dsc = _se.find_dsc(_src, _search)
+            if _dsc is None:
+                console.print(
+                    f"  {_src}: no .dsc found (run `source sync`) — skipped",
+                    tui.COLOR_WARNING)
+                _failed += 1
+                _bar.step(1)
+                continue
+            _p = _se.patch_level_from_version(
+                str(_rec.get('intended_version')
+                    or _rec.get('built_version') or ''))
+            _comp = str(_rec.get('component') or 'main')
+            _out_dir = os.path.join(
+                self.config.dir_repo, 'dists', _codename, _comp, 'source')
+            _force = ('verbatim'
+                      if (_rec.get('phase') == 'tunneled'
+                          or _src in _tunneled) else None)
+            try:
+                _res = _se.emit_source(
+                    _dsc, _out_dir,
+                    codename=_codename,
+                    distribution=str(self.config.build_distribution),
+                    patch_root=os.path.join(
+                        self.config.working_dir, 'patch', 'source'),
+                    patch_level=_p,
+                    keep_binnmu_names=_keep,
+                    force_class=_force)
+            except _se.SourceEmitError as _e:
+                console.print(f"  {_src}: emit FAILED — {_e}",
+                              tui.COLOR_ERROR)
+                _failed += 1
+                _bar.step(1)
+                continue
+            _se.apply_emit_to_record(_rec, _res)
+            utils.write_build_record(_blog, _rec)
+            if _res['status'] == 'verbatim':
+                _verbatim += 1
+            else:
+                _emitted += 1
+            _bar.step(1)
+        _bar.close()
+        console.print(
+            f"source emit: verbatim={_verbatim} emitted={_emitted} "
+            f"skipped={_skipped} failed={_failed}",
+            tui.COLOR_HIGHLIGHT if not _failed else tui.COLOR_ERROR)
+        return _failed == 0
+
     def cmd_source_repair(self, *args):
         """Align build records with current source state.  MUTATOR.
 

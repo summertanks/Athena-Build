@@ -545,6 +545,43 @@ def test_source_emit_environment_mode_helpers():
     assert SE.transpose_applies('asgard', 'Asgard') is False
 
 
+def test_source_emit_backfill_helpers():
+    """MAT-02 stage 3 helpers: patch_level_from_version recovers the uniform
+    +pP from a shipped version; find_dsc resolves across search dirs and
+    picks the highest version; apply_emit_to_record folds results under
+    SEPARATE keys (never outputs/output_hashes — those are .deb-routed)."""
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import source_emit as SE
+    assert SE.patch_level_from_version('2.36-9+asg1u14+p3') == 3
+    assert SE.patch_level_from_version('5.2.15-2+asg1u0+p1') == 1
+    assert SE.patch_level_from_version('1.0-2') == 0
+    assert SE.patch_level_from_version('') == 0
+    with tempfile.TemporaryDirectory() as _tmp:
+        _a = os.path.join(_tmp, 'a')
+        _b = os.path.join(_tmp, 'b')
+        os.makedirs(_a)
+        os.makedirs(_b)
+        for _f in ('demo_1.0-1.dsc',):
+            open(os.path.join(_a, _f), 'w').write('x')
+        for _f in ('demo_1.0-2.dsc', 'other_9.9.dsc'):
+            open(os.path.join(_b, _f), 'w').write('x')
+        _hit = SE.find_dsc('demo', [_a, _b])
+        assert _hit and _hit.endswith('demo_1.0-2.dsc'), _hit
+        assert SE.find_dsc('missing', [_a, _b]) is None
+    _rec = {'outputs': ['x.deb'], 'output_hashes': {'x.deb': 'aa'}}
+    _res = {'status': 'emitted', 'class': 'reemit',
+            'files': {'demo_1.0-2+asg1u1.dsc': 'bb',
+                      'demo_1.0.orig.tar.gz': 'cc'}}
+    SE.apply_emit_to_record(_rec, _res)
+    assert _rec['outputs'] == ['x.deb']              # .deb keys untouched
+    assert _rec['output_hashes'] == {'x.deb': 'aa'}
+    assert _rec['source_outputs'] == ['demo_1.0-2+asg1u1.dsc',
+                                      'demo_1.0.orig.tar.gz']
+    assert _rec['source_output_hashes']['demo_1.0-2+asg1u1.dsc'] == 'bb'
+    assert _rec['source_emit_class'] == 'reemit'
+
+
 def test_tunneled_binary_names_resolves_from_cache():
     """utils.tunneled_binary_names maps every [Source] Tunneled source to its
     binary names via cache.source_hashtable (the keep_binnmu_names feed for
@@ -1758,6 +1795,7 @@ TESTS = [
     test_transpose_source_relations_build_fields_and_substvars,
     test_source_emit_classify_verbatim_and_reemit,
     test_source_emit_environment_mode_helpers,
+    test_source_emit_backfill_helpers,
     test_tunneled_binary_names_resolves_from_cache,
     test_transpose_control_text_no_token_is_noop_no_provenance,
     test_transpose_scheme_boundary_table_and_ordering,

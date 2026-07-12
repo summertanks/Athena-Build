@@ -1526,6 +1526,9 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
                         'names in tunneled / fail / no_pkgs buckets too.',
             'repair':   'MUTATOR: clear stale_pass / interrupted build '
                         'records so next `source build` rebuilds.',
+            'emit':     'publish-side SOURCE packages (MAT-02): emit the '
+                        '.dsc + tarballs for built/tunnelled sources into '
+                        'the repo source pool: `source emit [<pkg>…]`',
             'fork':     'manage fork packages: `source fork <pkg>` '
                         'creates or reloads; `source fork <pkg> '
                         'enabled|disabled` toggles the .disabled marker',
@@ -1542,6 +1545,8 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             return self.cmd_source_audit(*args)
         if action == 'repair':
             return self.cmd_source_repair(*args)
+        if action == 'emit':
+            return self.cmd_source_emit(*args)
         if action == 'fork':
             return self.cmd_source_fork(*args)
         return self._group_help('source', _table, action)
