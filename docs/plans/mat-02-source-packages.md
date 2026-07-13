@@ -1,6 +1,8 @@
 # Plan — MAT-02: publish source packages (Sources index + pool `.dsc`s)
 
-## Status: DRAFT (2026-07-12) — awaiting operator review; oracle-validated
+## Status: LANDED (2026-07-13) — stages 1-8 shipped; validated live
+## (publish 3,186 claims incl. 1,007 sources; mirror audit clean;
+## apt-get source round-trip verified across all emit classes)
 
 ## Context
 
