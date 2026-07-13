@@ -152,6 +152,14 @@ Everything before that trailing marker is left exactly as it is. In particular:
   marker, so only it is translated: the result is
   `1.44~1+deb12u1+15.8-1~asg1u1`. The embedded `+deb12u1` stays, because it is
   part of what the package actually is.
+- **A backport of an update stacks both markers — only the trailing one
+  translates.** When a newer release's update is backported, the version reads
+  like `6.16-1+deb13u1~deb12u1`: the embedded `+deb13u1` names the content
+  (release 13's first update), the trailing `~deb12u1` is the update marker for
+  the release actually being served. Only the trailing marker translates:
+  `6.16-1+deb13u1~asg1u1`. (Anything that reduces such a version back to its
+  base for comparison must strip *both* layers — the machinery does, via
+  `pristine_base`.)
 - **Real version detail is kept verbatim.** Markers that look similar but
   describe genuine source identity — a non-maintainer source change, a dotted
   revision like `-3.3`, an upstream-supplied `+really…`, a `+dfsg` repackaging
@@ -233,7 +241,43 @@ are. If a package depends on `library (>= 1.2.3-4+deb12u3)`, that becomes
 `1.2.3-4+asg1u3` satisfies exactly. Translating both sides identically is what
 keeps the dependency graph resolvable; it also preserves the *intent* of the
 constraint (it still asks for "at least update 3"), which simply dropping the
-marker would have thrown away.
+marker would have thrown away. (A floor written with a trailing `~` —
+`>= …+deb12u1~` — keeps its `~` through the translation, so it still sorts
+just below the version it guards.)
+
+Constraint bounds get **one extra step** that the package's own version does
+not. A bound references *another* package's version, and upstream control
+files routinely pin the version a buildd happened to rebuild —
+`library (= 1.5-3+b2)` — or a backported one (`~bpoN+M`). Those layers
+describe upstream's *binary rebuilds*, and no such version can ever exist in
+our repo: we rebuild everything from source, so our `library` ships at plain
+`1.5-3`. A bound still carrying the layer would be unsatisfiable forever. So
+before the update marker is translated, a trailing `+bN` / `~bpoN+M` is
+stripped from **every** constraint bound — `(= 1.5-3+b2)` becomes `(= 1.5-3)`,
+which our rebuilt `library` matches exactly. This applies to all operators,
+`=` pins included: an exact pin on another source's package must land on the
+version that source actually ships at after *its* markers are dropped.
+
+Three guards keep that strip precise:
+
+- a bound that already carries **our own** marker chain (`…+asg1u3+b1`) is one
+  of *our* forced rebuilds, not upstream's buildd artifact — it is left
+  untouched, so re-running the translation can never eat a legitimate pin;
+- a bound whose **target is a tunnelled binary** is exempt from the strip
+  (translated only): the tunnelled package ships its upstream `+bN` version
+  *verbatim*, so the bound must keep referencing it.  This is what keeps a
+  tunnelled source's frozen sibling pins (firmware's
+  `firmware-linux (= …+b1)` chain) resolvable when upstream issues a binary
+  rebuild of it.  The build passes the tunnelled binary names into the
+  rewrite (`keep_binnmu_names`);
+- the strip applies to constraint *bounds* only, never to a package's own
+  version field — a tunnelled package keeps its upstream `+bN` identity (see
+  *tunnelling*, Part 3).
+
+This closed a real, measured gap: across the full 66,252-binary upstream
+universe, stripping the layer from bounds repaired 3,193 previously
+unresolvable dependencies — almost all `-dev` packages pinning their library
+at `(= X+bN)` — and broke none.
 
 Where one binary pins an *exact* version of a sibling built from the same
 source, that pin is updated to the sibling's exact final version — patch level
@@ -243,6 +287,54 @@ One family of packages encodes its sibling pins in a form the translation
 alone cannot satisfy — a "same upstream, any revision" bracket that stops
 holding once the re-distribution markers are stripped.  Appendix B covers
 that idiom, the rewrite that handles it, and the analysis behind it.
+
+### The source package
+
+Every binary we publish has its **corresponding source** in the archive —
+the `.dsc` and tarballs a client's `apt-get source` fetches.  The rules
+mirror the binary rules exactly, because the linkage depends on it: a
+binary's `Source:` reference implies a source version, and the published
+source must exist at exactly that version.
+
+- **The version rule.**  A source package publishes at the version its
+  binaries ship at, minus any forced-rebuild `+bN` (a forced rebuild is
+  binary-only — the source never moves).  So the binaries at
+  `5.2.15-2+asg1u0+p1` are accompanied by `bash_5.2.15-2+asg1u0+p1.dsc`.
+- **Pristine sources republish byte-verbatim.**  A faithful rebuild of an
+  unmarked upstream version changes nothing worth re-encoding: the
+  upstream `.dsc` and tarballs are republished as-is, keeping Debian's
+  own signature on the `.dsc` as provenance.  (Guard: a pristine source
+  whose control carries a Debian-layer literal in any relation field is
+  demoted to re-emit so those fields get translated.)
+- **Everything else re-emits** from the exact tree the binaries were
+  built from: our patch set applied, a synthesized changelog entry on
+  top carrying the published version, and — because the emitted source
+  is a NATIVE source package — every literal relation constraint
+  translated, including `Build-Depends*` / `Build-Conflicts*` (the
+  build relations join the nine runtime fields for source control;
+  substvars pass through untouched).  A patch that touches upstream
+  files folds into `debian/patches` + `series`; a `debian/`-only patch
+  rides in the `debian.tar` directly.
+- **Deterministic by construction.**  The synthesized entry reuses the
+  upstream changelog's top date (and a distribution-stable author), and
+  the emit runs under a matching `SOURCE_DATE_EPOCH` — so two federation
+  builders emitting the same source produce byte-identical files, which
+  the append-only pool requires.  `.orig.tar.*` always passes through
+  verbatim, never regenerated.
+- **Tunnelled sources republish verbatim** regardless of version shape —
+  we did not build them, so fabricating an `+asg` source would invent
+  provenance.  Their binaries' `Source:` field is stamped with the
+  upstream source version so the linkage still resolves.
+- **`Source:` field coherence.**  Wherever a binary's implied source
+  version would dangle — a tunnelled binary whose own version transposed,
+  a cross-base sibling whose upstream annotation needed translating, a
+  forced `+bN` rebuild — the transpose stamps an explicit
+  `Source: <name> (<version>)` pointing at the published source package.
+
+Sources are published into `dists/<codename>/<component>/source/`
+alongside their signed `Sources` index, and travel the federation like
+any binary: claimed, ledgered (per-file entries), pushed per-claim,
+pulled and audited.  The dbgsym suite carries no sources by design.
 
 ### Putting it together
 
@@ -492,7 +584,20 @@ function build_source(Source, tunneled, force):
         binary.version = append_our_suffix(transpose(binary.version), Source, force)
 
         for each dep in binary:
-            dep_version = transpose(dep.version)           # trailing debNuN -> our marker
+            # [FIX] Constraint bounds name OTHER packages' versions: a Debian
+            # binNMU/backport layer (+bN / ~bpoN+M) on a bound references a
+            # buildd rebuild that does not exist in our repo, so strip it
+            # BEFORE transposing — for EVERY operator, `=` pins included.
+            # EXEMPT: a bound targeting a TUNNELLED binary (keep_binnmu_names)
+            # — the target ships its +bN verbatim, so the bound keeps it.
+            # GUARD: a bound already carrying our own [+~]<PREFIX><RELEASE>uN
+            # (+pP/+bN) chain is OUR forced-rebuild pin — never strip it.
+            if dep.name not in tunneled_binaries
+                    and dep.version has no trailing [+~]<PREFIX><RELEASE>uN chain:
+                dep_version = dep.version.strip_binNMU
+            else
+                dep_version = dep.version
+            dep_version = transpose(dep_version)           # trailing debNuN -> our marker
             # [FIX] A same-source sibling pin must land on the sibling's EXACT
             # final version (uniform P + force across the Source, incl. the u0
             # anchor) — matched BY NAME so siblings on a DIFFERENT base are
@@ -517,10 +622,10 @@ version; `transpose` still applies to a trailing upstream marker.)
 
 ## Appendix B — the same-upstream-sibling constraint idiom
 
-Reference notes for the pair-rewriter pass in
-`bump.strip_nmu_from_control_text` — why it exists, why we rewrite the
-way we do, what the alternatives were, and what the risk analysis
-covered.
+Reference notes for the pair-rewriter pass in `bump._rewrite_control_text` —
+the shared control-text scaffold behind both `strip_nmu_from_control_text`
+and `transpose_control_text` — why it exists, why we rewrite the way we do,
+what the alternatives were, and what the risk analysis covered.
 
 ### The problem
 
@@ -678,9 +783,10 @@ own pack/unpack.
 
 ### Implementation summary
 
-`bump._rewrite_sibling_idiom_in_text` is called by
-`strip_nmu_from_control_text` after the per-constraint version-string
-strip pass.  It:
+`bump._rewrite_sibling_idiom_in_text` is called by the shared
+`_rewrite_control_text` scaffold (so both `strip_nmu_from_control_text`
+and `transpose_control_text` get it) after the per-constraint
+version-string rewrite pass.  It:
 
 1. Parses each Depends / Pre-Depends field via
    `debian.deb822.PkgRelation.parse_relations`
@@ -693,8 +799,9 @@ strip pass.  It:
 5. Re-serialises via `PkgRelation.str`
 
 `our_version` is the binary's own Version field, extracted AFTER the
-strip pass (so it's the pristine stripped value).  The same atomic
-source-build invariant means this matches every sibling's Version.
+version rewrite pass (the pristine stripped value on the strip path, the
+transposed value on the transpose path).  The same atomic source-build
+invariant means this matches every sibling's Version.
 
 ### When this can be retired
 

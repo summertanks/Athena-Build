@@ -58,15 +58,22 @@ distribution's name lowercased.
 ├── index.html                          human landing page (per release)
 ├── releases.json                       machine-readable release manifest
 ├── dists/
-│   └── thor/                           the apt repository (signed)
-│       ├── InRelease                   clearsigned index-of-indexes
-│       ├── Release, Release.gpg        the same, as file + detached sig
-│       └── main/                       (one dir per component)
-│           ├── binary-amd64/           Packages indexes AND the .deb
-│           │                           files themselves, side by side
-│           ├── debian-installer/
-│           │   └── binary-amd64/       installer .udeb files + indexes
-│           └── source/                 Sources indexes
+│   ├── thor/                           the apt repository (signed)
+│   │   ├── InRelease                   clearsigned index-of-indexes
+│   │   ├── Release, Release.gpg        the same, as file + detached sig
+│   │   └── main/                       (one dir per component)
+│   │       ├── binary-amd64/           Packages indexes AND the .deb
+│   │       │                           files themselves, side by side
+│   │       ├── debian-installer/
+│   │       │   └── binary-amd64/       installer .udeb files + indexes
+│   │       └── source/                 Sources indexes AND the source
+│   │                                   packages themselves (.dsc +
+│   │                                   tarballs), side by side
+│   └── thor-debug/                     the dbgsym suite: component `main`
+│       └── main/                       only, with its OWN signed
+│           └── binary-amd64/           InRelease chain — published,
+│                                       audited, and ledgered exactly
+│                                       like the primary suite
 └── iso/                                published images (live ISO,
                                         installer ISO, disk image)
 
@@ -101,6 +108,19 @@ Two things about the apt tree that differ from a stock Debian archive:
 
   ```
   deb http://<host>/asgard thor main non-free-firmware
+  ```
+
+  A client that wants debug symbols adds the sibling suite:
+
+  ```
+  deb http://<host>/asgard thor-debug main
+  ```
+
+  And `apt-get source` works against the same suite (MAT-02 — every
+  published binary's corresponding source is in the archive):
+
+  ```
+  deb-src http://<host>/asgard thor main non-free-firmware
   ```
 
 ### Host configuration
@@ -777,12 +797,20 @@ Two failure modes observed live, both now closed inside
   the coord-head pins its sha, so a stale local index used to publish
   "cleanly" while apt clients kept resolving superseded metadata.
   Publish now re-indexes not only when the local `InRelease` is
-  missing but whenever it is STALE — any pool artifact (or pool
-  directory, which catches deletion-only changes) newer than the
-  InRelease triggers a fresh index before the push.  Operators no
-  longer need to delete `InRelease` manually after touching the pool.
+  missing but whenever it is STALE, on either of two detectors:
+  **mtime** — any pool artifact (or pool directory, which catches
+  deletion-only changes) newer than the InRelease; and **content**
+  (`apt_repo.inrelease_index_stale`) — the InRelease pins a `Packages`
+  SHA-256 that disagrees with the on-disk file.  The content check
+  exists because an in-place repack (`repo repair strip`) followed by
+  a re-sign is mtime-fresh but hash-stale — apt would reject it with
+  "Hash Sum mismatch" while the publish shipped it "cleanly".
+  Operators no longer need to delete `InRelease` manually after
+  touching the pool.
 - **Append-only pool protected from `--delete`.**  The dist-tree push
-  (rsync `--delete` over `dists/<codename>/`) now EXCLUDES pool
+  (one rsync `--delete` over `dists/<suite>/` for EVERY indexed suite —
+  `<codename>` and `<codename>-debug` alike, so dbgsym debs never land
+  on the remote without their Packages/InRelease) now EXCLUDES pool
   artifacts (`*.deb` / `*.udeb`) from the transfer set entirely.  The
   package files live INSIDE the dists tree, so a local prune used to
   propagate to the remote on the next publish — violating the
@@ -798,15 +826,23 @@ publish reconciles them.
 
 ### `mirror pull` semantics
 
-`mirror pull` fills in what OTHER builders published; it is not a
-backup of your own work.  Rules worth internalising:
+`mirror pull` fills in what OTHER builders published, and restores our
+own published files that have gone missing locally.  Rules worth
+internalising:
 
-- **Skip-own (security rule).**  Pull NEVER downloads a claim signed
-  by our own builder id — the local build is the authority for our
-  packages.  Consequence: pull is NOT a restore path for our own lost
-  files.  Recovery from a wiped local pool is rebuild + `mirror
-  reclaim` (the rebuilt bytes won't match the published claim), or a
-  deliberate manual copy off the mirror.
+- **Skip-own (security rule), with restore-missing.**  A claim signed
+  by our own builder id never overwrites a PRESENT local file — the
+  local build is the authority for our packages, and a peer's claim
+  about a file we built is never accepted.  A file MISSING from the
+  local repo is different: pull downloads it back and verifies it
+  against our OWN Ed25519-signed claim sha (`restored_own=N` in the
+  summary), so a wiped pool or a fresh machine restores without a full
+  rebuild.  One guard: when the local build record pins a DIFFERENT
+  sha for the filename, the local state is *ahead* of the published
+  claim (a sanctioned repack awaiting `mirror reclaim`) — the restore
+  is refused loudly rather than clobbering the newer intent.  Restored
+  files get no new build record; our own records are already
+  authoritative.
 - **End-of-life states are skipped.**  Claims in `retracted` /
   `deprecated` / `obsolete` are never downloaded.
 - **Snapshot auto-adopt (forward-only).**  Pull reads the signed
@@ -828,6 +864,11 @@ backup of your own work.  Rules worth internalising:
   construction: a claim is only obsoleted when a strictly-newer version is
   PRESENT in the live set, so a drift file whose successor isn't built yet
   stays live.
+- **Source packages travel like binaries.**  Emitted `.dsc`s + tarballs
+  are claimed, ledgered (per-file `<filename>|source` entries), pushed
+  per-claim, and pulled into `dists/<codename>/<comp>/source/`; the
+  audit verifies the `Sources` index chain and cross-checks source
+  claims against it.  Restore-own covers them too.
 - **Pulled `.deb`s get a local build record**, so subsequent `source
   audit` and `repo audit` runs see them as already-built:
   tunneled-on-mirror → local `phase=tunneled` with `republished_from`
@@ -898,6 +939,16 @@ mirror reclaim [<source>|<file.deb|.udeb>] [<mirror-name>] [force]
   gate, hash-conflict scan and the stale-index guard all apply
   unchanged.
 
+**Tunnelled claims are reclaimable too.**  A claim carrying
+`republished_from` (a tunnel passthrough) is not skipped wholesale by
+the candidate walk: it surfaces as a reclaim candidate when — and only
+when — the local bytes' drift is BACKED by the local build record (a
+sanctioned in-place repack, e.g. `repo repair strip` over a tunnelled
+deb, followed by `refresh_output_hashes`).  Unbacked drift and local
+pruning stay silent.  Reclaiming it flips the claim to an **owned**
+claim — `republished_from` is dropped — which is correct: we modified
+the bytes, so we own them now.
+
 A reclaim claim is not a marker like the lifecycle states above — it
 is itself a LIVE `published` claim carrying `reclaims_seq`, a
 back-reference to the superseded claim.  That back-reference is
@@ -949,8 +1000,12 @@ reconcile.  For multiple peers:
 
 ### `mirror audit` integrity sweep
 
-`mirror audit` cross-checks the signed claim ledger against the actual
-files in the mirror's pool dir, per mirror:
+`mirror audit` verifies the InRelease → `Packages` sha chain for
+**every published suite** — `<codename>` and `<codename>-debug` — and
+cross-checks each live claim against the union of their apt indexes
+(dbgsym claims resolve against the `-debug` suite's Packages).  It then
+cross-checks the signed claim ledger against the actual files in the
+mirror's pool dir, per mirror:
 
 - **CRITICAL `missing_on_disk`** — a sidecar claim references a file
   that's not actually in the pool.  apt clients fetching it would 404;
@@ -980,6 +1035,7 @@ checks:
 | `orphan_on_disk` | WARNING | pool file with no claim backing it |
 | `hash_conflict` | CRITICAL | two builders claim the same filename with different shas → PUBLISH_HALT |
 | `reproducible_duplicate` | INFO | two builders claim the same filename with the SAME sha |
+| `sources_unreachable` / `sources_sha_mismatch` / `sources_parse_failed` | CRITICAL | a `<comp>/source/Sources` index the InRelease declares could not be pulled / disagrees with its sha pin / does not parse |
 
 Superseded claims are folded out of ALL of these: a claim targeted by
 a later retraction / deprecation / obsolescence / reclaim

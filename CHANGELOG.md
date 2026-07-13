@@ -7,6 +7,10 @@ toolchain SemVer (`scripts/_version.py`); per-commit dev versions are automatic.
 
 ## [Unreleased]
 
+- **Source packages published (Sources index + pool `.dsc` + federation
+  claims/ledger/pull)** (`scripts/source_emit.py`, `source emit`; see
+  `docs/versioning-mechanics.md`).
+
 - **Build container base changed from debian-slim to a custom
   snapshot-bootstrapped rootfs** (`scripts/base_rootfs.py`).
 

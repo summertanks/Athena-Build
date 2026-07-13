@@ -10,6 +10,7 @@
 - **Multiple image surfaces** — a live ISO, a from-source installer ISO, and a pre-installed qcow2 disk image.
 - **Patch at every layer** — fine control on source, pre-install, and post-install patching, plus a fork system with an identity collision gate.
 - **Reproducible and signed** — GPG-signed apt metadata (`Release`/`InRelease`) for repository.
+- **Source-available by construction** — every published binary's corresponding source package (`.dsc` + tarballs) is in the archive with a signed `Sources` index; `apt-get source` works against the mirror.
 - **Federated publishing** — push signed, append-only updates from your own apt mirror that multiple builders can extend.
 - **One interface, fully transparent** — a curses TUI (with headless and HTTP-API backends) drives the entire pipeline.
 
@@ -267,13 +268,18 @@ Selected 962 source packages
 #### 5. `container local init` — build the workshop
 
 Every package is compiled inside a clean Debian container, so your host stays
-untouched. This builds that container image once:
+untouched. The image's base layer is not pulled from Docker Hub — it is
+bootstrapped from the pinned snapshot with `mmdebstrap --variant=buildd`
+(the same rootfs flavour sbuild chroots are made of), so every byte of the
+build environment comes from the snapshot. This builds that image once:
 
 ```
 athena-build> container local init
 [INFO] Docker endpoint=localhost engine=29.5.3 os=linux arch=amd64
+[INFO] base rootfs: bootstrapping base-rootfs.tar
 Step 1/21 : ARG RELEASE=bookworm
-Step 6/21 : FROM debian:bookworm-slim
+Step 6/21 : FROM scratch
+Step 7/21 : ADD base-rootfs.tar /
 …
 Step 18/21 : RUN useradd -G sudo -ms /bin/bash athena
 Step 21/21 : LABEL athena.dockerfile.sha256=b571012d95c2…

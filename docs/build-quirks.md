@@ -270,14 +270,47 @@ update.
 
 ## 7. Build container & toolchain
 
-### 7.1 Snapshot-pinned apt can't always bootstrap itself
-Installing the toolchain layer directly from the snapshot fails
+### 7.1 Snapshot-pinned apt can't always bootstrap itself — SUPERSEDED
+Installing the toolchain layer directly from the snapshot failed
 "Unable to locate package" for ~15 packages.
 **Incident (CONF-15):** Dockerfile had to install from the live mirror
 first, then rewrite sources to the snapshot and `dist-upgrade` to
 realign.
-**Rule:** toolchain layer = install-then-realign, never
-snapshot-first single step.
+**Superseded (2026-07):** the base is now our own
+`mmdebstrap --variant=buildd` bootstrap from the pinned snapshot
+(`scripts/base_rootfs.py`; `config/Dockerfile` is `FROM scratch` +
+`ADD base-rootfs.tar`), so the image is at snapshot from birth and the
+install-then-realign dance is gone.  The root cause of the "unable to
+locate" wall was apt's exit-0-with-warnings default on a failed index
+fetch — see 7.1a.
+
+### 7.1a The buildd base has no CA store, and apt update "succeeds" without lists
+Two traps in the mmdebstrap base, both hit on 2026-07-08:
+- The buildd variant ships **no `ca-certificates`** — an https snapshot
+  URL fails every index fetch until the bootstrap includes it
+  (`--include=ca-certificates` in `base_rootfs.py`; Docker Hub's slim
+  base lacked it too, which is why CONF-15's live-mirror step was plain
+  http).
+- `apt-get update` **exits 0 with warnings** on a failed fetch, leaving
+  empty package lists and a wall of "Unable to locate package" at
+  install time (also the historic CONF-15 anomaly).
+**Rule:** every scripted `apt-get update` in the container layers runs
+with `-o APT::Update::Error-Mode=any` so a failed fetch fails the
+build at the update, not later at the install.
+
+### 7.1b The buildd base also dropped every Recommends — fakeroot was the second casualty
+The mmdebstrap buildd bootstrap disables apt Recommends; the old
+debian-slim base had them on.  Anything the old image acquired ONLY as a
+Recommends silently vanished with the base swap and resurfaces as a
+failure the first time a package that needs it is REBUILT.
+**Incident (2026-07-12, the fork set):** `dpkg-buildpackage: error:
+fakeroot not found`, exit 25 — fakeroot is a Recommends of dpkg-dev,
+was never in either Dockerfile's install list, and every
+`Rules-Requires-Root: no` package masked the loss.  (ca-certificates,
+7.1a, was the first casualty of the same delta.)
+**Rule:** build-critical tools are installed EXPLICITLY in the
+Dockerfile toolchain layer; never rely on Recommends.  When a rebuild
+fails oddly on the buildd base, suspect a vanished Recommends first.
 
 ### 7.2 debconf must be silenced before the first dpkg call, not at it
 `DEBIAN_FRONTEND=noninteractive` alone is not enough in a fresh chroot.
