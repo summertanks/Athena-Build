@@ -288,6 +288,54 @@ alone cannot satisfy — a "same upstream, any revision" bracket that stops
 holding once the re-distribution markers are stripped.  Appendix B covers
 that idiom, the rewrite that handles it, and the analysis behind it.
 
+### The source package
+
+Every binary we publish has its **corresponding source** in the archive —
+the `.dsc` and tarballs a client's `apt-get source` fetches.  The rules
+mirror the binary rules exactly, because the linkage depends on it: a
+binary's `Source:` reference implies a source version, and the published
+source must exist at exactly that version.
+
+- **The version rule.**  A source package publishes at the version its
+  binaries ship at, minus any forced-rebuild `+bN` (a forced rebuild is
+  binary-only — the source never moves).  So the binaries at
+  `5.2.15-2+asg1u0+p1` are accompanied by `bash_5.2.15-2+asg1u0+p1.dsc`.
+- **Pristine sources republish byte-verbatim.**  A faithful rebuild of an
+  unmarked upstream version changes nothing worth re-encoding: the
+  upstream `.dsc` and tarballs are republished as-is, keeping Debian's
+  own signature on the `.dsc` as provenance.  (Guard: a pristine source
+  whose control carries a Debian-layer literal in any relation field is
+  demoted to re-emit so those fields get translated.)
+- **Everything else re-emits** from the exact tree the binaries were
+  built from: our patch set applied, a synthesized changelog entry on
+  top carrying the published version, and — because the emitted source
+  is a NATIVE source package — every literal relation constraint
+  translated, including `Build-Depends*` / `Build-Conflicts*` (the
+  build relations join the nine runtime fields for source control;
+  substvars pass through untouched).  A patch that touches upstream
+  files folds into `debian/patches` + `series`; a `debian/`-only patch
+  rides in the `debian.tar` directly.
+- **Deterministic by construction.**  The synthesized entry reuses the
+  upstream changelog's top date (and a distribution-stable author), and
+  the emit runs under a matching `SOURCE_DATE_EPOCH` — so two federation
+  builders emitting the same source produce byte-identical files, which
+  the append-only pool requires.  `.orig.tar.*` always passes through
+  verbatim, never regenerated.
+- **Tunnelled sources republish verbatim** regardless of version shape —
+  we did not build them, so fabricating an `+asg` source would invent
+  provenance.  Their binaries' `Source:` field is stamped with the
+  upstream source version so the linkage still resolves.
+- **`Source:` field coherence.**  Wherever a binary's implied source
+  version would dangle — a tunnelled binary whose own version transposed,
+  a cross-base sibling whose upstream annotation needed translating, a
+  forced `+bN` rebuild — the transpose stamps an explicit
+  `Source: <name> (<version>)` pointing at the published source package.
+
+Sources are published into `dists/<codename>/<component>/source/`
+alongside their signed `Sources` index, and travel the federation like
+any binary: claimed, ledgered (per-file entries), pushed per-claim,
+pulled and audited.  The dbgsym suite carries no sources by design.
+
 ### Putting it together
 
 For a rebuilt or tunnelled package, the version is built up in this order:

@@ -298,6 +298,20 @@ Two traps in the mmdebstrap base, both hit on 2026-07-08:
 with `-o APT::Update::Error-Mode=any` so a failed fetch fails the
 build at the update, not later at the install.
 
+### 7.1b The buildd base also dropped every Recommends — fakeroot was the second casualty
+The mmdebstrap buildd bootstrap disables apt Recommends; the old
+debian-slim base had them on.  Anything the old image acquired ONLY as a
+Recommends silently vanished with the base swap and resurfaces as a
+failure the first time a package that needs it is REBUILT.
+**Incident (2026-07-12, the fork set):** `dpkg-buildpackage: error:
+fakeroot not found`, exit 25 — fakeroot is a Recommends of dpkg-dev,
+was never in either Dockerfile's install list, and every
+`Rules-Requires-Root: no` package masked the loss.  (ca-certificates,
+7.1a, was the first casualty of the same delta.)
+**Rule:** build-critical tools are installed EXPLICITLY in the
+Dockerfile toolchain layer; never rely on Recommends.  When a rebuild
+fails oddly on the buildd base, suspect a vanished Recommends first.
+
 ### 7.2 debconf must be silenced before the first dpkg call, not at it
 `DEBIAN_FRONTEND=noninteractive` alone is not enough in a fresh chroot.
 **Rule:** also set `DEBCONF_NONINTERACTIVE_SEEN=true` and write a

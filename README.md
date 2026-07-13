@@ -10,6 +10,7 @@
 - **Multiple image surfaces** — a live ISO, a from-source installer ISO, and a pre-installed qcow2 disk image.
 - **Patch at every layer** — fine control on source, pre-install, and post-install patching, plus a fork system with an identity collision gate.
 - **Reproducible and signed** — GPG-signed apt metadata (`Release`/`InRelease`) for repository.
+- **Source-available by construction** — every published binary's corresponding source package (`.dsc` + tarballs) is in the archive with a signed `Sources` index; `apt-get source` works against the mirror.
 - **Federated publishing** — push signed, append-only updates from your own apt mirror that multiple builders can extend.
 - **One interface, fully transparent** — a curses TUI (with headless and HTTP-API backends) drives the entire pipeline.
 

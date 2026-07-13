@@ -66,7 +66,9 @@ distribution's name lowercased.
 │   │       │                           files themselves, side by side
 │   │       ├── debian-installer/
 │   │       │   └── binary-amd64/       installer .udeb files + indexes
-│   │       └── source/                 Sources indexes
+│   │       └── source/                 Sources indexes AND the source
+│   │                                   packages themselves (.dsc +
+│   │                                   tarballs), side by side
 │   └── thor-debug/                     the dbgsym suite: component `main`
 │       └── main/                       only, with its OWN signed
 │           └── binary-amd64/           InRelease chain — published,
@@ -112,6 +114,13 @@ Two things about the apt tree that differ from a stock Debian archive:
 
   ```
   deb http://<host>/asgard thor-debug main
+  ```
+
+  And `apt-get source` works against the same suite (MAT-02 — every
+  published binary's corresponding source is in the archive):
+
+  ```
+  deb-src http://<host>/asgard thor main non-free-firmware
   ```
 
 ### Host configuration
@@ -855,6 +864,11 @@ internalising:
   construction: a claim is only obsoleted when a strictly-newer version is
   PRESENT in the live set, so a drift file whose successor isn't built yet
   stays live.
+- **Source packages travel like binaries.**  Emitted `.dsc`s + tarballs
+  are claimed, ledgered (per-file `<filename>|source` entries), pushed
+  per-claim, and pulled into `dists/<codename>/<comp>/source/`; the
+  audit verifies the `Sources` index chain and cross-checks source
+  claims against it.  Restore-own covers them too.
 - **Pulled `.deb`s get a local build record**, so subsequent `source
   audit` and `repo audit` runs see them as already-built:
   tunneled-on-mirror → local `phase=tunneled` with `republished_from`
@@ -1021,6 +1035,7 @@ checks:
 | `orphan_on_disk` | WARNING | pool file with no claim backing it |
 | `hash_conflict` | CRITICAL | two builders claim the same filename with different shas → PUBLISH_HALT |
 | `reproducible_duplicate` | INFO | two builders claim the same filename with the SAME sha |
+| `sources_unreachable` / `sources_sha_mismatch` / `sources_parse_failed` | CRITICAL | a `<comp>/source/Sources` index the InRelease declares could not be pulled / disagrees with its sha pin / does not parse |
 
 Superseded claims are folded out of ALL of these: a claim targeted by
 a later retraction / deprecation / obsolescence / reclaim
