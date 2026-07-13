@@ -4572,6 +4572,11 @@ def test_mirror_pull_routes_and_records_source_artifacts():
     for _pat in ('--exclude=*.dsc', '--exclude=*.tar.*',
                  '--exclude=*.diff.gz', '--exclude=*.asc'):
         assert _pat in _t, f'push_dist_tree must exclude {_pat}'
+    # the remote pool LISTING must see source artifacts too, or every
+    # source claim audits missing_on_disk (2026-07-13 live finding)
+    for _pat in ("-path '*/source/*.dsc'", "-path '*/source/*.tar.*'",
+                 "-path '*/source/*.diff.gz'", "-path '*/source/*.asc'"):
+        assert _pat in _t, f'remote pool listing must match {_pat}'
 
 
 def test_mirror_pull_restores_missing_own_files():
