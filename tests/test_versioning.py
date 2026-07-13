@@ -296,6 +296,408 @@ def test_transpose_control_text_keep_binnmu_names_exempts_tunneled_targets():
     assert _n2 == 0, (_n2, _out2)
 
 
+def test_match_pristine_base_tunneled_binnmu_acceptance():
+    """The tunnelled acceptance (allow_binnmu): an on-disk artifact keeping
+    its upstream +bN (a tunnelled binNMU — transpose_deb keeps it for the
+    frozen sibling pins) matches the pristine prediction ONLY when the
+    caller opts in (record=tunneled).  The default stays strict, and a
+    +debNuK leftover WITHOUT a binNMU marker never matches even with the
+    flag — only the binNMU layer is excused, not general NMU residue."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import match_pristine_base
+    _pred = 'ffmpegthumbnailer_2.2.2+git20220218+dfsg-1_amd64.deb'
+    _disk = 'ffmpegthumbnailer_2.2.2+git20220218+dfsg-1+b1_amd64.deb'
+    assert match_pristine_base(_pred, _disk) is False          # strict default
+    assert match_pristine_base(_pred, _disk, allow_binnmu=True) is True
+    # stacked update+binNMU tunnel shape reduces to the same base
+    assert match_pristine_base(
+        'x_1.0-2_amd64.deb', 'x_1.0-2+deb12u1+b1_amd64.deb',
+        allow_binnmu=True) is True
+    # NMU residue without a binNMU marker: never accepted, flag or not
+    assert match_pristine_base(
+        'x_1.0-2_amd64.deb', 'x_1.0-2+deb12u1_amd64.deb',
+        allow_binnmu=True) is False
+    # the +asg path is unaffected by the flag
+    assert match_pristine_base(
+        'x_1.0-2_amd64.deb', 'x_1.0-2+asg1u1_amd64.deb') is True
+    # different base never matches
+    assert match_pristine_base(
+        'x_1.0-2_amd64.deb', 'x_1.0-3+b1_amd64.deb',
+        allow_binnmu=True) is False
+
+
+def test_source_package_version_predictor():
+    """MAT-02 D2: the published source's version == its binaries' version
+    minus any force-+bN layer (the source never moves on a forced rebuild)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import source_package_version
+    assert source_package_version('2.36-9+deb12u14', 'asg', 1) \
+        == '2.36-9+asg1u14'
+    assert source_package_version('5.2.15-2', 'asg', 1) == '5.2.15-2'
+    assert source_package_version('5.2.15-2', 'asg', 1, 1) \
+        == '5.2.15-2+asg1u0+p1'
+    assert source_package_version('1:2.39.5-0+deb12u3', 'asg', 1, 2) \
+        == '1:2.39.5-0+asg1u3+p2'
+
+
+def test_transpose_ceiling_dot_tail_transposes():
+    """Oracle-2 class 2: a punctuation-only tail after the debNuK ordinal
+    (`.0` apt-ceiling, `.1~`) must not block the transpose — erlang's
+    `<< X+deb12u1.0` / mosquitto's `<< X+deb12u1.1~` ceilings otherwise
+    stay Debian-flavoured and wrongly ADMIT our +asg versions (asg < deb),
+    allowing version skew upstream forbids."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import transpose
+    assert transpose('1:25.2.3+dfsg-1+deb12u1.0', 'asg', 1) \
+        == '1:25.2.3+dfsg-1+asg1u1.0'
+    assert transpose('2.0.11-1.2+deb12u1.1~', 'asg', 1) \
+        == '2.0.11-1.2+asg1u1.1~'
+    # plain forms unchanged in behaviour
+    assert transpose('2.36-9+deb12u14', 'asg', 1) == '2.36-9+asg1u14'
+    assert transpose('0.8.0-2+deb12u1~', 'asg', 1) == '0.8.0-2+asg1u1~'
+    # dot-tail on a NON-deb token: untouched
+    assert transpose('1.0-2+b1.0', 'asg', 1) == '1.0-2+b1.0'
+
+
+def test_transpose_constraint_strips_legacy_binnmu_bound():
+    """Oracle-2 class 1: the legacy no-'+' binNMU form in a CONSTRAINT bound
+    (gnome-contacts' `libfolks-dev (>= 0.15.5-2b)`) is stripped so the floor
+    lands on the version our repo actually ships; the Version field is never
+    touched by the legacy strip (bounds-only rule)."""
+    from utils import transpose_control_text
+    _ctrl = (
+        'Package: gnome-contacts\n'
+        'Version: 43.1-2b\n'                     # pathological, NOT stripped
+        'Depends: libfolks-dev (>= 0.15.5-2b), other (>= 1.0-2b1)\n'
+        'Description: x\n'
+    )
+    _out, _n = transpose_control_text(_ctrl, 'asg', 1)
+    assert '(>= 0.15.5-2)' in _out
+    assert 'other (>= 1.0-2)' in _out
+    assert 'Version: 43.1-2b' in _out            # Version field untouched
+    _out2, _n2 = transpose_control_text(_out, 'asg', 1)
+    assert _n2 == 0, (_n2, _out2)
+
+
+def test_transpose_deb_source_annotation_cases():
+    """MAT-02 D3: the binary's Source: reference must point at the PUBLISHED
+    source package's version.
+      (a) tunnel: explicit source_version stamps the UPSTREAM source version
+          (tunnelled sources are republished verbatim);
+      (b) cross-base annotation: an upstream `Source: n (v+debNuK)` is
+          transposed (+ uniform +pP);
+      (c) forced rebuild: +bN is binary-only — the stamp is sans-+bN;
+      (d) a re-normalise pass over (b)'s output (P=0 — the only repeated
+          shape in production; transpose_deb is never re-invoked with P>0
+          on its own output) is a no-op: the already-stamped annotation is
+          kept verbatim, not double-suffixed."""
+    import subprocess
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import transpose_deb
+    if not _have_dpkg_deb():
+        print("SKIP test_transpose_deb_source_annotation_cases (no dpkg-deb)")
+        return
+
+    def _mk(_tmp, tag, ctrl, fname):
+        _work = os.path.join(_tmp, f'src-{tag}')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as _fh:
+            _fh.write(ctrl)
+        _p = os.path.join(_tmp, fname)
+        subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _p],
+                       check=True, capture_output=True)
+        return _p
+
+    def _field(path, field):
+        return subprocess.run(
+            ['dpkg-deb', '-f', path, field],
+            check=True, capture_output=True, text=True).stdout.strip()
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        # (a) tunnel stamp: version transposes ~deb→~asg, Source pins upstream
+        _a = _mk(_tmp, 'a',
+                 'Package: shim-signed\nVersion: 1.44~1+deb12u1\n'
+                 'Architecture: amd64\nMaintainer: T <t@l>\nDescription: x\n',
+                 'shim-signed_1.44~1+deb12u1_amd64.deb')
+        _ra = transpose_deb(_a, 'asg', 1, source_version='1.44~1+deb12u1')
+        assert _ra['status'] == 'rewritten', _ra
+        assert _field(_ra['new_path'], 'Source') \
+            == 'shim-signed (1.44~1+deb12u1)'
+        assert _field(_ra['new_path'], 'Version') == '1.44~1+asg1u1'
+        # (b) cross-base annotation transposed + patch level
+        _b = _mk(_tmp, 'b',
+                 'Package: comerr-dev\nVersion: 2.1-1.47.0-2+deb12u1\n'
+                 'Source: e2fsprogs (1.47.0-2+deb12u1)\n'
+                 'Architecture: amd64\nMaintainer: T <t@l>\nDescription: x\n',
+                 'comerr-dev_2.1-1.47.0-2+deb12u1_amd64.deb')
+        _rb = transpose_deb(_b, 'asg', 1, patch_level=1)
+        assert _field(_rb['new_path'], 'Source') \
+            == 'e2fsprogs (1.47.0-2+asg1u1+p1)'
+        assert _field(_rb['new_path'], 'Version') == '2.1-1.47.0-2+asg1u1+p1'
+        # (d) re-normalise pass (P=0) over (b)'s output: no-op
+        _rb2 = transpose_deb(_rb['new_path'], 'asg', 1)
+        assert _rb2['status'] == 'unchanged', _rb2
+        # (c) force: binary gets +bN, Source stamp is sans-+bN
+        _c = _mk(_tmp, 'c',
+                 'Package: relinked\nVersion: 1.0-2\n'
+                 'Architecture: amd64\nMaintainer: T <t@l>\nDescription: x\n',
+                 'relinked_1.0-2_amd64.deb')
+        _rc = transpose_deb(_c, 'asg', 1, force_bn=1)
+        assert _field(_rc['new_path'], 'Version') == '1.0-2+asg1u0+b1'
+        assert _field(_rc['new_path'], 'Source') == 'relinked (1.0-2)'
+
+
+def test_transpose_source_relations_build_fields_and_substvars():
+    """MAT-02 D4: the SOURCE field set — Build-Depends*/Build-Conflicts* are
+    transposed alongside the runtime fields in a multi-stanza source
+    debian/control; substvars pass through; unrelated fields untouched;
+    idempotent.  (The binary transpose path's field set is unchanged.)"""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from bump import transpose_source_relations
+    _ctrl = (
+        'Source: demo\n'
+        'Build-Depends: debhelper-compat (= 13),\n'
+        ' libfoo-dev (>= 1.2-3+deb12u1) [amd64] <!nocheck>,\n'
+        ' libbar-dev (= 2.0-1+b3)\n'
+        'Build-Conflicts: oldtool (<< 5.5+deb12u2)\n'
+        'Build-Depends-Indep: docgen (>= 0.15.5-2b)\n'
+        '\n'
+        'Package: demo-bin\n'
+        'Architecture: any\n'
+        'Depends: ${shlibs:Depends}, demo-data (= ${source:Version}),\n'
+        ' other (>= 1.0-1+deb12u1)\n'
+        'Description: source-relations coverage\n'
+    )
+    _out, _n = transpose_source_relations(_ctrl, 'asg', 1)
+    assert 'libfoo-dev (>= 1.2-3+asg1u1) [amd64] <!nocheck>' in _out
+    assert 'libbar-dev (= 2.0-1)' in _out            # +b3 stripped
+    assert 'oldtool (<< 5.5+asg1u2)' in _out         # Build-Conflicts too
+    assert 'docgen (>= 0.15.5-2)' in _out            # legacy Nb stripped
+    assert 'debhelper-compat (= 13)' in _out         # no layer → unchanged
+    assert '${shlibs:Depends}' in _out               # substvars untouched
+    assert 'demo-data (= ${source:Version})' in _out
+    assert 'other (>= 1.0-1+asg1u1)' in _out         # binary stanza Depends
+    _out2, _n2 = transpose_source_relations(_out, 'asg', 1)
+    assert _n2 == 0, (_n2, _out2)
+
+
+def _make_native_source(tmp, name, version, build_depends=''):
+    """Fixture: a minimal 3.0 (native) source package; returns its .dsc."""
+    import subprocess
+    _tree = os.path.join(tmp, f'{name}-tree')
+    os.makedirs(os.path.join(_tree, 'debian', 'source'))
+    with open(os.path.join(_tree, 'debian', 'source', 'format'), 'w') as _f:
+        _f.write('3.0 (native)\n')
+    _bd = f'Build-Depends: {build_depends}\n' if build_depends else ''
+    with open(os.path.join(_tree, 'debian', 'control'), 'w') as _f:
+        _f.write(f'Source: {name}\nMaintainer: T <t@l>\n{_bd}\n'
+                 f'Package: {name}\nArchitecture: all\n'
+                 'Description: emit fixture\n fixture body\n')
+    with open(os.path.join(_tree, 'debian', 'changelog'), 'w') as _f:
+        _f.write(f'{name} ({version}) bookworm; urgency=medium\n\n'
+                 '  * Fixture entry.\n\n'
+                 ' -- Up Stream <up@stream>  Sun, 06 Jul 2026 00:00:00 +0000\n')
+    subprocess.run(['dpkg-source', '-b', _tree], cwd=tmp,
+                   check=True, capture_output=True)
+    _noepoch = version.split(':', 1)[-1]
+    return os.path.join(tmp, f'{name}_{_noepoch}.dsc')
+
+
+def test_source_emit_classify_verbatim_and_reemit():
+    """MAT-02 D1/D2 end-to-end on the emit engine:
+      - pristine source → verbatim: bytes in out_dir identical to input
+      - pristine source with a Debian-layer Build-Depends literal → DEMOTED
+        to reemit (D1 demotion rule)
+      - +debNuK source → reemit at the transposed version with a synthesized
+        top changelog entry, transposed relations, and DETERMINISTIC output
+        (two independent emits byte-identical)
+      - append-only: a same-name different-bytes collision in out_dir raises"""
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import source_emit as SE
+    if not _have_dpkg_deb():
+        print("SKIP test_source_emit_classify_verbatim_and_reemit (no dpkg)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        # verbatim
+        _dsc = _make_native_source(_tmp, 'pristine', '1.0')
+        _out1 = os.path.join(_tmp, 'out1')
+        _r = SE.emit_source(_dsc, _out1)
+        assert _r['status'] == 'verbatim', _r
+        assert _r['version'] == '1.0'
+        for _f, _sha in _r['files'].items():
+            assert SE._sha256(os.path.join(_tmp, _f)) == _sha, _f
+        # demotion: pristine version, Debian-layer literal in Build-Depends
+        _dsc2 = _make_native_source(_tmp, 'demoted', '2.0',
+                                    'libx-dev (>= 1.2-3+deb12u1)')
+        _r2 = SE.emit_source(_dsc2, _out1)
+        assert _r2['status'] == 'emitted', _r2
+        assert _r2['version'] == '2.0'
+        # transposed reemit, deterministic
+        _dsc3 = _make_native_source(_tmp, 'moved', '3.0+deb12u2',
+                                    'liby-dev (= 4.0-1+b2)')
+        _outa = os.path.join(_tmp, 'outa')
+        _outb = os.path.join(_tmp, 'outb')
+        _ra = SE.emit_source(_dsc3, _outa)
+        _rb = SE.emit_source(_dsc3, _outb)
+        assert _ra['status'] == 'emitted' and _ra['version'] == '3.0+asg1u2'
+        assert 'moved_3.0+asg1u2.dsc' in _ra['files'], _ra['files']
+        assert _ra['files'] == _rb['files'], 'non-deterministic emit'
+        _newdsc = os.path.join(_outa, 'moved_3.0+asg1u2.dsc')
+        _txt = open(_newdsc).read()
+        assert 'liby-dev (= 4.0-1)' in _txt          # build-dep transposed
+        assert 'Version: 3.0+asg1u2' in _txt
+        # append-only conflict
+        _victim = os.path.join(_outa, 'moved_3.0+asg1u2.dsc')
+        with open(_victim, 'a') as _f:
+            _f.write('# corrupted\n')
+        try:
+            SE.emit_source(_dsc3, _outa)
+            raise AssertionError('same-name different-bytes must raise')
+        except SE.SourceEmitError as _e:
+            assert 'append-only' in str(_e)
+
+
+def test_source_emit_quilt_fold_for_upstream_touching_patches():
+    """CONF-03 mini-fold (MAT-02 stage 6): a 3.0 (quilt) source whose Athena
+    patch touches UPSTREAM files folds that patch into debian/patches +
+    series at emit (dpkg-source -b otherwise refuses the residual diff —
+    the cryptsetup/curl class); the emitted source extracts with the patch
+    applied.  A patch touching both upstream and debian/ raises (a series
+    patch may not modify debian/)."""
+    import subprocess
+    import tarfile
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import source_emit as SE
+    if not _have_dpkg_deb():
+        print("SKIP test_source_emit_quilt_fold (no dpkg tools)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        # upstream tarball
+        _up = os.path.join(_tmp, 'quilty-1.0')
+        os.makedirs(_up)
+        with open(os.path.join(_up, 'runme.sh'), 'w') as _f:
+            _f.write('#!/bin/sh\necho upstream\n')
+        with tarfile.open(os.path.join(_tmp, 'quilty_1.0.orig.tar.gz'),
+                          'w:gz') as _t:
+            _t.add(_up, arcname='quilty-1.0')
+        # debianized tree -> input dsc at +deb12u1 (forces reemit class)
+        os.makedirs(os.path.join(_up, 'debian', 'source'))
+        with open(os.path.join(_up, 'debian', 'source', 'format'), 'w') as _f:
+            _f.write('3.0 (quilt)\n')
+        with open(os.path.join(_up, 'debian', 'control'), 'w') as _f:
+            _f.write('Source: quilty\nMaintainer: T <t@l>\n\n'
+                     'Package: quilty\nArchitecture: all\n'
+                     'Description: quilt fold fixture\n body\n')
+        with open(os.path.join(_up, 'debian', 'changelog'), 'w') as _f:
+            _f.write('quilty (1.0-1+deb12u1) bookworm; urgency=medium\n\n'
+                     '  * Fixture.\n\n'
+                     ' -- Up Stream <up@stream>  '
+                     'Sun, 06 Jul 2026 00:00:00 +0000\n')
+        subprocess.run(['dpkg-source', '-b', _up], cwd=_tmp,
+                       check=True, capture_output=True)
+        _dsc = os.path.join(_tmp, 'quilty_1.0-1+deb12u1.dsc')
+        # our patch set: touches the UPSTREAM file
+        _proot = os.path.join(_tmp, 'patchroot')
+        _pdir = os.path.join(_proot, 'quilty', '1.0-1+deb12u1')
+        os.makedirs(_pdir)
+        with open(os.path.join(_pdir, '9001-fix.patch'), 'w') as _f:
+            _f.write('--- a/runme.sh\n+++ b/runme.sh\n'
+                     '@@ -1,2 +1,2 @@\n #!/bin/sh\n'
+                     '-echo upstream\n+echo asgard\n')
+        _out = os.path.join(_tmp, 'out')
+        _r = SE.emit_source(_dsc, _out, patch_root=_proot, patch_level=1)
+        assert _r['status'] == 'emitted', _r
+        assert _r['version'] == '1.0-1+asg1u1+p1'
+        # emitted source extracts; our patch is IN the series and applied
+        _x = os.path.join(_tmp, 'x')
+        os.makedirs(_x)
+        subprocess.run(
+            ['dpkg-source', '--no-check', '-x',
+             os.path.join(_out, 'quilty_1.0-1+asg1u1+p1.dsc'),
+             os.path.join(_x, 't')], check=True, capture_output=True)
+        _series = open(os.path.join(_x, 't', 'debian', 'patches',
+                                    'series')).read()
+        assert '9001-fix.patch' in _series
+        assert 'echo asgard' in open(
+            os.path.join(_x, 't', 'runme.sh')).read()
+        # mixed upstream+debian patch → hard error
+        with open(os.path.join(_pdir, '9002-mixed.patch'), 'w') as _f:
+            _f.write('--- a/runme.sh\n+++ b/runme.sh\n'
+                     '@@ -1,2 +1,2 @@\n #!/bin/sh\n'
+                     '-echo asgard\n+echo mixed\n'
+                     '--- a/debian/control\n+++ b/debian/control\n'
+                     '@@ -1,2 +1,2 @@\n Source: quilty\n'
+                     '-Maintainer: T <t@l>\n+Maintainer: M <m@l>\n')
+        try:
+            SE.emit_source(_dsc, os.path.join(_tmp, 'out2'),
+                           patch_root=_proot, patch_level=2)
+            raise AssertionError('mixed patch must raise')
+        except SE.SourceEmitError as _e:
+            assert 'BOTH upstream and debian/' in str(_e)
+
+
+def test_source_emit_environment_mode_helpers():
+    """MAT-02 D4b: os-release ID parsing + the transpose-mode decision —
+    debian container → transpose applies; the native distribution → it must
+    not (callers refuse loudly on mismatch)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import source_emit as SE
+    _deb = 'PRETTY_NAME="Debian GNU/Linux 12"\nID=debian\n'
+    _asg = 'PRETTY_NAME="Asgard 1 (thor)"\nID=asgard\nID_LIKE=debian\n'
+    assert SE.environment_id(_deb) == 'debian'
+    assert SE.environment_id(_asg) == 'asgard'
+    assert SE.environment_id('no id here') == ''
+    assert SE.transpose_applies('debian', 'asgard') is True
+    assert SE.transpose_applies('asgard', 'asgard') is False
+    assert SE.transpose_applies('asgard', 'Asgard') is False
+
+
+def test_source_emit_backfill_helpers():
+    """MAT-02 stage 3 helpers: patch_level_from_version recovers the uniform
+    +pP from a shipped version; find_dsc resolves across search dirs and
+    picks the highest version; apply_emit_to_record folds results under
+    SEPARATE keys (never outputs/output_hashes — those are .deb-routed)."""
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import source_emit as SE
+    assert SE.patch_level_from_version('2.36-9+asg1u14+p3') == 3
+    assert SE.patch_level_from_version('5.2.15-2+asg1u0+p1') == 1
+    assert SE.patch_level_from_version('1.0-2') == 0
+    assert SE.patch_level_from_version('') == 0
+    # outputs are the shipped truth (bash: intended 5.2.15-2, shipped +p1)
+    assert SE.patch_level_from_outputs(
+        ['bash_5.2.15-2+asg1u0+p1_amd64.deb',
+         'bash-doc_5.2.15-2+asg1u0+p1_all.deb']) == 1
+    assert SE.patch_level_from_outputs(['x_1.0-2_amd64.deb']) == 0
+    assert SE.patch_level_from_outputs([]) == 0
+    with tempfile.TemporaryDirectory() as _tmp:
+        _a = os.path.join(_tmp, 'a')
+        _b = os.path.join(_tmp, 'b')
+        os.makedirs(_a)
+        os.makedirs(_b)
+        for _f in ('demo_1.0-1.dsc',):
+            open(os.path.join(_a, _f), 'w').write('x')
+        for _f in ('demo_1.0-2.dsc', 'other_9.9.dsc'):
+            open(os.path.join(_b, _f), 'w').write('x')
+        _hit = SE.find_dsc('demo', [_a, _b])
+        assert _hit and _hit.endswith('demo_1.0-2.dsc'), _hit
+        assert SE.find_dsc('missing', [_a, _b]) is None
+    _rec = {'outputs': ['x.deb'], 'output_hashes': {'x.deb': 'aa'}}
+    _res = {'status': 'emitted', 'class': 'reemit',
+            'files': {'demo_1.0-2+asg1u1.dsc': 'bb',
+                      'demo_1.0.orig.tar.gz': 'cc'}}
+    SE.apply_emit_to_record(_rec, _res)
+    assert _rec['outputs'] == ['x.deb']              # .deb keys untouched
+    assert _rec['output_hashes'] == {'x.deb': 'aa'}
+    assert _rec['source_outputs'] == ['demo_1.0-2+asg1u1.dsc',
+                                      'demo_1.0.orig.tar.gz']
+    assert _rec['source_output_hashes']['demo_1.0-2+asg1u1.dsc'] == 'bb'
+    assert _rec['source_emit_class'] == 'reemit'
+
+
 def test_tunneled_binary_names_resolves_from_cache():
     """utils.tunneled_binary_names maps every [Source] Tunneled source to its
     binary names via cache.source_hashtable (the keep_binnmu_names feed for
@@ -1502,6 +1904,16 @@ TESTS = [
     test_transpose_control_text_version_deps_and_provenance,
     test_transpose_control_text_strips_binnmu_from_constraint_bounds,
     test_transpose_control_text_keep_binnmu_names_exempts_tunneled_targets,
+    test_match_pristine_base_tunneled_binnmu_acceptance,
+    test_source_package_version_predictor,
+    test_transpose_ceiling_dot_tail_transposes,
+    test_transpose_constraint_strips_legacy_binnmu_bound,
+    test_transpose_deb_source_annotation_cases,
+    test_transpose_source_relations_build_fields_and_substvars,
+    test_source_emit_classify_verbatim_and_reemit,
+    test_source_emit_quilt_fold_for_upstream_touching_patches,
+    test_source_emit_environment_mode_helpers,
+    test_source_emit_backfill_helpers,
     test_tunneled_binary_names_resolves_from_cache,
     test_transpose_control_text_no_token_is_noop_no_provenance,
     test_transpose_scheme_boundary_table_and_ordering,

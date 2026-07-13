@@ -138,6 +138,29 @@ _NMU_STRIP_FIELDS = (
     'Enhances', 'Provides', 'Conflicts', 'Breaks', 'Replaces',
 )
 
+# The SOURCE-side relation field set (MAT-02 D4): a source package's
+# debian/control (and its .dsc) additionally carries the build relations.
+# `+asg` sorts BELOW `+deb`, so an untransposed Build-Depends floor
+# referencing a Debian update is unsatisfiable against our repo — the
+# emitted native source must have these rewritten like everything else.
+SOURCE_RELATION_FIELDS = _NMU_STRIP_FIELDS + (
+    'Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch',
+    'Build-Conflicts', 'Build-Conflicts-Indep', 'Build-Conflicts-Arch',
+)
+
+
+# Source-package pool artifact (MAT-02): .dsc / tarballs / 1.0 diff /
+# upstream signature.  `.tar.` (with the trailing dot) matches every
+# compression (orig.tar.gz, debian.tar.xz, native x_1.0.tar.xz) while
+# index files (Sources.gz, Packages.xz) never match.
+_SOURCE_ARTIFACT_RE = re.compile(r'(?:\.dsc|\.diff\.gz|\.asc)$|\.tar\.')
+
+
+def is_source_artifact(filename: str) -> bool:
+    """True when *filename* is a source-package pool artifact (as opposed
+    to a binary .deb/.udeb or an index file)."""
+    return bool(_SOURCE_ARTIFACT_RE.search(filename))
+
 
 def normalize_repo_filename(filename: str) -> str:
     """Map an upstream Packages-index Filename to its repo/main on-disk
@@ -198,6 +221,14 @@ def strip_nmu_suffix(version: str) -> str:
 # source identity).  Used by the Pass-1 rebuild decision to compare a source
 # version independent of a buildd's binary-only rebuild.
 _BINNMU_SUFFIX_RE = re.compile(r'(?:\+b\d+|~bpo\d+\+\d+)$')
+
+# Legacy no-'+' binNMU form, CONSTRAINT BOUNDS ONLY: a bare `b[N]` tail after
+# a digit (`>= 0.15.5-2b` — gnome-contacts' folks floor; oracle-2 class 1,
+# 2026-07-12).  Never applied to Version fields — a genuine upstream version
+# ending `…<digit>b` would be indistinguishable, but none exists in the
+# archive (full-universe verdict oracle) and the form is Debian's documented
+# legacy binNMU marker.
+_LEGACY_BINNMU_BOUND_RE = re.compile(r'(?<=\d)b\d*$')
 
 
 def strip_binNMU(version: str) -> 'tuple[str, str]':
@@ -288,10 +319,14 @@ def apply_asg_suffix(base: str, release: int, n: int) -> str:
 # leading +/~ sign is kept (a ~deb stays ~asg, sorting BELOW pristine, by
 # design).  See docs/versioning-mechanics.md.
 # ---------------------------------------------------------------------------
-# Trailing redistribution token.  `tail` captures an optional `~` that
-# constraint floors append after the ordinal (e.g. `>= 0.8.0-2+deb12u1~`); it
-# is carried through so a transposed floor keeps sorting the same way.
-_TRANSPOSE_RE = re.compile(r'(?P<sign>[+~])deb\d+u(?P<k>\d+)(?P<tail>~?)$')
+# Trailing redistribution token.  `tail` captures a punctuation-only suffix
+# that constraint floors/ceilings append after the ordinal — a bare `~` on a
+# floor (`>= 0.8.0-2+deb12u1~`) or an apt-ceiling dot-tail
+# (`<< …+deb12u1.0`, `<< …+deb12u1.1~`, the erlang/mosquitto idiom; oracle-2
+# class 2, 2026-07-12).  It is carried through so a transposed bound keeps
+# sorting the same way relative to the transposed base.
+_TRANSPOSE_RE = re.compile(
+    r'(?P<sign>[+~])deb\d+u(?P<k>\d+)(?P<tail>(?:\.\d+)*~?)$')
 
 
 def transpose(version: str, prefix: str, release: int) -> str:
@@ -307,6 +342,8 @@ def transpose(version: str, prefix: str, release: int) -> str:
         transpose('2.10.4+nmu1', 'asg', 1)       → '2.10.4+nmu1'   (no trailing deb)
         transpose('2.10.4+nmu1+b1', 'asg', 1)    → '2.10.4+nmu1+b1'(trailing +b1)
         transpose('0.8.0-2+deb12u1~', 'asg', 1)  → '0.8.0-2+asg1u1~' (floor tail)
+        transpose('1.0+deb12u1.0', 'asg', 1)     → '1.0+asg1u1.0' (ceiling tail)
+        transpose('1.0+deb12u1.1~', 'asg', 1)    → '1.0+asg1u1.1~'
     """
     return _TRANSPOSE_RE.sub(
         lambda m: f"{m.group('sign')}{prefix}{release}u{m.group('k')}{m.group('tail')}",
@@ -325,7 +362,8 @@ def asg_filename(filename: str, release: int, n: int) -> str:
     return f'{_pkg}_{apply_asg_suffix(_ver, release, n)}_{_arch}{_ext}'
 
 
-def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
+def match_pristine_base(predicted_fn: str, ondisk_fn: str,
+                        allow_binnmu: bool = False) -> bool:
     """True when an on-disk artifact is the dep-tree's predicted (pristine)
     filename, optionally carrying a trailing +asg<R>u<N> on its version
     segment.  Reconciles the pristine filename the predictor computes
@@ -336,6 +374,14 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
     Requires identical package name, architecture, and extension; the on-disk
     version must equal the predicted version OR be a transpose of the same
     pristine base carrying our +asg<R>u<N> / ~asg<R>u<N> layer.
+
+    ``allow_binnmu`` — the TUNNELLED acceptance (callers pass it ONLY for a
+    record classified 'tunneled'): a tunnelled binNMU keeps its upstream
+    ``+bN`` on disk by design (transpose_deb frozen-sibling-pin rule;
+    ffmpegthumbnailer, 2026-07-12), so an on-disk version reducing to the
+    same pristine base with a trailing binNMU marker also matches.  Rebuilt
+    sources must NOT pass this (a stale upstream-suffixed leftover would
+    wrongly satisfy the skip gate), hence opt-in.
     """
     if predicted_fn == ondisk_fn:
         return True
@@ -350,6 +396,10 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
     if _o[1] == _p[1]:                                 # exact (pristine) match
         return True
     if parse_asg_suffix(_o[1]) is None:                # on-disk has no asg layer
+        if allow_binnmu and strip_binNMU(_o[1])[1]:
+            # tunnelled +bN acceptance: same pristine base, upstream
+            # binNMU layer kept on disk (see docstring).
+            return pristine_base(_o[1]) == pristine_base(_p[1])
         return False
     # On-disk carries our asg layer.  Compare PRISTINE BASES, not just the
     # asg-stripped on-disk version, to reconcile the transpose model with the
@@ -367,7 +417,8 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
 
 def find_matching_artifact(dst_dir: str,
                            predicted_filename: str,
-                           dir_listing: 'Optional[list]' = None) -> 'Optional[str]':
+                           dir_listing: 'Optional[list]' = None,
+                           allow_binnmu: bool = False) -> 'Optional[str]':
     """Return the on-disk path of `predicted_filename` in `dst_dir`, or of an
     +asg<R>u<N>-stamped variant of it (match_pristine_base), else None.
 
@@ -389,7 +440,8 @@ def find_matching_artifact(dst_dir: str,
         _entries = os.listdir(dst_dir) if dir_listing is None else dir_listing
         for _cand in _entries:
             if (_cand.endswith(('.deb', '.udeb'))
-                    and match_pristine_base(predicted_filename, _cand)
+                    and match_pristine_base(predicted_filename, _cand,
+                                            allow_binnmu=allow_binnmu)
                     and os.path.isfile(os.path.join(dst_dir, _cand))):
                 return os.path.join(dst_dir, _cand)
     except OSError:
@@ -400,7 +452,8 @@ def find_matching_artifact(dst_dir: str,
 def _rewrite_control_text(
         content: str,
         version_op: 'Callable[[str], str]',
-        constraint_op: 'Optional[Callable[[str, Optional[str]], str]]' = None
+        constraint_op: 'Optional[Callable[[str, Optional[str]], str]]' = None,
+        fields: 'Optional[tuple]' = None
         ) -> 'tuple[str, int]':
     """Shared scaffold for :func:`strip_nmu_from_control_text` and
     :func:`transpose_control_text`.  Applies ``version_op`` (a version-string
@@ -490,12 +543,13 @@ def _rewrite_control_text(
         _prefix = f'{_name}{_tail}' if _name is not None else ''
         return f'{_prefix}({_op} {_new_ver})'
 
+    _fields = fields if fields is not None else _NMU_STRIP_FIELDS
     _new_lines: 'list[str]' = []
     _in_target = False
     for _line in _content.splitlines(keepends=True):
         if _line and _line[0] not in (' ', '\t'):
             _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
-            _in_target = _m is not None and _m.group(1) in _NMU_STRIP_FIELDS
+            _in_target = _m is not None and _m.group(1) in _fields
         # (continuation lines inherit the surrounding _in_target state)
         if _in_target:
             _new_lines.append(_constraint_re.sub(_sub_constraint, _line))
@@ -842,6 +896,91 @@ def compute_transposed_versions(
     }
 
 
+def _make_transpose_constraint_op(prefix: str, release: int,
+                                  keep_binnmu_names: 'Optional[frozenset]'):
+    """The shared CONSTRAINT op of the transpose scheme (one home —
+    transpose_control_text and transpose_source_relations must never
+    drift): strip the Debian binNMU/backport layer (modern +bN/~bpoN+M and
+    the legacy bare-`Nb` bound form) then transpose, EXCEPT bounds whose
+    target is a tunnelled binary (shipped verbatim — keep the layer) and
+    bounds already carrying OUR +asg chain (a force-rebuild pin)."""
+    def _constraint_op(_v: str, _name: 'Optional[str]') -> str:
+        if _name is not None and keep_binnmu_names \
+                and _name in keep_binnmu_names:
+            return transpose(_v, prefix, release)
+        if parse_asg_suffix(_v) is not None:
+            return transpose(_v, prefix, release)
+        _stripped = strip_binNMU(_v)[0]
+        _stripped = _LEGACY_BINNMU_BOUND_RE.sub('', _stripped)
+        return transpose(_stripped, prefix, release)
+    return _constraint_op
+
+
+def transpose_source_relations(content: str, prefix: str, release: int,
+                               keep_binnmu_names: 'Optional[frozenset]' = None
+                               ) -> 'tuple[str, int]':
+    """Transpose every literal version constraint in a SOURCE control text —
+    a source-tree ``debian/control`` (multi-stanza) or a ``.dsc`` body — over
+    the SOURCE field set: the nine runtime relation fields PLUS
+    ``Build-Depends*`` / ``Build-Conflicts*`` (MAT-02 D4).
+
+    Same constraint op as :func:`transpose_control_text` (binNMU/backport/
+    legacy strip, tunnelled-target exemption, +asg guard).  Substvars
+    (``${binary:Version}`` …) pass through untouched.  A source control has
+    no ``Version:`` field (the version lives in the changelog), so the
+    version op and the provenance X-field never fire on it; on a ``.dsc``
+    body the Version field transposes, which matches the emitted source's
+    version.  Idempotent."""
+    return _rewrite_control_text(
+        content, lambda _v: transpose(_v, prefix, release),
+        constraint_op=_make_transpose_constraint_op(
+            prefix, release, keep_binnmu_names),
+        fields=SOURCE_RELATION_FIELDS)
+
+
+def source_package_version(source_version: str, prefix: str, release: int,
+                           patch_level: int = 0) -> str:
+    """The version the PUBLISHED source package carries (MAT-02 D2):
+    identical to its binaries' version MINUS any force-`+bN` layer — a forced
+    rebuild is binary-only, the source never moves.  transpose + uniform +pP.
+
+        source_package_version('2.36-9+deb12u14', 'asg', 1)     → '2.36-9+asg1u14'
+        source_package_version('5.2.15-2', 'asg', 1, 1)         → '5.2.15-2+asg1u0+p1'
+    """
+    return transposed_version(source_version, prefix, release,
+                              patch_level=patch_level)
+
+
+# Binary-control Source reference: `Source: <src>` with an optional
+# `(<version>)` annotation (dpkg adds it only when binary and source
+# versions differ).
+_SOURCE_FIELD_RE = re.compile(r'^Source: (\S+)(?: \((\S+)\))?\s*$',
+                              re.MULTILINE)
+
+
+def _apply_source_annotation(content: str, src_version: str,
+                             bin_version: str) -> 'tuple[str, bool]':
+    """Make the control's `Source:` reference point at *src_version* — the
+    version the PUBLISHED source package carries (MAT-02 D3).  A missing
+    annotation implies source-version == binary-version, so one is only
+    written when they differ; an existing annotation is rewritten in place.
+    Returns (new_text, changed)."""
+    _m = _SOURCE_FIELD_RE.search(content)
+    if _m:
+        _want = (f'Source: {_m.group(1)} ({src_version})'
+                 if src_version != bin_version else f'Source: {_m.group(1)}')
+        if _m.group(0).rstrip() == _want:
+            return content, False
+        return (content[:_m.start()] + _want + content[_m.end():]), True
+    if src_version == bin_version:
+        return content, False
+    _p = re.search(r'^Package: (\S+)\s*$', content, re.MULTILINE)
+    if not _p:
+        return content, False
+    _ins = f'{_p.group(0).rstrip()}\nSource: {_p.group(1)} ({src_version})'
+    return (content[:_p.start()] + _ins + content[_p.end():]), True
+
+
 def transpose_control_text(content: str, prefix: str, release: int,
                            keep_binnmu_names: 'Optional[frozenset]' = None
                            ) -> 'tuple[str, int]':
@@ -871,26 +1010,10 @@ def transpose_control_text(content: str, prefix: str, release: int,
     wrapper over :func:`_rewrite_control_text` with a transpose-only Version op
     and a binNMU-stripping CONSTRAINT op (see below).
     """
-    def _constraint_op(_v: str, _name: 'Optional[str]') -> str:
-        # Constraint bounds reference OTHER packages' versions; a Debian
-        # binNMU (+bN) / backport (~bpoN+M) layer on them is buildd metadata
-        # that doesn't exist in our repo, so strip it BEFORE transposing the
-        # trailing +deb token (leaving +deb / embedded +deb / +nmuN / +dfsg
-        # intact — strip_binNMU is narrow).  EXEMPT: a bound targeting a
-        # tunnelled binary (keep_binnmu_names) — its shipped version KEEPS
-        # the layer, so the bound must too.  GUARD: a bound that already
-        # carries OUR +asg force level (+asg…+bN) is ours, not Debian's —
-        # leave it to transpose() untouched so a re-normalise pass can't strip
-        # a legitimate force-rebuild pin.
-        if _name is not None and keep_binnmu_names \
-                and _name in keep_binnmu_names:
-            return transpose(_v, prefix, release)
-        if parse_asg_suffix(_v) is not None:
-            return transpose(_v, prefix, release)
-        return transpose(strip_binNMU(_v)[0], prefix, release)
     return _rewrite_control_text(
         content, lambda _v: transpose(_v, prefix, release),
-        constraint_op=_constraint_op)
+        constraint_op=_make_transpose_constraint_op(
+            prefix, release, keep_binnmu_names))
 
 
 # Exact-pin matcher: a `<name> (= <version>)` constraint inside a relation
@@ -936,7 +1059,8 @@ def transpose_deb(deb_path: str, prefix: str, release: int,
                   patch_level: int = 0,
                   force_bn: 'Optional[int]' = None,
                   sibling_names: 'Optional[set]' = None,
-                  keep_binnmu_names: 'Optional[frozenset]' = None) -> dict:
+                  keep_binnmu_names: 'Optional[frozenset]' = None,
+                  source_version: 'Optional[str]' = None) -> dict:
     """Transpose + stamp a built .deb/.udeb in place — the single-cycle
     replacement for ``strip_nmu_from_deb`` + ``restamp_asg_deb`` on the build
     and tunnel paths.  Updates filename, DEBIAN/control Version, dep
@@ -949,7 +1073,16 @@ def transpose_deb(deb_path: str, prefix: str, release: int,
     transposes to a no-op on the embedded +deb and KEEPS the +bN — by design
     (its frozen sibling pins reference that +bN).  For those pins to survive
     the constraint rewrite, pass the tunnelled binary names as
-    ``keep_binnmu_names`` (see :func:`transpose_control_text`).  Idempotent.
+    ``keep_binnmu_names`` (see :func:`transpose_control_text`).
+
+    ``Source:`` reference coherence (MAT-02 D3): the control's implied or
+    annotated source version is made to match the PUBLISHED source package.
+    ``source_version`` overrides explicitly (the tunnel path passes the
+    UPSTREAM source version — tunnelled sources are republished verbatim);
+    otherwise an existing annotation (a cross-base sibling) is transposed
+    (+ uniform ``+pP``), and a forced ``+bN`` rebuild is stamped with the
+    sans-``+bN`` version — the source never carries our binary-only suffix.
+    Idempotent.
     """
     import subprocess
     import tempfile
@@ -1004,12 +1137,38 @@ def transpose_deb(deb_path: str, prefix: str, release: int,
     else:
         _new_text = _k_text
 
+    # Source: reference coherence (D3).  Precedence: explicit override
+    # (tunnel path — the upstream source version, published verbatim) →
+    # existing cross-base annotation, transposed + uniform +pP → forced
+    # +bN rebuild, stamped sans-+bN.  A plain build (source version ==
+    # binary version) needs nothing: the implicit reference is already
+    # the published source's version.
+    _src_ver = source_version
+    if _src_ver is None:
+        _m_src = _SOURCE_FIELD_RE.search(_new_text)
+        if _m_src and _m_src.group(2):
+            _ann = _m_src.group(2)
+            # already stamped (+asg…[+pP]) on a re-run → keep as-is;
+            # else transpose the upstream annotation + uniform +pP.
+            _src_ver = (_ann if parse_asg_suffix(_ann) is not None
+                        else _append_patch_force(
+                            transpose(_ann, prefix, release),
+                            patch_level, None, prefix, release))
+        elif force_bn is not None:
+            _src_ver = _append_patch_force(
+                _k_ver, patch_level, None, prefix, release)
+    _ann_changed = False
+    if _src_ver is not None:
+        _new_text, _ann_changed = _apply_source_annotation(
+            _new_text, _src_ver, _final_ver)
+
     _new_file_ver = _append_patch_force(
         transpose(_old_file_ver, prefix, release), patch_level, force_bn,
         prefix, release)
     _filename_changed = _new_file_ver != _old_file_ver
 
-    if not _filename_changed and _changes == 0 and _final_ver == _k_ver:
+    if (not _filename_changed and _changes == 0 and _final_ver == _k_ver
+            and not _ann_changed):
         return _result      # 'unchanged'
 
     _new_base = (f'{_pkg}_{_new_file_ver}_{_arch}{_ext}'

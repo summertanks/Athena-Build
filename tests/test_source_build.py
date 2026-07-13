@@ -5834,7 +5834,49 @@ def test_render_install_cmd_shlex_quotes_pkg_names():
     assert "'mawk|hax'" in _cmd, _cmd
     assert ' gawk ' in _cmd or _cmd.rstrip().endswith('gawk')  # legit alt bare
 
+def test_d4b_base_check_refuses_native_rootfs():
+    """MAT-02 D4b: the build container's base rootfs is checked before the
+    image build — a DEBIAN base passes (transpose mode correct), the NATIVE
+    distribution's base raises (running the transpose pipeline over already-
+    +asg inputs), and a base without os-release is tolerated with a warning
+    (don't brick exotic bases on the guard's account)."""
+    import io
+    import tarfile
+    import tempfile
+    import types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from buildcontainer import BuildContainer
+
+    def _mk_tar(path, os_release=None):
+        with tarfile.open(path, 'w') as _t:
+            if os_release is not None:
+                _data = os_release.encode()
+                _info = tarfile.TarInfo('./etc/os-release')
+                _info.size = len(_data)
+                _t.addfile(_info, io.BytesIO(_data))
+            _info2 = tarfile.TarInfo('./etc/hostname')
+            _info2.size = 2
+            _t.addfile(_info2, io.BytesIO(b'x\n'))
+
+    _cfg = types.SimpleNamespace(build_base_id='asgard')
+    with tempfile.TemporaryDirectory() as _tmp:
+        _deb = os.path.join(_tmp, 'deb.tar')
+        _mk_tar(_deb, 'PRETTY_NAME="Debian 12"\nID=debian\n')
+        BuildContainer._assert_nonnative_base(_deb, _cfg)   # no raise
+        _asg = os.path.join(_tmp, 'asg.tar')
+        _mk_tar(_asg, 'PRETTY_NAME="Asgard 1"\nID=asgard\nID_LIKE=debian\n')
+        try:
+            BuildContainer._assert_nonnative_base(_asg, _cfg)
+            raise AssertionError('native base must raise')
+        except RuntimeError as _e:
+            assert 'NATIVE' in str(_e)
+        _bare = os.path.join(_tmp, 'bare.tar')
+        _mk_tar(_bare, None)
+        BuildContainer._assert_nonnative_base(_bare, _cfg)  # tolerated
+
+
 TESTS = [
+    test_d4b_base_check_refuses_native_rootfs,
     test_write_snapshot_sources_localmirror_override,
     test_container_release_defaults_to_release_unless_overridden,
     test_recipe_only_container_skips_local_docker,

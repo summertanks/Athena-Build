@@ -301,8 +301,14 @@ def list_remote_debs(
         return None
     _host, _path = pool_remote_spec.split(':', 1)
     _path = _path.rstrip('/') or '.'
+    # MAT-02: source pool artifacts are claimed like binaries — the
+    # listing must see them or every source claim audits missing_on_disk
+    # (2026-07-13, first post-source publish).  Restricted to source/
+    # dirs via the path glob so index files never match.
     _find = (f"cd {shlex.quote(_path)} && "
-             "find dists -type f \\( -name '*.deb' -o -name '*.udeb' \\)")
+             "find dists -type f \\( -name '*.deb' -o -name '*.udeb' "
+             "-o -path '*/source/*.dsc' -o -path '*/source/*.tar.*' "
+             "-o -path '*/source/*.diff.gz' -o -path '*/source/*.asc' \\)")
     _argv = ['ssh']
     if ssh_key:
         _argv += ['-i', ssh_key]
@@ -433,6 +439,15 @@ def push_dist_tree(
         '--delete',
         '--exclude=*.deb',
         '--exclude=*.udeb',
+        # MAT-02: SOURCE pool artifacts live inside dists/<codename>/
+        # <comp>/source/ — same append-only discipline as the .debs
+        # (pushed per-claim, never transferred/deleted by the dist-tree
+        # pass).  Index files (Sources, Sources.gz/.xz) match none of
+        # these patterns and still sync + reap normally.
+        '--exclude=*.dsc',
+        '--exclude=*.tar.*',
+        '--exclude=*.diff.gz',
+        '--exclude=*.asc',
     ]
     _ssh = _ssh_arg(ssh_key)
     if _ssh is not None:

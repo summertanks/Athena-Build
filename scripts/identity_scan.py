@@ -65,7 +65,10 @@ _SKIP_GLOBS = (
     '*/debian/patches/*',
     '*.po',  '*.pot',          # translations echo source strings
     '*.gz',  '*.xz',  '*.bz2', '*.zip', '*.tar',
-    '*.deb', '*.udeb', '*.dsc',
+    # source-package artifacts are provenance, not shipped-identity
+    # surface (MAT-02 D5): their content legitimately says "Debian"
+    # everywhere and scrubbing would corrupt checksums/signatures.
+    '*.deb', '*.udeb', '*.dsc', '*.asc',
     '*.png', '*.jpg', '*.jpeg', '*.gif', '*.ico', '*.svg',
     '*.pdf',
 )

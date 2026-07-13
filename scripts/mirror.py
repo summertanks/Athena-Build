@@ -1303,6 +1303,89 @@ def audit_packages_chain(
     return _index, _findings
 
 
+def audit_sources_chain(
+    pool_url: str, codename: str, release: 'Any',
+    fetched_dir: str, ssh_key: 'Optional[str]' = None,
+) -> 'tuple[dict[str, dict], list[tuple[str, str, str]]]':
+    """MAT-02 stage 4 — the Sources side of :func:`audit_packages_chain`:
+    for each ``<component>/source/Sources`` the verified InRelease declares,
+    pull and verify its SHA-256 against the pin, then parse it.
+
+    Returns ``(sources_index, findings)`` where ``sources_index`` maps each
+    referenced source FILE basename (.dsc / .orig.tar.* / .debian.tar.* /
+    .diff.gz) → dict with ``sha256``, ``size``, ``source``, ``version``,
+    ``component`` — the per-file view the stage-5 claim cross-check joins
+    against.  An InRelease with no source indexes yields an empty index and
+    no findings (sources not yet published — legitimate)."""
+    import hashlib as _hashlib
+    import os as _os
+    import re as _re
+    from coord import transport as _transport
+
+    _findings: 'list[tuple[str, str, str]]' = []
+    _index: 'dict[str, dict]' = {}
+    _sha256_block = release.get('SHA256') if release is not None else None
+    if not _sha256_block:
+        return _index, _findings          # packages chain already flagged it
+    _by_name = {str(_e.get('name')): _e for _e in _sha256_block
+                if _e.get('name')}
+    _targets = [(_m.group(1), _n) for _n in sorted(_by_name)
+                for _m in [_re.match(r'^(.+)/source/Sources$', _n)] if _m]
+    for _comp, _rel in _targets:
+        _pin = _by_name[_rel]
+        _remote = pool_url.rstrip('/') + f"/dists/{codename}/{_rel}"
+        _rsync_spec, _ = rsync_spec_for_url(_remote)
+        _local = _os.path.join(
+            fetched_dir, f"Sources.{_comp.replace('/', '_')}")
+        _ok, _detail = _transport.pull_single_file(
+            remote_spec=_rsync_spec, local_path=_local, ssh_key=ssh_key)
+        if not _ok:
+            _findings.append((
+                'CRITICAL', 'sources_unreachable',
+                f"could not pull {_rel}: {_detail}"))
+            continue
+        try:
+            with open(_local, 'rb') as _fh:
+                _data = _fh.read()
+        except OSError as _e:
+            _findings.append((
+                'CRITICAL', 'sources_unreadable',
+                f"local {_local} unreadable: {_e}"))
+            continue
+        _actual = _hashlib.sha256(_data).hexdigest()
+        _expected = str(_pin.get('sha256', ''))
+        if _expected and _actual != _expected:
+            _findings.append((
+                'CRITICAL', 'sources_sha_mismatch',
+                f"on-pool {_rel} sha256={_actual[:12]} disagrees "
+                f"with InRelease pin={_expected[:12]}"))
+            continue
+        from debian.deb822 import Sources as _Sources
+        try:
+            _stream = iter(_Sources.iter_paragraphs(
+                _data, use_apt_pkg=False))
+        except Exception as _e:
+            _findings.append((
+                'CRITICAL', 'sources_parse_failed',
+                f"could not parse {_rel}: {type(_e).__name__}: {_e}"))
+            continue
+        for _para in _stream:
+            _srcname = str(_para.get('Package') or '')
+            _ver = str(_para.get('Version') or '')
+            for _row in (_para.get('Checksums-Sha256') or []):
+                _fname = str(_row.get('name') or '')
+                if not _fname:
+                    continue
+                _index[_os.path.basename(_fname)] = {
+                    'source':    _srcname,
+                    'version':   _ver,
+                    'sha256':    str(_row.get('sha256') or ''),
+                    'size':      str(_row.get('size') or ''),
+                    'component': _comp,
+                }
+    return _index, _findings
+
+
 def _superseded_seqs(claims: 'list[dict]') -> 'set[int]':
     """Per-builder supersession fold — thin alias for the canonical
     `coord.schema.superseded_seqs` (centralised the fold so every
@@ -1692,6 +1775,7 @@ def _classify_missing_claim(
         except Exception:
             _rec = {}
         _outputs = set((_rec.get('output_hashes') or {}).keys())
+        _outputs |= set((_rec.get('source_output_hashes') or {}).keys())
         if _outputs and _fn not in _outputs:
             return ('INFO', 'own_claim_disk_pending_release',
                     f"{_fn} → obsoleted")
@@ -1767,6 +1851,7 @@ def audit_closure_ledger(
     pkg_idx: 'dict[str, dict]',
     closure_bins: 'set[str]',
     packages_text: str,
+    src_idx: 'Optional[dict]' = None,
 ) -> 'list[tuple[str, str, str]]':
     """Validate the signed closure ledger against the VERIFIED published
     Packages.  Two CRITICAL checks:
@@ -1851,6 +1936,37 @@ def audit_closure_ledger(
     _audited_arches = {str(_pv.get('arch') or '') for _pv in pkg_idx.values()}
     _signed = signed_ledger.get('entries') or {}
 
+    # (c) MAT-02 stage 5 — SOURCE side: the ledger must carry every file
+    # the verified Sources indexes publish, and agree on sha/size.  Only
+    # runs when the caller audited the Sources chain (src_idx not None);
+    # 'source' joins the audited arches so a stale ledger entry naming an
+    # unpublished source file flags below.
+    if src_idx is not None:
+        _audited_arches.add('source')
+        for _fn, _se in sorted(src_idx.items()):
+            _key = f'{_fn}|source'
+            _sig = _signed.get(_key)
+            if not isinstance(_sig, dict):
+                _findings.append((
+                    'CRITICAL', 'closure_ledger_entry_missing',
+                    f"{_key}: published source file is absent from the "
+                    "mirror's ledger — a peer pull would miss it"))
+                continue
+            try:
+                _se_size = int(str(_se.get('size') or '0') or 0)
+            except ValueError:
+                _se_size = 0
+            try:
+                _sig_size = int(str(_sig.get('size') or '0') or 0)
+            except ValueError:
+                _sig_size = 0
+            if (str(_sig.get('sha256') or '') != str(_se.get('sha256') or '')
+                    or _sig_size != _se_size):
+                _findings.append((
+                    'CRITICAL', 'closure_ledger_disagree',
+                    f"{_key}: ledger sha/size disagrees with the verified "
+                    "Sources index"))
+
     def _norm(_d: dict) -> tuple:
         try:
             _s = int(str(_d.get('size') or '0') or 0)
@@ -1878,6 +1994,9 @@ def audit_closure_ledger(
     for _key, _sig in sorted(_signed.items()):
         if _key in _recomputed or not isinstance(_sig, dict):
             continue
+        if (src_idx is not None and _key.endswith('|source')
+                and _key.rsplit('|', 1)[0] in src_idx):
+            continue          # validated in (c)
         _arch = _key.rsplit('|', 1)[-1]
         if _arch in _audited_arches:
             _findings.append((
@@ -1995,11 +2114,14 @@ def _own_claims_disk_walk(
         return _rows
     _claims = by_builder.get(our_builder_id) or []
     # Walk the local pool dir once to build {basename: full_path}.
+    from bump import is_source_artifact as _is_src
     _by_name: 'dict[str, str]' = {}
     if _os.path.isdir(local_repo_dir):
         for _root, _dirs, _files in _os.walk(local_repo_dir):
+            _in_source = _os.path.basename(_root) == 'source'
             for _f in _files:
-                if _f.endswith(('.deb', '.udeb')):
+                if _f.endswith(('.deb', '.udeb')) or (
+                        _in_source and _is_src(_f)):
                     _by_name[_f] = _os.path.join(_root, _f)
     # Cache build_record lookups keyed on (source_name); each record
     # carries output_hashes for every binary it produced.  Reuse so a
@@ -2022,7 +2144,8 @@ def _own_claims_disk_walk(
             except Exception:
                 _rec = {}
             _br_cache[_source] = _rec
-        _oh = _rec.get('output_hashes') or {}
+        _oh = dict(_rec.get('output_hashes') or {})
+        _oh.update(_rec.get('source_output_hashes') or {})   # MAT-02
         # Match by filename if present, otherwise any value match
         # (older v2 records may key on something different).
         _fn = str(_claim.get('filename') or '')

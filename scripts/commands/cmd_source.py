@@ -337,7 +337,11 @@ class SourceCommandsMixin(SessionState):
         _all_present = True
         for _f in _expected:
             _dst_dir = self.config.deb_dest_for_filename(_f, _comp)
-            _match = utils.find_matching_artifact(_dst_dir, _f)
+            # tunnelled acceptance: a tunnelled binNMU keeps +bN on disk —
+            # MUST mirror check_build's gate exactly or build and audit
+            # diverge (the ffmpegthumbnailer stale_pass, 2026-07-12).
+            _match = utils.find_matching_artifact(
+                _dst_dir, _f, allow_binnmu=_record_tunneled)
             if _match is None:
                 _all_present = False
                 break
@@ -426,6 +430,240 @@ class SourceCommandsMixin(SessionState):
                 continue
             _findings.append((_p.package, _audit_state, _record_state))
         return _findings
+
+    def cmd_source_emit(self, *args):
+        """`source emit [<pkg>…]` — publish-side SOURCE packages (MAT-02
+        stage 3 backfill): for every built/tunnelled build record (or the
+        named subset), produce the published source package into
+        `dists/<codename>/<comp>/source/` via the source_emit engine —
+        pristine sources republished byte-verbatim, everything else
+        re-emitted deterministically at the binaries' version — and fold
+        the result into the build record (`source_outputs` /
+        `source_output_hashes`, SEPARATE from the .deb keys).
+
+        Retroactive: needs NO rebuild — emits from `source/` +
+        `patch/source/` (+ `fork/source/repo/` for forks).  Idempotent
+        with a FAST PATH: a record whose prior emit is fully on disk with
+        matching sha256 is skipped without re-deriving (add `force` to
+        reproduce + byte-verify everything); an existing identical file
+        is skipped at placement; same-name different-bytes is a hard
+        error (append-only).  Tunnelled sources are republished verbatim
+        regardless of version shape (force_class).
+
+        Usage: source emit [<pkg>…] [force] | source emit verify"""
+        if args and args[0] == 'verify':
+            return self._source_emit_verify()
+        _force = 'force' in args
+        _names = [a for a in args
+                  if not a.startswith('-') and a != 'force']
+        _blog = os.path.join(self.config.dir_log, 'build')
+        _all = sorted(
+            os.path.basename(_f)[:-len('.build.json')]
+            for _f in os.listdir(_blog) if _f.endswith('.build.json'))
+        _targets = _names or _all
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _keep = utils.tunneled_binary_names(self.config, self.cache)
+        if not _keep and self.cache is None:
+            console.print(
+                "source emit: cache not loaded — tunnelled-target bound "
+                "exemption degraded to empty (safe for the current archive; "
+                "run after `cache build` for full fidelity)",
+                tui.COLOR_WARNING)
+        _search = [self.config.dir_source,
+                   self.config.dir_fork_source_repo]
+        _tunneled = set(getattr(self.config, 'tunnel_packages', ()) or ())
+        # extraction workspace on DISK — the tempdir default is the
+        # tmpfs /tmp, which firefox-esr's 3+ GB tree overflows (ENOSPC).
+        _work_root = os.path.join(self.config.dir_cache, 'source-emit')
+        os.makedirs(_work_root, exist_ok=True)
+        _emitted = _verbatim = _skipped = _failed = 0
+        _bar = ProgressBar(label='source emit',
+                           maxvalue=max(len(_targets), 1),
+                           label_width=26, bar_width=20)
+        for _src in _targets:
+            _bar.label(_src)
+            _st = self._emit_one_source(_src, force=_force)
+            if _st in ('verbatim', 'fast-verbatim'):
+                _verbatim += 1
+            elif _st in ('emitted', 'fast-emitted'):
+                _emitted += 1
+            elif _st == 'skipped':
+                _skipped += 1
+            else:
+                _failed += 1
+            _bar.step(1)
+        _bar.close()
+        console.print(
+            f"source emit: verbatim={_verbatim} emitted={_emitted} "
+            f"skipped={_skipped} failed={_failed}",
+            tui.COLOR_HIGHLIGHT if not _failed else tui.COLOR_ERROR)
+        return _failed == 0
+
+    def _source_emit_verify(self) -> bool:
+        """`source emit verify` — READ-ONLY sweep of the emitted source pool:
+          - records with no emit yet (run `source emit`)
+          - emitted files missing from the pool / sha-drifted
+          - orphan files in dists/<codename>/*/source/ no record references
+        Never writes; the MUTATOR is plain `source emit`."""
+        import source_emit as _se
+        _blog = os.path.join(self.config.dir_log, 'build')
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _ok = _unemitted = _missing = _drift = 0
+        _referenced: 'set[str]' = set()
+        for _f in sorted(os.listdir(_blog)):
+            if not _f.endswith('.build.json'):
+                continue
+            _src = _f[:-len('.build.json')]
+            _rec = utils.read_build_record(_blog, _src)
+            if _rec is None or _rec.get('phase') not in ('done', 'tunneled'):
+                continue
+            _hashes = _rec.get('source_output_hashes') or {}
+            if not _hashes:
+                _unemitted += 1
+                console.print(f"  {_src}: no source emit recorded",
+                              tui.COLOR_WARNING)
+                continue
+            _comp = str(_rec.get('component') or 'main')
+            _dir = os.path.join(self.config.dir_repo, 'dists', _codename,
+                                _comp, 'source')
+            _bad = False
+            for _fn, _sha in _hashes.items():
+                _referenced.add(_fn)
+                _p = os.path.join(_dir, _fn)
+                if not os.path.isfile(_p):
+                    console.print(f"  {_src}: {_fn} MISSING from pool",
+                                  tui.COLOR_ERROR)
+                    _missing += 1
+                    _bad = True
+                elif _se._sha256(_p) != _sha:
+                    console.print(f"  {_src}: {_fn} sha DRIFT vs record",
+                                  tui.COLOR_ERROR)
+                    _drift += 1
+                    _bad = True
+            if not _bad:
+                _ok += 1
+        _orphans = 0
+        import glob as _glob
+        for _p in _glob.glob(os.path.join(
+                self.config.dir_repo, 'dists', _codename, '*', 'source',
+                '*')):
+            _fn = os.path.basename(_p)
+            if not os.path.isfile(_p) or _fn.startswith(
+                    ('Sources', 'Release')):
+                continue                         # indexes, not pool files
+            if _fn not in _referenced:
+                console.print(f"  orphan: {os.path.relpath(_p, self.config.dir_repo)}",
+                              tui.COLOR_WARNING)
+                _orphans += 1
+        console.print(
+            f"source emit verify: ok={_ok} unemitted={_unemitted} "
+            f"missing={_missing} drift={_drift} orphans={_orphans}",
+            tui.COLOR_HIGHLIGHT if not (_missing or _drift)
+            else tui.COLOR_ERROR)
+        return not (_missing or _drift)
+
+    def _emit_one_source(self, src: str, force: bool = False) -> str:
+        """Emit the published source package for ONE source from its build
+        record (the shared body of `source emit` and the per-build hook).
+        Returns 'verbatim' | 'emitted' | 'fast-verbatim' | 'fast-emitted' |
+        'skipped' (no terminal record) | 'failed'."""
+        import source_emit as _se
+        _blog = os.path.join(self.config.dir_log, 'build')
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _rec = utils.read_build_record(_blog, src)
+        if _rec is None or _rec.get('phase') not in ('done', 'tunneled'):
+            return 'skipped'
+        # Fast path: prior emit fully on disk with matching sha — trust the
+        # HMAC-signed record + disk hash instead of re-deriving (a re-emit
+        # source costs an extract+repack cycle).  `force` re-derives.
+        if not force and self._emit_already_placed(_rec, _codename):
+            return ('fast-verbatim'
+                    if (_rec.get('source_emit_class') or '') == 'verbatim'
+                    else 'fast-emitted')
+        _dsc = _se.find_dsc(src, [self.config.dir_source,
+                                  self.config.dir_fork_source_repo])
+        if _dsc is None:
+            console.print(
+                f"  {src}: no .dsc found (run `source sync`) — skipped",
+                tui.COLOR_WARNING)
+            return 'failed'
+        # P: the OUTPUT filenames are the shipped truth (older records'
+        # intended_version predates the transpose stamp).
+        _p = _se.patch_level_from_outputs(_rec.get('outputs') or [])
+        if _p == 0:
+            _p = _se.patch_level_from_version(
+                str(_rec.get('intended_version')
+                    or _rec.get('built_version') or ''))
+        # patches applied iff the BUILD applied them (record hash); a patch
+        # dir added after the build must not leak in.
+        _was_patched = (_rec.get('patch_set_hash') or '') not in (
+            '', utils.EMPTY_PATCH_SET_HASH)
+        _comp = str(_rec.get('component') or 'main')
+        _out_dir = os.path.join(
+            self.config.dir_repo, 'dists', _codename, _comp, 'source')
+        _fclass = ('verbatim'
+                   if (_rec.get('phase') == 'tunneled'
+                       or src in (getattr(self.config, 'tunnel_packages',
+                                          ()) or ())) else None)
+        # extraction workspace on DISK — the tempdir default is the tmpfs
+        # /tmp, which firefox-esr's 3+ GB tree overflows (ENOSPC).
+        _work_root = os.path.join(self.config.dir_cache, 'source-emit')
+        os.makedirs(_work_root, exist_ok=True)
+        try:
+            _res = _se.emit_source(
+                _dsc, _out_dir,
+                codename=_codename,
+                distribution=str(self.config.build_distribution),
+                patch_root=(os.path.join(
+                    self.config.working_dir, 'patch', 'source')
+                    if _was_patched else ''),
+                patch_level=_p,
+                work_root=_work_root,
+                keep_binnmu_names=utils.tunneled_binary_names(
+                    self.config, self.cache),
+                force_class=_fclass)
+        except _se.SourceEmitError as _e:
+            console.print(f"  {src}: emit FAILED — {_e}", tui.COLOR_ERROR)
+            return 'failed'
+        _se.apply_emit_to_record(_rec, _res)
+        utils.write_build_record(_blog, _rec)
+        return str(_res['status'])
+
+    def _emit_after_build(self, src: str) -> None:
+        """Per-build hook (MAT-02 stage 3b): keep the published source pool
+        current as builds land, instead of relying on the backfill.
+        BEST-EFFORT — an emit problem must never fail a successful build;
+        the record simply lacks source_outputs and the next `source emit`
+        (or the audit) picks it up."""
+        try:
+            _st = self._emit_one_source(src)
+            if _st == 'failed':
+                logger.warning(f"source emit (post-build) {src}: failed — "
+                               "run `source emit` to retry")
+            else:
+                logger.info(f"source emit (post-build) {src}: {_st}")
+        except Exception as _e:                           # noqa: BLE001
+            logger.warning(f"source emit (post-build) {src}: {_e}")
+
+    def _emit_already_placed(self, record, codename) -> bool:
+        """True when the record carries a prior emit whose files are ALL
+        present in the repo source pool with matching sha256 — the
+        `source emit` fast path.  Any missing/mismatched file → False
+        (re-derive)."""
+        import source_emit as _se
+        _hashes = record.get('source_output_hashes') or {}
+        if not _hashes:
+            return False
+        _comp = str(record.get('component') or 'main')
+        _dir = os.path.join(
+            self.config.dir_repo, 'dists', codename, _comp, 'source')
+        for _fn, _sha in _hashes.items():
+            _p = os.path.join(_dir, _fn)
+            if not os.path.isfile(_p):
+                return False
+            if _se._sha256(_p) != _sha:
+                return False
+        return True
 
     def cmd_source_repair(self, *args):
         """Align build records with current source state.  MUTATOR.
@@ -1670,6 +1908,7 @@ class SourceCommandsMixin(SessionState):
                     f"asg-bump: {_src_pkg.package} built but its +asg uN "
                     f"artifact is still absent — bump predicate/stamper "
                     f"mismatch; shipped unstamped this generation")
+            self._emit_after_build(_src_pkg.package)
             return ('built', 0)
         if _build_result:
             # Guard B: the build reported PASS but check_build
@@ -1915,6 +2154,7 @@ class SourceCommandsMixin(SessionState):
         _shutil.rmtree(_scratch, ignore_errors=True)
         logger.info(
             f"remotebuild {_src.package} [PASS] — {len(_final)} artifact(s)")
+        self._emit_after_build(_src.package)
         return ('built', 0)
 
     def _remotebuild_fanout(self, packages, remotes, profile_override, force,

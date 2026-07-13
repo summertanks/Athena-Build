@@ -36,6 +36,85 @@ from _test_helpers import (  # noqa: F401
 
 
 
+def test_tunneled_binnmu_gate_parity_check_build_vs_audit():
+    """check_build (the skip gate) and _source_state (the audit classifier)
+    must apply the tunnelled +bN acceptance IDENTICALLY — keyed on the
+    record classifying 'tunneled' — or build and audit diverge (the
+    ffmpegthumbnailer stale_pass/re-tunnel loop, 2026-07-12)."""
+    import re as _re
+    _bp = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bp) as _fh:
+        _b = _fh.read()
+    _m = _re.search(r'def check_build\(self.*?(?=\n    def )', _b, _re.DOTALL)
+    assert _m, 'check_build not found'
+    assert "_allow_bn = (_cls == 'tunneled')" in _m.group(0)
+    assert 'allow_binnmu=_allow_bn' in _m.group(0)
+    _cp = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_source.py')
+    with open(_cp) as _fh:
+        _c = _fh.read()
+    _m2 = _re.search(r'def _source_state\(self.*?(?=\n    def )', _c,
+                     _re.DOTALL)
+    assert _m2, '_source_state not found'
+    assert 'allow_binnmu=_record_tunneled' in _m2.group(0)
+
+
+def test_source_emit_command_wired_and_record_safe():
+    """MAT-02 stage 3: `source emit` is dispatched from the source group and
+    the backfill writes SOURCE artifacts under separate record keys — never
+    the .deb-routed outputs/output_hashes (chroot preflight, hash refresh
+    and reclaim would misread a .dsc)."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as _fh:
+        _b = _fh.read()
+    assert "'emit':" in _b and 'cmd_source_emit' in _b, \
+        'source group must route emit -> cmd_source_emit'
+    _cp = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_source.py')
+    with open(_cp) as _fh:
+        _c = _fh.read()
+    import re as _re
+    assert 'cmd_source_emit' in _c, 'cmd_source_emit not found'
+    _m = _re.search(r'def _emit_one_source\(self.*?(?=\n    def )', _c,
+                    _re.DOTALL)
+    assert _m, '_emit_one_source not found'
+    _src = _m.group(0)
+    assert 'apply_emit_to_record' in _src and 'write_build_record' in _src
+    assert "force_class" in _src and "'tunneled'" in _src, \
+        'tunnelled records must republish verbatim (force_class)'
+    assert "_rec['outputs']" not in _src and \
+        "_rec['output_hashes']" not in _src, \
+        'emit must not touch the .deb output keys'
+    # stage 3b: the per-build hook keeps the source pool current — wired on
+    # the local build, remotebuild and tunnel success paths, and BEST-EFFORT
+    # (an emit problem must never fail a successful build).
+    _hm = _re.search(r'def _emit_after_build\(self.*?(?=\n    def )', _c,
+                     _re.DOTALL)
+    assert _hm, '_emit_after_build not found'
+    assert 'except Exception' in _hm.group(0), \
+        'post-build emit must be best-effort'
+    assert _c.count('self._emit_after_build(') >= 2, \
+        'local build + remotebuild success paths must emit'
+    _tp = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_tunnel.py')
+    with open(_tp) as _fh:
+        _t = _fh.read()
+    assert 'self._emit_after_build(' in _t, \
+        'tunnel success path must emit the verbatim source'
+    # stage 4: `source emit verify` is READ-ONLY (rule: read-only-named
+    # actions never call destructive helpers) and the mirror audit driver
+    # verifies the Sources chain of the primary suite.
+    _vm = _re.search(r'def _source_emit_verify\(self.*?(?=\n    def )', _c,
+                     _re.DOTALL)
+    assert _vm, '_source_emit_verify not found'
+    assert 'write_build_record' not in _vm.group(0), \
+        'verify must never write records'
+    assert 'emit_source' not in _vm.group(0), \
+        'verify must never emit'
+    _mp = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_mirror.py')
+    with open(_mp) as _fh:
+        _mi = _fh.read()
+    assert 'audit_sources_chain' in _mi, \
+        'mirror audit must verify the Sources chain'
+
+
 def test_startup_banner_runs_config_check():
     """Startup banner is now `config check` (build identity + mirror
     reachability) — the old static Arch/Parent/Build/Mode header is retired."""
@@ -8840,6 +8919,8 @@ def test_do_tunnel_records_provenance_and_outputs():
 
 TESTS = [
     test_init_remote_builds_image_and_gates_localmirror,
+    test_tunneled_binnmu_gate_parity_check_build_vs_audit,
+    test_source_emit_command_wired_and_record_safe,
     test_startup_banner_runs_config_check,
     test_container_init_remote_ensures_image,
     test_container_two_level_command_surface_wired,

@@ -4542,6 +4542,51 @@ def test_mirror_pull_progress_is_byte_sized_with_pkg_label():
 
 
 
+def test_mirror_pull_routes_and_records_source_artifacts():
+    """MAT-02 stage 5 wiring pins:
+      - _pull_file and _restore_own_file route through _artifact_dest_dir
+        (source artifacts land in dists/<codename>/<comp>/source/)
+      - the pull record writer splits source artifacts into
+        source_outputs/source_output_hashes (never the .deb keys)
+      - push_dist_tree excludes source artifacts from the --delete rsync
+        (append-only source pool, like the .debs)
+      - the audit merges the verified Sources index into the claim
+        cross-check and feeds it to the ledger validation."""
+    import re
+    _p = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_mirror.py')
+    with open(_p) as _fh:
+        _c = _fh.read()
+    assert _c.count('self._artifact_dest_dir(') >= 2, \
+        'pull + restore paths must route through _artifact_dest_dir'
+    _m = re.search(r'def _mirror_pull_write_build_records\(.*?(?=\n    def )',
+                   _c, re.DOTALL)
+    assert _m and 'source_output_hashes' in _m.group(0), \
+        'pull record writer must split source artifacts to the source keys'
+    assert '_pkg_idx.update(_src_idx)' in _c, \
+        'claims cross-check must include the Sources index'
+    assert 'src_idx=_src_idx' in _c, \
+        'ledger validation must receive the Sources index'
+    _tp = os.path.join(_ROOT, 'scripts', 'coord', 'transport.py')
+    with open(_tp) as _fh:
+        _t = _fh.read()
+    for _pat in ('--exclude=*.dsc', '--exclude=*.tar.*',
+                 '--exclude=*.diff.gz', '--exclude=*.asc'):
+        assert _pat in _t, f'push_dist_tree must exclude {_pat}'
+    # the remote pool LISTINGS must see source artifacts too, or every
+    # source claim audits missing_on_disk (2026-07-13 live finding).
+    # BOTH listings: transport.list_remote_debs (publish completeness)
+    # AND the audit's _mirror_audit_pool_listing (ssh + file:// walks).
+    for _pat in ("-path '*/source/*.dsc'", "-path '*/source/*.tar.*'",
+                 "-path '*/source/*.diff.gz'", "-path '*/source/*.asc'"):
+        assert _pat in _t, f'remote pool listing must match {_pat}'
+    for _pat in ('-path "*/source/*.dsc"', '-path "*/source/*.tar.*"',
+                 '-path "*/source/*.diff.gz"', '-path "*/source/*.asc"'):
+        assert _pat in _c, f'audit pool listing must match {_pat}'
+    assert 'is_source_artifact' in re.search(
+        r'def _mirror_audit_pool_listing\(.*?(?=\n    def )', _c,
+        re.DOTALL).group(0), 'file:// audit walk must see source artifacts'
+
+
 def test_mirror_pull_restores_missing_own_files():
     """Skip-own with restore-missing (2026-07-12): an OWN claim's file that
     is MISSING from repo/ is downloaded back and verified against our own
@@ -4583,6 +4628,38 @@ def test_mirror_pull_restores_missing_own_files():
     assert '_per_pkg_downloads' not in _r_body, \
         "restore path must not write build records for own files"
 
+
+
+def test_mirror_pull_canonical_apply_has_local_ahead_guard():
+    """Local-ahead guard (2026-07-12, the ffmpegthumbnailer incident): a
+    `mirror pull` whose fetched config_sha256 equals OUR local coord-head's
+    pin must NOT overwrite the list files or reseed selection.state — the
+    federation carries nothing new, and the apply would clobber local
+    not-yet-published `cache select` edits.  A genuinely NEW remote pin
+    still applies, with `.pre-pull` backups of any differing local list.
+    Pins:
+      - the guard compares the fetched pin against the LOCAL coord-head
+      - the skip branch returns BEFORE the verified apply / reseed
+      - the apply branch writes `.pre-pull` backups for drifted lists"""
+    import re
+    _p = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_mirror.py')
+    with open(_p) as _fh:
+        _body = _fh.read()
+    _m = re.search(r'def _apply_canonical_config\(self.*?(?=\n    def )',
+                   _body, re.DOTALL)
+    assert _m, "_apply_canonical_config not found"
+    _src = _m.group(0)
+    assert 'read_coord_head' in _src and 'config_sha256' in _src, \
+        "guard must read the LOCAL coord-head's config pin"
+    assert "_local_sha and str(_local_sha) == str(_sha)" in _src, \
+        "equal-pin comparison missing"
+    assert _src.index('== str(_sha)') < _src.index(
+        '_cfgman.apply_canonical_config('), \
+        "guard must precede the overwrite"
+    assert ".pre-pull" in _src, \
+        "apply branch must back up drifted local lists"
+    assert '_local_lists_drift' in _src, \
+        "drift detection must feed the guard messages/backups"
 
 
 def test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base():
@@ -5229,6 +5306,8 @@ TESTS = [
     test_cmd_mirror_dispatch_routes_reclaim,
     test_mirror_pull_progress_is_byte_sized_with_pkg_label,
     test_mirror_pull_restores_missing_own_files,
+    test_mirror_pull_routes_and_records_source_artifacts,
+    test_mirror_pull_canonical_apply_has_local_ahead_guard,
     test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base,
     test_cmd_mirror_summary_we_own_counts_non_retracted_claims,
     test_cmd_mirror_query_reports_no_match,

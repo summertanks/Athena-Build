@@ -342,6 +342,13 @@ class BuildContainer:
                 # dir as context.  Hard-link the cached tar when possible.
                 _rootfs = base_rootfs.ensure_base_rootfs(
                     config, self.snapshot_ts)
+                # MAT-02 D4b: the transpose pipeline compensates for
+                # building Debian-versioned inputs in a DEBIAN container;
+                # a NATIVE base (our own distribution's rootfs — inputs
+                # already +asg) must not re-enter it.  Refuse loudly on a
+                # mode mismatch instead of silently double-processing;
+                # native building arrives with the self-hosting milestone.
+                self._assert_nonnative_base(_rootfs, config)
                 _ctx = tempfile.mkdtemp(
                     prefix='imagectx-', dir=config.dir_temp)
                 shutil.copy(os.path.join(config.dir_config, 'Dockerfile'),
@@ -643,6 +650,46 @@ class BuildContainer:
             except Exception as _e:
                 logger.debug(f"resource sample failed: {_e}")
             stop.wait(2.0)
+
+    @staticmethod
+    def _assert_nonnative_base(rootfs_tar: str, config) -> None:
+        """MAT-02 D4b: read /etc/os-release from the base rootfs tar and
+        refuse when its ID is the NATIVE distribution — this pipeline
+        transposes (non-native mode), and running it against a native base
+        would re-process already-+asg inputs.  Unreadable/absent os-release
+        is tolerated (the mmdebstrap buildd base always carries one; don't
+        brick exotic bases on the guard's account)."""
+        import tarfile
+        import source_emit as _se
+        _text = ''
+        try:
+            with tarfile.open(rootfs_tar) as _t:
+                for _name in ('./etc/os-release', 'etc/os-release',
+                              './usr/lib/os-release', 'usr/lib/os-release'):
+                    try:
+                        _m = _t.extractfile(_name)
+                    except KeyError:
+                        continue
+                    if _m is not None:
+                        _text = _m.read().decode('utf-8', errors='replace')
+                        break
+        except (OSError, tarfile.TarError) as _e:
+            logger.warning(f"D4b base check: unreadable rootfs tar: {_e}")
+            return
+        if not _text:
+            logger.warning("D4b base check: no os-release in base rootfs")
+            return
+        _env = _se.environment_id(_text)
+        _native = str(getattr(config, 'build_base_id', '') or '').lower()
+        if _native and not _se.transpose_applies(_env, _native):
+            raise RuntimeError(
+                f"build container base is NATIVE ({_env}) but this pipeline "
+                "runs in transpose (non-native) mode — building native "
+                "sources here would double-process +asg inputs.  Native "
+                "container builds arrive with the self-hosting milestone "
+                "(IncludeBuildClosure); use a Debian-based container base.")
+        logger.info(f"D4b base check: container base ID={_env or '?'} — "
+                    "non-native, transpose mode confirmed")
 
     def _record_phase(self, package: str, *, initial: 'Optional[dict]' = None,
                       **fields: object) -> None:
@@ -2217,8 +2264,15 @@ class BuildContainer:
         _record = utils.read_build_record(self.buildlog_path, src_pkg.package)
         if _record is None:
             return False
-        if utils.classify_build_record(_record) not in ('ok', 'tunneled'):
+        _cls = utils.classify_build_record(_record)
+        if _cls not in ('ok', 'tunneled'):
             return False
+        # A tunnelled binNMU keeps its upstream +bN on disk (transpose_deb
+        # frozen-pin rule) — the pristine prediction only matches with the
+        # tunnelled acceptance.  Without it, the package re-tunnels EVERY
+        # run and source audit reads stale_pass (ffmpegthumbnailer,
+        # 2026-07-12).  Rebuilt records keep the strict gate.
+        _allow_bn = (_cls == 'tunneled')
 
         # Component (from origin mirror) so a non-main package's binaries are
         # located in their component dir — e.g. a TUNNELED firmware package
@@ -2240,7 +2294,8 @@ class BuildContainer:
             # cause: a stamped/ABI-variant on-disk file never matched, so the
             # source was rebuilt every run.
             _dst_dir = self.config.deb_dest_for_filename(_file, _comp)
-            _filename = utils.find_matching_artifact(_dst_dir, _file)
+            _filename = utils.find_matching_artifact(
+                _dst_dir, _file, allow_binnmu=_allow_bn)
             if _filename is None:
                 return False
             if not self.is_ar_file(_filename):

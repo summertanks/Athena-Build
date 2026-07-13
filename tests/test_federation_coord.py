@@ -635,6 +635,133 @@ def test_generate_pending_claims_threads_component_from_build_record():
 
 
 
+def test_generate_pending_claims_covers_source_outputs():
+    """MAT-02 stage 5: a record's source_outputs / source_output_hashes
+    (written by `source emit`) generate claims like any output — same
+    component, record versions, no republished_from — and a source file
+    already in the live claim set is skipped (_known)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import publish as _pub
+    from unittest.mock import patch
+
+    _rec = {
+        'phase':            'done',
+        'status':           'PASS',
+        'intended_version': '5.2.15-2+asg1u0+p1',
+        'built_version':    '5.2.15-2',
+        'outputs':          ['bash_5.2.15-2+asg1u0+p1_amd64.deb'],
+        'output_hashes':    {
+            'bash_5.2.15-2+asg1u0+p1_amd64.deb': 'a' * 64,
+        },
+        'source_outputs':   ['bash_5.2.15-2+asg1u0+p1.dsc',
+                             'bash_5.2.15-2+asg1u0+p1.debian.tar.xz',
+                             'bash_5.2.15.orig.tar.gz'],
+        'source_output_hashes': {
+            'bash_5.2.15-2+asg1u0+p1.dsc': 'b' * 64,
+            'bash_5.2.15-2+asg1u0+p1.debian.tar.xz': 'c' * 64,
+            'bash_5.2.15.orig.tar.gz': 'd' * 64,
+        },
+        'republished_from': {},
+        'pulled_from':      None,
+        'component':        'main',
+        'finished':         '2026-07-12T00:00:00Z',
+    }
+    _existing = [{'filename': 'bash_5.2.15.orig.tar.gz',
+                  'claim_state': 'published', 'seq': 1}]
+    with tempfile.TemporaryDirectory() as _tmp:
+        _claims_dir = os.path.join(_tmp, 'claims')
+        os.makedirs(_claims_dir, exist_ok=True)
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        os.makedirs(_buildlog, exist_ok=True)
+        with open(os.path.join(_buildlog, 'bash.build.json'), 'w') as _fh:
+            _fh.write('{}')
+        with patch.object(_pub._store, 'read_builder_claims',
+                          return_value=_existing):
+            _pending = _pub.generate_pending_claims(
+                builder_id='test-builder',
+                buildlog_dir=_buildlog,
+                claims_dir=_claims_dir,
+                public_key_path='/nonexistent',
+                snapshot_pin='20260705T190150Z',
+                read_build_record=lambda _bl, _n: _rec,
+                build_arch='amd64',
+            )
+    _fns = sorted(_c['filename'] for _c in _pending)
+    assert 'bash_5.2.15-2+asg1u0+p1.dsc' in _fns, _fns
+    assert 'bash_5.2.15-2+asg1u0+p1.debian.tar.xz' in _fns
+    assert 'bash_5.2.15.orig.tar.gz' not in _fns      # already claimed
+    _dsc = [_c for _c in _pending
+            if _c['filename'].endswith('.dsc')][0]
+    assert _dsc['sha256'] == 'b' * 64
+    assert _dsc['component'] == 'main'
+    assert _dsc.get('republished_from') is None
+
+
+def test_scan_pool_files_includes_source_artifacts_under_source_dirs():
+    """MAT-02 stage 5: the pool scan sees source artifacts ONLY under
+    source/ dirs (index files and stray tarballs elsewhere never enter the
+    pool view); binaries are picked up anywhere."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord.reconcile import scan_pool_files
+    with tempfile.TemporaryDirectory() as _tmp:
+        _bin = os.path.join(_tmp, 'dists', 'thor', 'main', 'binary-amd64')
+        _src = os.path.join(_tmp, 'dists', 'thor', 'main', 'source')
+        os.makedirs(_bin)
+        os.makedirs(_src)
+        for _p, _c in (
+                (os.path.join(_bin, 'x_1.0_amd64.deb'), b'd'),
+                (os.path.join(_src, 'x_1.0.dsc'), b's'),
+                (os.path.join(_src, 'x_1.0.orig.tar.gz'), b't'),
+                (os.path.join(_src, 'Sources.gz'), b'i'),
+                (os.path.join(_tmp, 'stray.tar.gz'), b'n')):
+            with open(_p, 'wb') as _fh:
+                _fh.write(_c)
+        _pool = scan_pool_files(_tmp)
+    assert 'x_1.0_amd64.deb' in _pool
+    assert 'x_1.0.dsc' in _pool
+    assert 'x_1.0.orig.tar.gz' in _pool
+    assert 'Sources.gz' not in _pool          # index, not pool
+    assert 'stray.tar.gz' not in _pool        # not under a source/ dir
+
+
+def test_audit_closure_ledger_validates_source_entries():
+    """MAT-02 stage 5, check (c): with src_idx supplied, a published source
+    file missing from the ledger is CRITICAL; agreeing entries are clean;
+    a ledger source entry naming an unpublished file flags
+    closure_ledger_entry_not_published ('source' joins the audited set)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    _src_idx = {'demo_1.0-1+asg1u1.dsc': {
+        'sha256': 'a' * 64, 'size': '100', 'source': 'demo',
+        'version': '1.0-1+asg1u1', 'component': 'main'}}
+    _entry = {'filename': 'demo_1.0-1+asg1u1.dsc', 'sha256': 'a' * 64,
+              'size': 100, 'version': '1.0-1+asg1u1', 'component': 'main',
+              'package': 'demo', 'arch': 'source'}
+    # agree → clean
+    _f = _mir.audit_closure_ledger(
+        {'entries': {'demo_1.0-1+asg1u1.dsc|source': dict(_entry)}},
+        pkg_idx={}, closure_bins=set(), packages_text='',
+        src_idx=_src_idx)
+    assert not [_x for _x in _f if _x[0] == 'CRITICAL'], _f
+    # missing from ledger → CRITICAL
+    _f2 = _mir.audit_closure_ledger(
+        {'entries': {}}, pkg_idx={}, closure_bins=set(),
+        packages_text='', src_idx=_src_idx)
+    assert any(_k == 'closure_ledger_entry_missing'
+               for _s, _k, _m in _f2), _f2
+    # ledger names an unpublished source file → not_published
+    _f3 = _mir.audit_closure_ledger(
+        {'entries': {'ghost_9.9.dsc|source': dict(
+            _entry, filename='ghost_9.9.dsc')}},
+        pkg_idx={}, closure_bins=set(), packages_text='',
+        src_idx={})
+    assert any(_k == 'closure_ledger_entry_not_published'
+               for _s, _k, _m in _f3), _f3
+
+
 def test_coord_schema_canonical_bytes_stable_across_key_order():
     """schema.canonical_bytes is sort-keys'd → two dicts with the same
     fields in different insertion order produce identical bytes."""
@@ -1930,6 +2057,72 @@ def test_remote_publish_validates_under_lock_before_push():
         f"publish steps out of order: lock={_lock} fetch={_fetch} "
         f"conflict={_conf} closure={_closure} push={_push}")
 
+
+
+def test_audit_sources_chain_verifies_and_indexes_source_files():
+    """MAT-02 stage 4: audit_sources_chain pulls every <comp>/source/Sources
+    the verified InRelease declares, verifies the sha pin, and indexes every
+    referenced source FILE (dsc + tarballs) for the claim cross-check.
+    A sha mismatch is CRITICAL; a release with no source indexes yields an
+    empty index and no findings (sources not yet published)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import hashlib as _hashlib
+    from unittest.mock import patch
+    import mirror as _mir
+    from coord import transport as _tx
+
+    _sources = (
+        'Package: demo\n'
+        'Version: 1.0-1+asg1u1\n'
+        'Directory: pool\n'
+        'Files:\n'
+        ' 0123456789abcdef0123456789abcdef 100 demo_1.0-1+asg1u1.dsc\n'
+        'Checksums-Sha256:\n'
+        f' {"a" * 64} 100 demo_1.0-1+asg1u1.dsc\n'
+        f' {"b" * 64} 200 demo_1.0.orig.tar.gz\n'
+        '\n').encode()
+    _pin = _hashlib.sha256(_sources).hexdigest()
+
+    def _fake_pull(*, remote_spec, local_path, ssh_key=None):
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, 'wb') as _fh:
+            _fh.write(_sources)
+        return True, ''
+
+    _release = {'SHA256': [
+        {'name': 'main/source/Sources', 'sha256': _pin, 'size': '9'},
+        {'name': 'main/binary-amd64/Packages', 'sha256': 'c' * 64,
+         'size': '9'},
+    ]}
+    with tempfile.TemporaryDirectory() as _td:
+        with patch.object(_tx, 'pull_single_file', side_effect=_fake_pull):
+            _idx, _findings = _mir.audit_sources_chain(
+                pool_url='file:///fake', codename='thor',
+                release=_release, fetched_dir=_td)
+        assert _findings == [], _findings
+        assert _idx['demo_1.0-1+asg1u1.dsc']['sha256'] == 'a' * 64
+        assert _idx['demo_1.0.orig.tar.gz']['size'] == '200'
+        assert _idx['demo_1.0.orig.tar.gz']['source'] == 'demo'
+        assert _idx['demo_1.0.orig.tar.gz']['component'] == 'main'
+        # sha mismatch → CRITICAL, nothing indexed from that file
+        _release_bad = {'SHA256': [
+            {'name': 'main/source/Sources', 'sha256': 'd' * 64,
+             'size': '9'}]}
+        with patch.object(_tx, 'pull_single_file', side_effect=_fake_pull):
+            _idx2, _f2 = _mir.audit_sources_chain(
+                pool_url='file:///fake', codename='thor',
+                release=_release_bad, fetched_dir=_td)
+        assert _idx2 == {}
+        assert any(_k == 'sources_sha_mismatch' and _s == 'CRITICAL'
+                   for _s, _k, _m in _f2), _f2
+        # no source indexes declared → clean empty
+        _idx3, _f3 = _mir.audit_sources_chain(
+            pool_url='file:///fake', codename='thor',
+            release={'SHA256': [{'name': 'main/binary-amd64/Packages',
+                                 'sha256': 'c' * 64, 'size': '9'}]},
+            fetched_dir=_td)
+        assert _idx3 == {} and _f3 == []
 
 
 def test_audit_inrelease_against_head_sha_match_returns_parsed_release():
@@ -5098,6 +5291,9 @@ TESTS = [
     test_virtual_publish_dry_run_same_sha_no_hash_conflict,
     test_new_claim_threads_component_field,
     test_generate_pending_claims_threads_component_from_build_record,
+    test_generate_pending_claims_covers_source_outputs,
+    test_scan_pool_files_includes_source_artifacts_under_source_dirs,
+    test_audit_closure_ledger_validates_source_entries,
     test_coord_schema_canonical_bytes_stable_across_key_order,
     test_coord_schema_canonical_bytes_excludes_sig,
     test_coord_claim_to_jsonl_round_trip,
@@ -5190,6 +5386,7 @@ TESTS = [
     test_snapshot_divergence_note,
     test_publish_lock_records_and_reports_holder,
     test_remote_publish_validates_under_lock_before_push,
+    test_audit_sources_chain_verifies_and_indexes_source_files,
     test_audit_inrelease_against_head_sha_match_returns_parsed_release,
     test_audit_inrelease_against_head_sha_mismatch_critical,
     test_audit_ownership_summary_buckets_correctly,

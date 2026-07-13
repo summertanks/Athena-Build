@@ -979,17 +979,21 @@ class MirrorCommandsMixin(SessionState):
     def _mirror_audit_pool_listing(
         self, url: str, ssh_key: 'Optional[str]',
     ) -> 'Optional[set]':
-        """Enumerate ``.deb``/``.udeb`` files in the mirror's pool dir.
-        Returns a set of basenames or None on unsupported scheme /
-        I/O failure."""
+        """Enumerate pool artifacts in the mirror's pool dir — binaries
+        everywhere plus SOURCE artifacts under source/ dirs (MAT-02; a
+        listing blind to them false-CRITICALs every source claim as
+        missing_on_disk — 2026-07-13).  Returns a set of basenames or
+        None on unsupported scheme / I/O failure."""
         if url.startswith('file://'):
             _root = url[len('file://'):]
             if not os.path.isdir(_root):
                 return None
             _out: set = set()
             for _dp, _dirs, _files in os.walk(_root):
+                _in_source = os.path.basename(_dp) == 'source'
                 for _f in _files:
-                    if _f.endswith(('.deb', '.udeb')):
+                    if _f.endswith(('.deb', '.udeb')) or (
+                            _in_source and utils.is_source_artifact(_f)):
                         _out.add(_f)
             return _out
         if not url.startswith('ssh://'):
@@ -1013,7 +1017,9 @@ class MirrorCommandsMixin(SessionState):
         _argv += [
             _target,
             f'find {_quoted} -type f \\( -name "*.deb" -o '
-            f'-name "*.udeb" \\) -printf "%f\\n" 2>/dev/null',
+            f'-name "*.udeb" -o -path "*/source/*.dsc" '
+            f'-o -path "*/source/*.tar.*" -o -path "*/source/*.diff.gz" '
+            f'-o -path "*/source/*.asc" \\) -printf "%f\\n" 2>/dev/null',
         ]
         try:
             _r = subprocess.run(
@@ -1888,7 +1894,7 @@ class MirrorCommandsMixin(SessionState):
                 # Component pinned on the claim/ledger (defaults to 'main' for
                 # pre-component publishers).  Without it a non-free-firmware
                 # pull lands at main/binary-arch/ and the remote URL 404s.
-                _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
+                _dst_dir = self._artifact_dest_dir(_fn, _comp)
                 _local_path = os.path.join(_dst_dir, _fn)
                 if os.path.isfile(_local_path):
                     # a reclaim REWROTE the bytes under this filename — the
@@ -1957,7 +1963,7 @@ class MirrorCommandsMixin(SessionState):
                 nonlocal _skip_own, _restored_own, _mismatch, _failed
                 _expected_sha = str(_claim.get('sha256') or '')
                 _comp = str(_claim.get('component') or 'main')
-                _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
+                _dst_dir = self._artifact_dest_dir(_fn, _comp)
                 _local_path = os.path.join(_dst_dir, _fn)
                 if os.path.isfile(_local_path):
                     _skip_own += 1
@@ -2583,12 +2589,17 @@ class MirrorCommandsMixin(SessionState):
             if not _items:
                 continue
             _claims = [_c for _c, _ in _items]
-            _outputs = sorted({str(_c.get('filename') or '') for _c in _claims
-                               if _c.get('filename')})
-            _output_hashes = {
-                str(_c.get('filename') or ''): str(_c.get('sha256') or '')
-                for _c in _claims if _c.get('filename')
-            }
+            _all_fns = {str(_c.get('filename') or ''):
+                        str(_c.get('sha256') or '')
+                        for _c in _claims if _c.get('filename')}
+            # MAT-02 stage 5: SOURCE artifacts land under the source keys —
+            # the .deb keys are routed through the deb destination map by
+            # every consumer (chroot preflight, hash refresh, reclaim).
+            _src_fns = {_fn: _sha for _fn, _sha in _all_fns.items()
+                        if utils.is_source_artifact(_fn)}
+            _output_hashes = {_fn: _sha for _fn, _sha in _all_fns.items()
+                              if _fn not in _src_fns}
+            _outputs = sorted(_output_hashes)
             # republished_from is per-file; collect across the package's
             # claims.  Empty when none are tunneled.
             _republished_from: 'dict[str, dict]' = {}
@@ -2653,6 +2664,8 @@ class MirrorCommandsMixin(SessionState):
                 'output_count':     len(_outputs),
                 'outputs':          _outputs,
                 'output_hashes':    _output_hashes,
+                'source_outputs':   sorted(_src_fns),
+                'source_output_hashes': dict(_src_fns),
                 'republished_from': _republished_from,
                 # Set for tunneled adoptions too — see docstring: an
                 # adopted tunnel is NOT re-claimed (only the original
@@ -2822,6 +2835,30 @@ class MirrorCommandsMixin(SessionState):
                 _print_audit_finding(_sev, _kind, _msg, _color)
             if _pkg_crit:
                 _all_ok = False
+            # Sources chain (MAT-02 stage 4): every <comp>/source/Sources the
+            # verified InRelease declares — pulled, sha-verified against the
+            # pin, parsed.  An InRelease without source indexes (sources not
+            # yet published) yields no findings.  The per-file index feeds
+            # the stage-5 claim cross-check; kept for that join.
+            _src_idx: 'dict[str, dict]' = {}
+            if _release is not None:
+                _src_idx, _src_findings = _mirror.audit_sources_chain(
+                    pool_url=_url, codename=_codename, release=_release,
+                    fetched_dir=os.path.join(_fetched, 'apt'),
+                    ssh_key=_ssh_key,
+                )
+                _src_crit = [_f for _f in _src_findings
+                             if _f[0] == 'CRITICAL']
+                for _sev, _kind, _msg in _src_findings:
+                    _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                              else tui.COLOR_WARNING)
+                    _print_audit_finding(_sev, _kind, _msg, _color)
+                if _src_crit:
+                    _all_ok = False
+                if _src_idx:
+                    console.print(
+                        f"  sources index: {len(_src_idx)} source file(s) "
+                        "verified in the InRelease chain")
             # dbgsym suite (<codename>-debug): published as its OWN indexed
             # suite (generate_repo_indexes + push_dist_tree), not declared in
             # the primary InRelease.  Its Packages must be merged into
@@ -2867,6 +2904,10 @@ class MirrorCommandsMixin(SessionState):
             _claim_idx_crit: 'list' = []
             _ledger_crit: 'list' = []
             if _pkg_idx:
+                # MAT-02 stage 5: source claims resolve against the
+                # verified Sources chain — merge its per-file index so a
+                # source claim doesn't false-flag claim_not_in_apt_index.
+                _pkg_idx.update(_src_idx)
                 _claim_idx_findings = _mirror.audit_claims_vs_packages(
                     _by_builder, _pkg_idx)
                 _claim_idx_crit = [_f for _f in _claim_idx_findings
@@ -2920,7 +2961,8 @@ class MirrorCommandsMixin(SessionState):
                     except OSError:
                         pass
                     _lg_findings = _mirror.audit_closure_ledger(
-                        _signed_ledger, _pkg_idx, _cbins, '\n'.join(_texts))
+                        _signed_ledger, _pkg_idx, _cbins, '\n'.join(_texts),
+                        src_idx=_src_idx)
                     _ledger_crit = [_f for _f in _lg_findings
                                     if _f[0] == 'CRITICAL']
                     for _sev, _kind, _msg in _lg_findings[:10]:
@@ -3608,15 +3650,93 @@ class MirrorCommandsMixin(SessionState):
             tui.COLOR_WARNING)
         return _adopt
 
+    def _artifact_dest_dir(self, filename: str, component: str) -> str:
+        """Local destination dir for a pulled/restored pool artifact:
+        source artifacts (MAT-02) route to dists/<codename>/<comp>/source/;
+        binaries route through the .deb destination map."""
+        if utils.is_source_artifact(filename):
+            _codename = str(self.config.build_codename).strip('"').strip("'")
+            return os.path.join(self.config.dir_repo, 'dists', _codename,
+                                component, 'source')
+        return self.config.deb_dest_for_filename(filename, component)
+
+    def _fetched_canonical_lists(self, fetched_dir) -> 'Optional[dict]':
+        """The fetched canonical manifest's raw list texts
+        ({pkg, pool, live, installer} → str), or None when absent/unparseable.
+        UNVERIFIED read — used only for local-drift comparison and backups;
+        the actual apply still goes through the sha-verified path."""
+        import json as _json
+        import coord.config_manifest as _cfgman
+        try:
+            with open(_cfgman.manifest_path(fetched_dir), 'rb') as _fh:
+                _doc = _json.loads(_fh.read().decode('utf-8'))
+        except (OSError, ValueError, UnicodeDecodeError):
+            return None
+        _lists = _doc.get('lists')
+        return _lists if isinstance(_lists, dict) else None
+
+    def _local_lists_drift(self, fetched_dir) -> 'list[tuple[str, str]]':
+        """(label, local_path) pairs whose CURRENT local content differs from
+        the fetched canonical's text — i.e. what an apply would overwrite."""
+        _lists = self._fetched_canonical_lists(fetched_dir) or {}
+        _out: 'list[tuple[str, str]]' = []
+        for _label, _path in (
+                ('pkg', self.config.pkglist_path),
+                ('pool', self.config.poollist_path),
+                ('live', self.config.livelist_path),
+                ('installer', self.config.installerlist_path)):
+            try:
+                with open(_path, encoding='utf-8') as _fh:
+                    _cur = _fh.read()
+            except OSError:
+                _cur = ''
+            if _cur != (_lists.get(_label, '') or ''):
+                _out.append((_label, _path))
+        return _out
+
     def _apply_canonical_config(self, fetched_dir, head):
         """Verify + apply the mirror's canonical pkg.list/pool.list (from the
         fetched coord tree) against the signed head's config_sha256.  Silent
         no-op when the head carries no config pin (owner hasn't published one
-        yet); loud on a verified apply or a verify failure."""
+        yet); loud on a verified apply or a verify failure.
+
+        LOCAL-AHEAD GUARD (2026-07-12): when the fetched pin EQUALS our own
+        local coord-head's config_sha256, the federation carries nothing we
+        don't already know — an apply would only clobber local
+        not-yet-published selection edits (a `cache select` addition was
+        silently reverted by the next `mirror pull`; the ffmpegthumbnailer
+        incident).  Skip the overwrite (and the selection.state reseed) and
+        keep local state.  A genuinely NEW remote pin still applies, but any
+        differing local list is backed up to `<path>.pre-pull` first so
+        operator edits stay recoverable."""
+        import shutil
+        import signing
         import coord.config_manifest as _cfgman
+        import coord.head as _head_mod
         _sha = head.get('config_sha256') if isinstance(head, dict) else None
         if not _sha:
             return
+        _local_head = _head_mod.read_coord_head(
+            self.config.dir_coord, signing.signing_home(self.config))
+        _local_sha = (_local_head or {}).get('config_sha256')
+        if _local_sha and str(_local_sha) == str(_sha):
+            _drift = self._local_lists_drift(fetched_dir)
+            if _drift:
+                _names = ', '.join(_l for _l, _ in _drift)
+                console.print(
+                    f"  config: unchanged on mirror — local selection edits "
+                    f"KEPT ({_names}); `mirror publish` propagates them",
+                    tui.COLOR_INFO)
+            else:
+                console.print("  config: unchanged (matches local)",
+                              tui.COLOR_INFO)
+            return
+        _drift = self._local_lists_drift(fetched_dir)
+        for _label, _path in _drift:
+            try:
+                shutil.copy2(_path, _path + '.pre-pull')
+            except OSError:
+                pass
         _ok, _detail, _payload = _cfgman.apply_canonical_config(
             fetched_dir, str(_sha),
             self.config.pkglist_path, self.config.poollist_path,
@@ -3624,6 +3744,12 @@ class MirrorCommandsMixin(SessionState):
         console.print(
             f"  config: {_detail if _ok else 'NOT applied (' + _detail + ')'}",
             tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_WARNING)
+        if _ok and _drift:
+            _names = ', '.join(_l for _l, _ in _drift)
+            console.print(
+                f"  config: local edits OVERWRITTEN by the new federation "
+                f"config ({_names}) — pre-pull copies at <list>.pre-pull",
+                tui.COLOR_WARNING)
         if _ok and _payload is not None:
             self._seed_selection_from_payload(_payload)
         if _ok:

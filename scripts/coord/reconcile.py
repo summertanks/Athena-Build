@@ -81,21 +81,27 @@ class Report:
 
 
 def scan_pool_files(repo_root: str) -> Dict[str, str]:
-    """Walk `repo_root` for .deb/.udeb files; return {filename: path}.
+    """Walk `repo_root` for pool artifacts; return {filename: path}.
 
-    Filename is the basename; path is absolute.  Duplicates surface as
-    last-write-wins — the audit reports duplicate basenames in
-    different subdirs separately.
+    Binaries (.deb/.udeb) everywhere, plus SOURCE artifacts (.dsc /
+    tarballs / .diff.gz / .asc — MAT-02) under `source/` dirs ONLY, so
+    index files and any stray tarball elsewhere never enter the pool
+    view.  Filename is the basename; path is absolute.  Duplicates
+    surface as last-write-wins — the audit reports duplicate basenames
+    in different subdirs separately.
 
     Cheap O(N) walk; no hashing.  Audit consumers call utils.get_sha256
     (cached) on the files they actually need to verify.
     """
+    from bump import is_source_artifact as _is_src
     _out: Dict[str, str] = {}
     if not _os.path.isdir(repo_root):
         return _out
     for _root, _dirs, _files in _os.walk(repo_root):
+        _in_source = _os.path.basename(_root) == 'source'
         for _f in _files:
-            if _f.endswith(('.deb', '.udeb')):
+            if _f.endswith(('.deb', '.udeb')) or (
+                    _in_source and _is_src(_f)):
                 _out[_f] = _os.path.join(_root, _f)
     return _out
 
