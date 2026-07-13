@@ -979,17 +979,21 @@ class MirrorCommandsMixin(SessionState):
     def _mirror_audit_pool_listing(
         self, url: str, ssh_key: 'Optional[str]',
     ) -> 'Optional[set]':
-        """Enumerate ``.deb``/``.udeb`` files in the mirror's pool dir.
-        Returns a set of basenames or None on unsupported scheme /
-        I/O failure."""
+        """Enumerate pool artifacts in the mirror's pool dir — binaries
+        everywhere plus SOURCE artifacts under source/ dirs (MAT-02; a
+        listing blind to them false-CRITICALs every source claim as
+        missing_on_disk — 2026-07-13).  Returns a set of basenames or
+        None on unsupported scheme / I/O failure."""
         if url.startswith('file://'):
             _root = url[len('file://'):]
             if not os.path.isdir(_root):
                 return None
             _out: set = set()
             for _dp, _dirs, _files in os.walk(_root):
+                _in_source = os.path.basename(_dp) == 'source'
                 for _f in _files:
-                    if _f.endswith(('.deb', '.udeb')):
+                    if _f.endswith(('.deb', '.udeb')) or (
+                            _in_source and utils.is_source_artifact(_f)):
                         _out.add(_f)
             return _out
         if not url.startswith('ssh://'):
@@ -1013,7 +1017,9 @@ class MirrorCommandsMixin(SessionState):
         _argv += [
             _target,
             f'find {_quoted} -type f \\( -name "*.deb" -o '
-            f'-name "*.udeb" \\) -printf "%f\\n" 2>/dev/null',
+            f'-name "*.udeb" -o -path "*/source/*.dsc" '
+            f'-o -path "*/source/*.tar.*" -o -path "*/source/*.diff.gz" '
+            f'-o -path "*/source/*.asc" \\) -printf "%f\\n" 2>/dev/null',
         ]
         try:
             _r = subprocess.run(

@@ -4572,11 +4572,19 @@ def test_mirror_pull_routes_and_records_source_artifacts():
     for _pat in ('--exclude=*.dsc', '--exclude=*.tar.*',
                  '--exclude=*.diff.gz', '--exclude=*.asc'):
         assert _pat in _t, f'push_dist_tree must exclude {_pat}'
-    # the remote pool LISTING must see source artifacts too, or every
-    # source claim audits missing_on_disk (2026-07-13 live finding)
+    # the remote pool LISTINGS must see source artifacts too, or every
+    # source claim audits missing_on_disk (2026-07-13 live finding).
+    # BOTH listings: transport.list_remote_debs (publish completeness)
+    # AND the audit's _mirror_audit_pool_listing (ssh + file:// walks).
     for _pat in ("-path '*/source/*.dsc'", "-path '*/source/*.tar.*'",
                  "-path '*/source/*.diff.gz'", "-path '*/source/*.asc'"):
         assert _pat in _t, f'remote pool listing must match {_pat}'
+    for _pat in ('-path "*/source/*.dsc"', '-path "*/source/*.tar.*"',
+                 '-path "*/source/*.diff.gz"', '-path "*/source/*.asc"'):
+        assert _pat in _c, f'audit pool listing must match {_pat}'
+    assert 'is_source_artifact' in re.search(
+        r'def _mirror_audit_pool_listing\(.*?(?=\n    def )', _c,
+        re.DOTALL).group(0), 'file:// audit walk must see source artifacts'
 
 
 def test_mirror_pull_restores_missing_own_files():
