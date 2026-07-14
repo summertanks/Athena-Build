@@ -20,18 +20,11 @@ toolchain SemVer (`scripts/_version.py`); per-commit dev versions are automatic.
 - **Reworked the version-numbering framework** (content-order / "transpose"
   scheme; see `docs/versioning-mechanics.md`).
 
-- **Resilient remote-build control plane.** Remote source builds are now driven
-  by a detached on-host agent exposing a localhost poll API over an SSH tunnel,
-  with a progress-based watchdog and named-container reaping — so a build
-  survives orchestrator disconnects and a wedged build is killed by lack of
-  progress rather than a wall-clock timer.
+- **Resilient remote-build control plane** (`scripts/remote_orchestrate.py`;
+  see `docs/remote-build.md`).
 
-- **Federation identity & integrity hardening.** Builder identities are anchored
-  by tier-1-signed `id→pubkey` bindings in the coord-head (trust-on-first-use on
-  register + strict verification on adoption), so a key dropped by anyone with
-  SSH write but no signing key can no longer hijack a builder or strand a peer's
-  files. Adds publish stale-lock recovery (`mirror unlock`) and stale /
-  closure-limited pull-ledger detection.
+- **Federation identity & integrity hardening** (`scripts/coord/`; see
+  `docs/mirror-setup.md`).
 
 ## [0.1.2] — 2026-06-25
 
