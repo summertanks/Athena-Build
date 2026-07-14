@@ -70,6 +70,41 @@ looking like the patch silently didn't apply.  See
 Packages without a patch tree at the matching version use a bind-mount
 to `patch/empty/` so the path is always valid; the for-loop is a no-op.
 
+### Design decision (CONF-03): out-of-band at build, in-format at publish
+
+The Debian-native way to carry distro patches is quilt: patches live in
+`debian/patches/` + `series`, a versioned `debian/changelog` entry names
+the build, and `dpkg-buildpackage` emits binaries at that version.  We
+deliberately do NOT do that at build time, and this is the settled
+decision (CONF-03), not an omission:
+
+- **Build time stays out-of-band.**  Patches apply `patch -p1` outside
+  `debian/` against the pristine upstream tree, and versions are stamped
+  POST-build by the transpose scheme (`bump.transpose_deb` — see
+  `docs/versioning-mechanics.md`).  The transpose replaced CONF-03's
+  original "properly-named binNMU `.deb`" goal with something stronger:
+  content-order versioning that needs no changelog synthesis per build,
+  keeps the upstream source byte-pristine as the build INPUT (patch-set
+  identity lives in `patch_set_hash` + the version-pinned dir layout,
+  which is what obsolete-patch detection keys on), and avoids per-format
+  quilt push/pop fragility across the 1.0 / 3.0-native / 3.0-quilt zoo.
+
+- **Publish time IS in-format.**  The PUBLISHED source package (MAT-02,
+  `scripts/source_emit.py`) honours the Debian source format fully: a
+  synthesized versioned `debian/changelog` entry carries the published
+  version (`dpkg-source` derives the `.dsc` version from it), patches
+  touching upstream files are folded into `debian/patches/` + `series`,
+  and `debian/`-only patches ride the `debian.tar` directly.  A client's
+  `apt-get source` + `dpkg-buildpackage` therefore sees a proper,
+  buildable Debian-format source at exactly the binaries' version —
+  the property CONF-03 actually wanted — without the build pipeline
+  itself carrying quilt state.
+
+In short: the out-of-band layout is the INPUT convention; the Debian
+source format is the OUTPUT contract.  Revisit only if the build ever
+needs to consume our own published sources (the self-hosting milestone),
+where the emitted in-format source is already the right input.
+
 ### DEP-3 header — required
 
 Every patch in `patch/source/` MUST carry a [DEP-3](https://dep-team.pages.debian.net/deps/dep3/)
