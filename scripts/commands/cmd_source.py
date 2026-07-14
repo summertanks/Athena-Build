@@ -621,6 +621,7 @@ class SourceCommandsMixin(SessionState):
                 work_root=_work_root,
                 keep_binnmu_names=utils.tunneled_binary_names(
                     self.config, self.cache),
+                universe_lookup=utils.cache_universe_lookup(self.cache),
                 force_class=_fclass)
         except _se.SourceEmitError as _e:
             console.print(f"  {src}: emit FAILED — {_e}", tui.COLOR_ERROR)

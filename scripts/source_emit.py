@@ -38,7 +38,7 @@ import os
 import re
 import shutil
 import subprocess
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from bump import (
     source_package_version,
@@ -226,6 +226,8 @@ def emit_source(dsc_path: str, out_dir: str, *,
                 patch_root: str = '',
                 patch_level: int = 0,
                 keep_binnmu_names: 'Optional[frozenset]' = None,
+                universe_lookup:
+                'Optional[Callable[[str], Optional[str]]]' = None,
                 force_class: 'Optional[str]' = None,
                 work_root: 'Optional[str]' = None) -> 'Dict[str, Any]':
     """Produce the published source package for *dsc_path* into *out_dir*.
@@ -328,7 +330,8 @@ def emit_source(dsc_path: str, out_dir: str, *,
         with open(_ctrl_path, encoding='utf-8', errors='replace') as _fh:
             _ctrl = _fh.read()
         _new_ctrl, _ = transpose_source_relations(
-            _ctrl, prefix, release, keep_binnmu_names=keep_binnmu_names)
+            _ctrl, prefix, release, keep_binnmu_names=keep_binnmu_names,
+            universe_lookup=universe_lookup)
         if _new_ctrl != _ctrl:
             with open(_ctrl_path, 'w', encoding='utf-8') as _fh:
                 _fh.write(_new_ctrl)

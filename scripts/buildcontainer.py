@@ -2051,6 +2051,9 @@ class BuildContainer:
         # shipped version keeps its +bN/backport layer — exempt those bounds
         # from the constraint strip (empty set when no cache is wired).
         _keep_bn = utils.tunneled_binary_names(self.config, self.cache)
+        # STA-55: the universe hook for the target-aware Breaks/Conflicts
+        # ceiling demotion (None without a cache — standard op).
+        _uni = utils.cache_universe_lookup(self.cache)
 
         _current_paths: 'list[str]' = []
         for _path in built_files:
@@ -2060,7 +2063,8 @@ class BuildContainer:
                     _path, 'asg', _release,
                     patch_level=_patch_level, force_bn=_force_bn,
                     sibling_names=_sibling_names,
-                    keep_binnmu_names=_keep_bn)
+                    keep_binnmu_names=_keep_bn,
+                    universe_lookup=_uni)
                 _new = _r.get('new_path', _path)
                 if _r['status'] == 'rewritten' and _new != _path:
                     logger.info(

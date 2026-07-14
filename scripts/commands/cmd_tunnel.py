@@ -344,7 +344,9 @@ class TunnelCommandsMixin(SessionState):
                         _r = utils.transpose_deb(
                             _ups_path, 'asg', _release,
                             keep_binnmu_names=frozenset(_keep_bn),
-                            source_version=str(src_pkg.version))
+                            source_version=str(src_pkg.version),
+                            universe_lookup=utils.cache_universe_lookup(
+                                getattr(self, 'cache', None)))
                         _new_path = _r.get('new_path', _ups_path)
                         if (_r.get('status') == 'rewritten'
                                 and _new_path != _ups_path):

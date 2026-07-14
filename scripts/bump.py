@@ -452,8 +452,9 @@ def find_matching_artifact(dst_dir: str,
 def _rewrite_control_text(
         content: str,
         version_op: 'Callable[[str], str]',
-        constraint_op: 'Optional[Callable[[str, Optional[str]], str]]' = None,
-        fields: 'Optional[tuple]' = None
+        constraint_op: 'Optional[Callable[..., str]]' = None,
+        fields: 'Optional[tuple]' = None,
+        negative_constraint_op: 'Optional[Callable[..., str]]' = None
         ) -> 'tuple[str, int]':
     """Shared scaffold for :func:`strip_nmu_from_control_text` and
     :func:`transpose_control_text`.  Applies ``version_op`` (a version-string
@@ -511,12 +512,11 @@ def _rewrite_control_text(
     # after the (now-rewritten) Version line — only when it actually changed and
     # the field isn't already present (idempotent re-runs).
     if _version_changed and 'X-Athena-Upstream-Version:' not in _content:
+        def _ins_xfield(_m: 're.Match[str]') -> str:
+            return (f'{_m.group(1)}\n'
+                    f'X-Athena-Upstream-Version: {_orig_version}')
         _content = re.sub(
-            r'^(Version: \S+)\s*$',
-            lambda _m: (
-                f'{_m.group(1)}\n'
-                f'X-Athena-Upstream-Version: {_orig_version}'
-            ),
+            r'^(Version: \S+)\s*$', _ins_xfield,
             _content, count=1, flags=re.MULTILINE,
         )
 
@@ -531,13 +531,20 @@ def _rewrite_control_text(
     if constraint_op is not None:
         _con_op = constraint_op
     else:
-        def _con_op(_v: str, _name: 'Optional[str]') -> str:
+        def _con_op(_v: str, _name: 'Optional[str]',
+                    _rel_op: 'Optional[str]' = None) -> str:
             return version_op(_v)
+
+    # STA-55: negative relation fields route through their own op when the
+    # caller supplies one (target-aware Breaks/Conflicts ceiling demotion).
+    _neg_op = (negative_constraint_op if negative_constraint_op is not None
+               else _con_op)
+    _active_op = _con_op
 
     def _sub_constraint(_m: 're.Match') -> str:
         nonlocal _total
         _name, _tail, _op, _ver = _m.groups()
-        _new_ver = _con_op(_ver, _name)
+        _new_ver = _active_op(_ver, _name, _op)
         if _new_ver != _ver:
             _total += 1
         _prefix = f'{_name}{_tail}' if _name is not None else ''
@@ -549,7 +556,13 @@ def _rewrite_control_text(
     for _line in _content.splitlines(keepends=True):
         if _line and _line[0] not in (' ', '\t'):
             _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
-            _in_target = _m is not None and _m.group(1) in _fields
+            if _m is not None and _m.group(1) in _fields:
+                _in_target = True
+                _active_op = (_neg_op
+                              if _m.group(1) in _NEGATIVE_RELATION_FIELDS
+                              else _con_op)
+            else:
+                _in_target = False
         # (continuation lines inherit the surrounding _in_target state)
         if _in_target:
             _new_lines.append(_constraint_re.sub(_sub_constraint, _line))
@@ -896,6 +909,80 @@ def compute_transposed_versions(
     }
 
 
+# Negative relation fields — a satisfied bound RESTRICTS (breaks /
+# conflicts) rather than requires.  STA-55: binNMU-era ceilings here encode
+# "built before transition X" in buildd ordinals our world erases, so a
+# stripped ceiling falsely catches our co-rebuilt packages.
+_NEGATIVE_RELATION_FIELDS = ('Breaks', 'Conflicts', 'Replaces')
+
+
+def _shipped_version_model(v_deb: str, name: str, prefix: str, release: int,
+                           keep_binnmu_names: 'Optional[frozenset]') -> str:
+    """The version OUR repo ships for a universe binary at *v_deb* (the
+    verdict oracle's model): a tunnelled binary keeps a trailing +bN
+    verbatim (else transposes); everything else is rebuilt from source
+    (transpose of the binNMU-stripped version)."""
+    if keep_binnmu_names and name in keep_binnmu_names:
+        return (v_deb if strip_binNMU(v_deb)[1]
+                else transpose(v_deb, prefix, release))
+    return transpose(strip_binNMU(v_deb)[0], prefix, release)
+
+
+def _make_negative_constraint_op(
+        prefix: str, release: int,
+        keep_binnmu_names: 'Optional[frozenset]',
+        universe_lookup: 'Optional[Callable[[str], Optional[str]]]'):
+    """STA-55 — the TARGET-AWARE op for Breaks/Conflicts/Replaces ceilings.
+
+    Upstream encodes "breaks anything built BEFORE transition X" in buildd
+    rebuild ordinals (`libc6-dev Breaks: libasyncns-dev (<= 0.8-6+b2)`): the
+    Debian target escapes via its `+b3`, but our co-rebuilt package — its
+    binNMU layer erased by design — is CAUGHT by the stripped ceiling, so
+    apt refuses a co-install upstream allows.  No pure version rewrite
+    preserves the verdict, so this op consults the build-time UNIVERSE
+    (``universe_lookup``: binary name → Debian version, None = unknown):
+    for a `<=`/`<<` ceiling whose Debian-world verdict was False while the
+    standard rewrite's verdict against our shipped model is True, the bound
+    DEMOTES `X` → `X~` — our package escapes exactly like Debian's binNMU
+    did, while genuinely-older versions stay caught.  Self-validating: the
+    demotion applies only when it actually restores the Debian verdict.
+    Without a lookup (no cache in the calling context) this IS the standard
+    op; the full-universe verdict oracle monitors the residue.  Idempotent:
+    a demoted `X~` bound produces no further verdict flip on re-runs.
+    """
+    _standard = _make_transpose_constraint_op(
+        prefix, release, keep_binnmu_names)
+
+    def _op(_v: str, _name: 'Optional[str]',
+            _rel_op: 'Optional[str]' = None) -> str:
+        _rewritten = _standard(_v, _name)
+        if (universe_lookup is None or not _name
+                or _rel_op not in ('<=', '<<')):
+            return _rewritten
+        _v_deb = universe_lookup(_name)
+        if not _v_deb:
+            return _rewritten
+        try:
+            import apt_pkg
+            apt_pkg.init_system()
+            _check = apt_pkg.check_dep
+        except Exception:                                  # noqa: BLE001
+            return _rewritten
+        _deb_verdict = bool(_check(_v_deb, _rel_op, _v))
+        _shipped = _shipped_version_model(
+            _v_deb, _name, prefix, release, keep_binnmu_names)
+        _asg_verdict = bool(_check(_shipped, _rel_op, _rewritten))
+        if _deb_verdict or not _asg_verdict:
+            return _rewritten          # verdicts agree (or True→False,
+                                       # which demotion cannot heal)
+        _demoted = _rewritten + '~'
+        if not _check(_shipped, _rel_op, _demoted):
+            return _demoted
+        return _rewritten
+
+    return _op
+
+
 def _make_transpose_constraint_op(prefix: str, release: int,
                                   keep_binnmu_names: 'Optional[frozenset]'):
     """The shared CONSTRAINT op of the transpose scheme (one home —
@@ -904,7 +991,8 @@ def _make_transpose_constraint_op(prefix: str, release: int,
     the legacy bare-`Nb` bound form) then transpose, EXCEPT bounds whose
     target is a tunnelled binary (shipped verbatim — keep the layer) and
     bounds already carrying OUR +asg chain (a force-rebuild pin)."""
-    def _constraint_op(_v: str, _name: 'Optional[str]') -> str:
+    def _constraint_op(_v: str, _name: 'Optional[str]',
+                       _rel_op: 'Optional[str]' = None) -> str:
         if _name is not None and keep_binnmu_names \
                 and _name in keep_binnmu_names:
             return transpose(_v, prefix, release)
@@ -917,8 +1005,10 @@ def _make_transpose_constraint_op(prefix: str, release: int,
 
 
 def transpose_source_relations(content: str, prefix: str, release: int,
-                               keep_binnmu_names: 'Optional[frozenset]' = None
-                               ) -> 'tuple[str, int]':
+                               keep_binnmu_names: 'Optional[frozenset]' = None,
+                               universe_lookup:
+                               'Optional[Callable[[str], Optional[str]]]'
+                               = None) -> 'tuple[str, int]':
     """Transpose every literal version constraint in a SOURCE control text —
     a source-tree ``debian/control`` (multi-stanza) or a ``.dsc`` body — over
     the SOURCE field set: the nine runtime relation fields PLUS
@@ -935,6 +1025,8 @@ def transpose_source_relations(content: str, prefix: str, release: int,
         content, lambda _v: transpose(_v, prefix, release),
         constraint_op=_make_transpose_constraint_op(
             prefix, release, keep_binnmu_names),
+        negative_constraint_op=_make_negative_constraint_op(
+            prefix, release, keep_binnmu_names, universe_lookup),
         fields=SOURCE_RELATION_FIELDS)
 
 
@@ -982,7 +1074,9 @@ def _apply_source_annotation(content: str, src_version: str,
 
 
 def transpose_control_text(content: str, prefix: str, release: int,
-                           keep_binnmu_names: 'Optional[frozenset]' = None
+                           keep_binnmu_names: 'Optional[frozenset]' = None,
+                           universe_lookup:
+                           'Optional[Callable[[str], Optional[str]]]' = None
                            ) -> 'tuple[str, int]':
     """Return (new_text, change_count) — TRANSPOSE the Version field and every
     version constraint in dep-related fields of a DEBIAN/control text (trailing
@@ -1013,7 +1107,9 @@ def transpose_control_text(content: str, prefix: str, release: int,
     return _rewrite_control_text(
         content, lambda _v: transpose(_v, prefix, release),
         constraint_op=_make_transpose_constraint_op(
-            prefix, release, keep_binnmu_names))
+            prefix, release, keep_binnmu_names),
+        negative_constraint_op=_make_negative_constraint_op(
+            prefix, release, keep_binnmu_names, universe_lookup))
 
 
 # Exact-pin matcher: a `<name> (= <version>)` constraint inside a relation
@@ -1060,7 +1156,9 @@ def transpose_deb(deb_path: str, prefix: str, release: int,
                   force_bn: 'Optional[int]' = None,
                   sibling_names: 'Optional[set]' = None,
                   keep_binnmu_names: 'Optional[frozenset]' = None,
-                  source_version: 'Optional[str]' = None) -> dict:
+                  source_version: 'Optional[str]' = None,
+                  universe_lookup:
+                  'Optional[Callable[[str], Optional[str]]]' = None) -> dict:
     """Transpose + stamp a built .deb/.udeb in place — the single-cycle
     replacement for ``strip_nmu_from_deb`` + ``restamp_asg_deb`` on the build
     and tunnel paths.  Updates filename, DEBIAN/control Version, dep
@@ -1112,7 +1210,8 @@ def transpose_deb(deb_path: str, prefix: str, release: int,
 
     # Step 1: transpose Version + constraints to the K-version (no P/bN yet).
     _k_text, _changes = transpose_control_text(
-        _ctrl_text, prefix, release, keep_binnmu_names=keep_binnmu_names)
+        _ctrl_text, prefix, release, keep_binnmu_names=keep_binnmu_names,
+        universe_lookup=universe_lookup)
     _k_ver = _extract_version(_k_text)
     if not _k_ver:
         _result['status'] = 'malformed'

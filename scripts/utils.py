@@ -272,6 +272,32 @@ def tunneled_binary_names(config: 'Any', cache: 'Any') -> 'frozenset[str]':
     return frozenset(_names)
 
 
+def cache_universe_lookup(cache: 'Any') -> 'Optional[Callable[[str], Optional[str]]]':
+    """A memoised ``binary name → highest Debian version`` lookup over the
+    loaded cache — the universe hook for bump's target-aware negative-field
+    rewrite (STA-55).  None when no cache is loaded (the rewrite then
+    degrades to the standard op; the verdict oracle monitors the residue).
+    """
+    if cache is None:
+        return None
+    _memo: 'Dict[str, Optional[str]]' = {}
+
+    def _lookup(name: str) -> 'Optional[str]':
+        if name in _memo:
+            return _memo[name]
+        _v: 'Optional[str]' = None
+        try:
+            _versions = cache.package_hashtable.get(name)
+            if _versions:
+                _v = str(max(_versions.keys()))
+        except Exception:                                  # noqa: BLE001
+            _v = None
+        _memo[name] = _v
+        return _v
+
+    return _lookup
+
+
 def version_no_epoch(version: object) -> str:
     """Return a Debian Version's string form with the epoch stripped.
 

@@ -296,6 +296,62 @@ def test_transpose_control_text_keep_binnmu_names_exempts_tunneled_targets():
     assert _n2 == 0, (_n2, _out2)
 
 
+def test_transpose_negative_ceiling_target_aware_demotion():
+    """STA-55: binNMU-era Breaks/Conflicts ceilings demote target-aware.
+    Upstream's `libc6-dev Breaks: libasyncns-dev (<= 0.8-6+b2)` means
+    "anything built before rebuild #3"; Debian's target escaped via +b3 but
+    our co-rebuilt 0.8-6 (binNMU erased) would be CAUGHT by the stripped
+    ceiling.  With the universe hook the bound demotes to `X~` — our
+    package escapes like Debian's +bN did, genuinely-older versions stay
+    caught.  Pins: both escape shapes demote; a true positive (target
+    genuinely caught in Debian) does NOT; unknown targets and positive
+    fields keep the standard rewrite; no hook = standard op; idempotent."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from bump import transpose_control_text
+    _uni = {'libasyncns-dev': '0.8-6+b3',   # escaped via +b3
+            'igblast': '1.19.0-1+b1',       # plain ceiling, +b1 escape
+            'oldpkg': '0.9-1'}              # genuinely caught
+    _ctrl = ('Package: libc6-dev\n'
+             'Version: 2.36-9+deb12u14\n'
+             'Breaks: libasyncns-dev (<= 0.8-6+b2), igblast (<= 1.19.0-1), '
+             'oldpkg (<= 0.9-1), ghost (<= 3.3-1+b1)\n'
+             'Depends: libasyncns-dev (<= 0.8-6+b2)\n'
+             'Description: x\n')
+    _out, _n = transpose_control_text(_ctrl, 'asg', 1,
+                                      universe_lookup=_uni.get)
+    _breaks = [_l for _l in _out.splitlines() if _l.startswith('Breaks')][0]
+    assert 'libasyncns-dev (<= 0.8-6~)' in _breaks       # demoted
+    assert 'igblast (<= 1.19.0-1~)' in _breaks           # unchanged-bound case
+    assert 'oldpkg (<= 0.9-1)' in _breaks                # true positive kept
+    assert 'ghost (<= 3.3-1)' in _breaks                 # unknown → standard
+    _deps = [_l for _l in _out.splitlines() if _l.startswith('Depends')][0]
+    assert 'libasyncns-dev (<= 0.8-6)' in _deps          # positive: standard
+    # no hook → standard everywhere
+    _out2, _ = transpose_control_text(_ctrl, 'asg', 1)
+    assert 'libasyncns-dev (<= 0.8-6)' in _out2
+    # idempotent with the hook
+    _out3, _n3 = transpose_control_text(_out, 'asg', 1,
+                                        universe_lookup=_uni.get)
+    assert _n3 == 0, (_n3, _out3)
+
+
+def test_cache_universe_lookup_memoised_highest_version():
+    """utils.cache_universe_lookup: highest version per binary from the
+    cache's package_hashtable; None for unknown names / no cache."""
+    import types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    from debian.debian_support import Version as _V
+    _cache = types.SimpleNamespace(package_hashtable={
+        'libasyncns-dev': {_V('0.8-6'): [1], _V('0.8-6+b3'): [1]},
+    })
+    _lk = _u.cache_universe_lookup(_cache)
+    assert _lk is not None
+    assert _lk('libasyncns-dev') == '0.8-6+b3'
+    assert _lk('ghost') is None
+    assert _u.cache_universe_lookup(None) is None
+
+
 def test_match_pristine_base_tunneled_binnmu_acceptance():
     """The tunnelled acceptance (allow_binnmu): an on-disk artifact keeping
     its upstream +bN (a tunnelled binNMU — transpose_deb keeps it for the
@@ -1904,6 +1960,8 @@ TESTS = [
     test_transpose_control_text_version_deps_and_provenance,
     test_transpose_control_text_strips_binnmu_from_constraint_bounds,
     test_transpose_control_text_keep_binnmu_names_exempts_tunneled_targets,
+    test_transpose_negative_ceiling_target_aware_demotion,
+    test_cache_universe_lookup_memoised_highest_version,
     test_match_pristine_base_tunneled_binnmu_acceptance,
     test_source_package_version_predictor,
     test_transpose_ceiling_dot_tail_transposes,

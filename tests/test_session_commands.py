@@ -56,6 +56,15 @@ def test_tunneled_binnmu_gate_parity_check_build_vs_audit():
                      _re.DOTALL)
     assert _m2, '_source_state not found'
     assert 'allow_binnmu=_record_tunneled' in _m2.group(0)
+    # STA-55: every transpose call site feeds the universe hook so the
+    # target-aware Breaks/Conflicts demotion is live on all paths.
+    assert 'universe_lookup=utils.cache_universe_lookup(self.cache)' in _c, \
+        'source emit must pass the universe hook'
+    for _mod in ('buildcontainer.py',
+                 os.path.join('commands', 'cmd_tunnel.py')):
+        with open(os.path.join(_ROOT, 'scripts', _mod)) as _fh:
+            assert 'cache_universe_lookup' in _fh.read(), \
+                f'{_mod} must pass the universe hook'
 
 
 def test_source_emit_command_wired_and_record_safe():
