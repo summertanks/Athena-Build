@@ -89,3 +89,13 @@ athena-tasksel/README.translators	*	translator docs — points to DDTP (upstream
 
 # ── 10. Top-level operator-facing fork READMEs ─────────────────────────
 README.md	*	operator-facing fork-tree README — documents fork rationale
+
+# MAT-03 — booted-root (squashfs chroot) scan carve-outs.  Upstream
+# attribution and licensing texts legally RETAIN the Debian name; the
+# invariant targets OUR identity surfaces (os-release, menus, debconf,
+# boot), not upstream provenance.  Same rationale as the fork
+# debian/copyright entries above.
+usr/share/doc/*	*	upstream attribution/changelogs — legally retained
+usr/share/common-licenses/*	*	license texts — verbatim by definition
+usr/share/man/*	*	upstream manpages document upstream reality
+

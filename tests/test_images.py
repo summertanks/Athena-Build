@@ -18,6 +18,33 @@ from _test_helpers import (  # noqa: F401
 
 
 
+def test_mat03_live_chroot_identity_scanned_before_squashfs():
+    """MAT-03: the live chroot root is identity-scanned BEFORE mksquashfs —
+    the squashfs is opaque to every later audit, so residue in the booted
+    root would ship undetected.  Pins: the scan call precedes the
+    mksquashfs invocation, a failure aborts the build (return False), the
+    [Audit] IdentityScan gate applies (loud skip when disabled), and the
+    allowlist carves out the legally-retained upstream attribution paths."""
+    import re
+    _p = os.path.join(_ROOT, 'scripts', 'iso.py')
+    with open(_p) as _fh:
+        _s = _fh.read()
+    _scan = _s.find('_audit_staged_iso(self._dir_chroot')
+    _squash = _s.find("'mksquashfs', self._dir_chroot")
+    assert _scan != -1, 'chroot identity scan missing from build_iso'
+    assert _squash != -1, 'mksquashfs invocation not found'
+    assert _scan < _squash, 'scan must run BEFORE the expensive mksquashfs'
+    assert re.search(r'audit_identity_scan.*\n.*_audit_staged_iso', _s), \
+        'scan must be gated by [Audit] IdentityScan'
+    assert 'IdentityScan = false' in _s, 'disabled gate must warn loudly'
+    _al = os.path.join(_ROOT, 'audit', 'identity-allowlist')
+    with open(_al) as _fh:
+        _a = _fh.read()
+    for _glob in ('usr/share/doc/*', 'usr/share/common-licenses/*',
+                  'usr/share/man/*'):
+        assert _glob in _a, f'allowlist must carve out {_glob}'
+
+
 def test_verify_chroot_disk_surface_skips_live_boot():
     """SURFACES-01: the disk chroot ships without live-boot by design,
     so _verify_chroot(require_live_boot=False) reports the live-boot
@@ -633,6 +660,7 @@ def test_iso_installer_accepts_tasks_desc_text():
     assert 'parse_pkg_list_groups' in _gen       # fallback path
 
 TESTS = [
+    test_mat03_live_chroot_identity_scanned_before_squashfs,
     test_verify_chroot_disk_surface_skips_live_boot,
     test_write_iso_md5sum_manifest_mat08,
     test_iso_builders_write_md5sum_manifest_mat08,

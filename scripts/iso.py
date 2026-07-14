@@ -237,6 +237,31 @@ class _IsoMixin:
                 f"will render in text mode"
             )
 
+        # ── Step 4b: identity-residue scan of the chroot root (MAT-03) ──────
+        # The squashfs is opaque to every later audit (SEC-07 covered
+        # text/config staging surfaces only; _audit_staged_iso can't see
+        # inside the blob), so Debian identity residue in the BOOTED root
+        # (os-release, debconf db, menus) would ship undetected.  Scan the
+        # chroot tree BEFORE the expensive mksquashfs — reuses the staged-ISO
+        # walker + the same allowlist (which carves out legally-retained
+        # upstream attribution under usr/share/doc/).  Root-only-readable
+        # files (shadow etc.) are skipped by the walker — they are
+        # credentials, not identity surface.  Gated by [Audit] IdentityScan
+        # like the staged-ISO scan.
+        if getattr(self._config, 'audit_identity_scan', True):
+            from iso_installer import _audit_staged_iso
+            if not _audit_staged_iso(self._dir_chroot, self._dir_image):
+                tui.console.print(
+                    "ERROR: identity residue in the live chroot root — "
+                    "fix or allowlist (audit/identity-allowlist) before the "
+                    "squashfs ships it", tui.COLOR_ERROR)
+                return False
+        else:
+            logger.warning(
+                "build_iso: chroot identity scan SKIPPED via "
+                "[Audit] IdentityScan = false — Debian residue can ship "
+                "inside the squashfs without flagging")
+
         # ── Step 5: create squashfs ───────────────────────────────────────────
         logger.info(
             f"step 5/6: mksquashfs xz {self._dir_chroot} → staging/live/filesystem.squashfs"
