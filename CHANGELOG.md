@@ -7,6 +7,8 @@ toolchain SemVer (`scripts/_version.py`); per-commit dev versions are automatic.
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-07-14
+
 - **Source packages published (Sources index + pool `.dsc` + federation
   claims/ledger/pull)** (`scripts/source_emit.py`, `source emit`; see
   `docs/versioning-mechanics.md`).
