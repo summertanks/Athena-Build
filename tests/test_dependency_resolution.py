@@ -1795,6 +1795,105 @@ def test_dep_drift_syncs_version_from_disk():
 
 
 
+def test_select02_settled_hint_guides_or_and_fork_candidates():
+    """SELECT-02 stage 2b: with a settled hint the two order-sensitive
+    decision points become pure functions of the hint SET —
+      (a) an OR group resolves to the settled alternative (xterm |
+          x-terminal-emulator picks the virtual satisfied by
+          gnome-terminal, never first-declared xterm), and
+      (b) candidate resolution narrows to settled members, so a fork's
+          Provides wins over the real package it displaces and the real
+          package's dependency subtree is never pulled (the
+          desktop-base/athena-branding stranded-subtree case).
+    Without a hint both points behave exactly as before (greedy)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+
+    def _mk_world():
+        gterm = _ParseDepPkg('gnome-terminal',
+                             provides=[('x-terminal-emulator', '')])
+        xterm = _ParseDepPkg('xterm', depends=[('libutempter0', '', '')])
+        libu = _ParseDepPkg('libutempter0')
+        xorg = _ParseDepPkg('xorg', alt_depends=[[
+            ('xterm', '', ''), ('x-terminal-emulator', '', '')]])
+        return {
+            'xorg': [xorg],
+            'gnome-terminal': [gterm],
+            'x-terminal-emulator': [gterm],
+            'xterm': [xterm],
+            'libutempter0': [libu],
+        }
+
+    # (a) greedy (no hint), xorg seeded FIRST: the OR resolves before
+    # gnome-terminal registers the virtual, so first-declared xterm is
+    # pulled (+ its dep) — the order-dependence being cut over.
+    dt = _make_parse_dep_tree(_mk_world())
+    dt.parse_dependency('xorg')
+    dt.parse_dependency('gnome-terminal')
+    assert 'xterm' in dt.selected_pkgs and 'libutempter0' in dt.selected_pkgs
+
+    # (a) hinted: settled set has the virtual; xterm never pulled — and the
+    # SAME result regardless of seed order (the permutation property).
+    for _order in (('gnome-terminal', 'xorg'), ('xorg', 'gnome-terminal')):
+        dt2 = _make_parse_dep_tree(_mk_world())
+        dt2._settled_hint = frozenset(
+            {'xorg', 'gnome-terminal', 'x-terminal-emulator'})
+        for _s in _order:
+            dt2.parse_dependency(_s)
+        assert 'xterm' not in dt2.selected_pkgs, _order
+        assert 'libutempter0' not in dt2.selected_pkgs, _order
+        assert dt2.selected_pkgs['x-terminal-emulator'].package \
+            == 'gnome-terminal', _order
+
+    # (b) fork case: real desktop-base vs athena-branding (Provides +
+    # Replaces).  Greedy prefer_name picks the REAL package and strands
+    # its subtree; hinted narrows candidates to the settled fork.
+    def _mk_fork_world():
+        real = _ParseDepPkg('desktop-base',
+                            depends=[('fonts-quicksand', '', '')])
+        fonts = _ParseDepPkg('fonts-quicksand')
+        fork = _ParseDepPkg('athena-branding',
+                            provides=[('desktop-base', '12.0.6')])
+        fork.replaces = [[('desktop-base', '', '')]]
+        gcc_ = _ParseDepPkg('gnome-control-center',
+                            depends=[('desktop-base', '', '')])
+        return {
+            'gnome-control-center': [gcc_],
+            'desktop-base': [real, fork],
+            'fonts-quicksand': [fonts],
+            'athena-branding': [fork],
+        }
+
+    dt3 = _make_parse_dep_tree(_mk_fork_world())
+    dt3.parse_dependency('gnome-control-center')
+    assert dt3.selected_pkgs['desktop-base'].package == 'desktop-base'
+    assert 'fonts-quicksand' in dt3.selected_pkgs      # the stranded subtree
+
+    dt4 = _make_parse_dep_tree(_mk_fork_world())
+    dt4._settled_hint = frozenset(
+        {'gnome-control-center', 'athena-branding'})
+    dt4.parse_dependency('gnome-control-center')
+    assert dt4.selected_pkgs['desktop-base'].package == 'athena-branding'
+    assert 'fonts-quicksand' not in dt4.selected_pkgs
+
+
+def test_select02_two_pass_driver_wired():
+    """SELECT-02 stage 2b wiring: cache parse runs the passes through
+    _resolve_passes, re-resolves with the fixpoint hint on divergence
+    (carrying pass-1 prompt picks so nothing re-prompts), and re-checks
+    the shadow as a tripwire afterwards."""
+    _p = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_cache.py')
+    with open(_p) as _fh:
+        _c = _fh.read()
+    assert 'def _resolve_passes(_settled_deb=None, _settled_udeb=None):' in _c
+    assert _c.count('_resolve_passes(') >= 3, 'define + 2 calls expected'
+    assert 'fixpoint_closure()' in _c, 'hint must come from the fixpoint'
+    assert '_pins.update(self.dep_tree._pinned_chosen)' in _c, \
+        'pass-1 prompt picks must carry into pass 2'
+    assert 'settled_hint=_settled_deb' in _c and \
+        'settled_hint=_settled_udeb' in _c, 'both trees must take the hint'
+    assert 'guided pass still diverges' in _c, 'tripwire must warn'
+
+
 def test_dependencytree_order_independence_report():
     """SELECT-02 shadow: order_independence_report flags the order-pulled
     extras the greedy closure holds that an order-independent fixpoint would
@@ -1936,6 +2035,8 @@ TESTS = [
     test_resolve_closure_multi_group_and_generator_seeds,
     test_package_add_constraint_conflict_matrix,
     test_dependencytree_pickle_roundtrip,
+    test_select02_settled_hint_guides_or_and_fork_candidates,
+    test_select02_two_pass_driver_wired,
     test_dependencytree_order_independence_report,
     test_dep_drift_syncs_version_from_disk,
 ]

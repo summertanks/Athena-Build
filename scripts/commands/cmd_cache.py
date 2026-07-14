@@ -471,354 +471,404 @@ class CacheCommandsMixin(SessionState):
                     tui.COLOR_ERROR)
             return
 
-        # --- Pass I: required ---------------------------------------------------
-        required_packages = self.cache.required
-        console.print("Pass I: Checking dependency for required packages", tui.COLOR_INFO)
-        self.dep_tree.resolve_packages(required_packages)
+        # ── SELECT-02 stage 2b: fixpoint-guided resolution ────────────────
+        # The classic greedy walk resolves OR groups and fork-Provided names
+        # against the IN-PROGRESS closure, so the result depends on seed
+        # ORDER (xterm via xorg; the desktop-base stranded subtree via
+        # gnome-control-center racing the athena-branding fork).  The
+        # passes below are wrapped so they can run TWICE: pass 1 exactly as
+        # before; if the order-independence shadow reports divergence, the
+        # ORDER-INDEPENDENT settled closure (fixpoint_closure) guides a
+        # second pass via DependencyTree(settled_hint=…) — every OR/provider
+        # decision then depends only on the settled SET, making the shipped
+        # closure a pure function of the seeds.  Convergence is verified by
+        # the shadow re-run (tripwire below).
+        def _resolve_passes(_settled_deb=None, _settled_udeb=None):
+            assert self.cache is not None    # narrowing for the closure
+            self.dep_tree = dependencytree.DependencyTree(
+                self.cache,
+                select_recommended=self.config.include_recommends,
+                arch=self.config.arch,
+                build_profiles=self.config.build_profiles,
+                pins=_pins, settled_hint=_settled_deb)
+            # --- Pass I: required ---------------------------------------------------
+            required_packages = self.cache.required
+            console.print("Pass I: Checking dependency for required packages", tui.COLOR_INFO)
+            self.dep_tree.resolve_packages(required_packages)
 
-        __num_required = self.dep_tree.selected_count
-        console.print(f"Dependencies Selected for 'required' : {__num_required}")
+            __num_required = self.dep_tree.selected_count
+            console.print(f"Dependencies Selected for 'required' : {__num_required}")
 
-        # Mark every package pulled in by 'required' as required too.
-        # Virtual packages (aliases) are skipped — the canonical name carries the priority.
-        for _pkg in self.dep_tree.selected_pkgs:
-            if _pkg != self.dep_tree.selected_pkgs[_pkg]['Package']:
-                continue
-            self.dep_tree.selected_pkgs[_pkg].priority = 'required'
+            # Mark every package pulled in by 'required' as required too.
+            # Virtual packages (aliases) are skipped — the canonical name carries the priority.
+            for _pkg in self.dep_tree.selected_pkgs:
+                if _pkg != self.dep_tree.selected_pkgs[_pkg]['Package']:
+                    continue
+                self.dep_tree.selected_pkgs[_pkg].priority = 'required'
 
-        # --- Pass II: important --------------------------------------------------
-        # 'Important' packages are not strictly needed for a minimal system but
-        # omitting them causes enough breakage that manual intervention is required
-        # for almost every subsequent step.  If the list is ever stabilised we
-        # could replace it with a curated hand-picked set.
-        important_packages = self.cache.important
+            # --- Pass II: important --------------------------------------------------
+            # 'Important' packages are not strictly needed for a minimal system but
+            # omitting them causes enough breakage that manual intervention is required
+            # for almost every subsequent step.  If the list is ever stabilised we
+            # could replace it with a curated hand-picked set.
+            important_packages = self.cache.important
 
-        # Option to manually add additional packages we think are important, e.g. dialog
-        # important_packages.extend(['dialog'])
+            # Option to manually add additional packages we think are important, e.g. dialog
+            # important_packages.extend(['dialog'])
 
-        console.print("Pass II: Checking dependency for important packages", tui.COLOR_INFO)
-        self.dep_tree.resolve_packages(important_packages)
+            console.print("Pass II: Checking dependency for important packages", tui.COLOR_INFO)
+            self.dep_tree.resolve_packages(important_packages)
 
-        __num_now = self.dep_tree.selected_count
-        console.print(f"Dependencies Selected for 'important' : {__num_now - __num_required}")
-        __num_required = __num_now
+            __num_now = self.dep_tree.selected_count
+            console.print(f"Dependencies Selected for 'important' : {__num_now - __num_required}")
+            __num_required = __num_now
 
-        # Mark everything not already 'required' as 'important'.
-        for _pkg in self.dep_tree.selected_pkgs:
-            if _pkg != self.dep_tree.selected_pkgs[_pkg]['Package']:
-                continue
-            if self.dep_tree.selected_pkgs[_pkg].priority != 'required':
-                self.dep_tree.selected_pkgs[_pkg].priority = 'important'
+            # Mark everything not already 'required' as 'important'.
+            for _pkg in self.dep_tree.selected_pkgs:
+                if _pkg != self.dep_tree.selected_pkgs[_pkg]['Package']:
+                    continue
+                if self.dep_tree.selected_pkgs[_pkg].priority != 'required':
+                    self.dep_tree.selected_pkgs[_pkg].priority = 'important'
 
-        # Sanity check — no package should carry any other priority string at this point.
-        for _pkg in self.dep_tree.selected_pkgs:
-            _priority = self.dep_tree.selected_pkgs[_pkg].priority
-            if _priority != 'required' and _priority != 'important':
-                console.print(f"Package {_pkg} with unexpected priority :{_priority}")
+            # Sanity check — no package should carry any other priority string at this point.
+            for _pkg in self.dep_tree.selected_pkgs:
+                _priority = self.dep_tree.selected_pkgs[_pkg].priority
+                if _priority != 'required' and _priority != 'important':
+                    console.print(f"Package {_pkg} with unexpected priority :{_priority}")
 
-        # --- Pass III: manual list (per-group) ------------------------------
-        # pkg.list may be flat (legacy — implicit `[base]`) or INI-style
-        # with named `[group]` sections.  Either way we iterate groups
-        # in declaration order, resolving each one's seeds and
-        # crediting the newly-pulled-in canonical names to that group's
-        # entry in `pkg_group_pkg_names`.  Non-`[base]` groups end up
-        # in `pkg_group_extras_pkg_names` — same exclusion semantics
-        # as pool extras (subtracted from `_base_include`, filtered
-        # from live install batches) but conflicts ARE enforced
-        # because group-level packages are not mutually exclusive
-        # within a single install run.
-        console.print("Pass III: Checking dependency for manually selected packages", tui.COLOR_INFO)
+            # --- Pass III: manual list (per-group) ------------------------------
+            # pkg.list may be flat (legacy — implicit `[base]`) or INI-style
+            # with named `[group]` sections.  Either way we iterate groups
+            # in declaration order, resolving each one's seeds and
+            # crediting the newly-pulled-in canonical names to that group's
+            # entry in `pkg_group_pkg_names`.  Non-`[base]` groups end up
+            # in `pkg_group_extras_pkg_names` — same exclusion semantics
+            # as pool extras (subtracted from `_base_include`, filtered
+            # from live install batches) but conflicts ARE enforced
+            # because group-level packages are not mutually exclusive
+            # within a single install run.
+            console.print("Pass III: Checking dependency for manually selected packages", tui.COLOR_INFO)
 
-        console.print(f"Parsing {self.config.pkglist_path}...")
-        try:
-            _pkg_lines = utils.readfile(self.config.pkglist_path).splitlines()
-            _pkg_groups = utils.parse_pkg_list_groups(
-                self.config.pkglist_path, lines=_pkg_lines)
-            _pkg_group_meta = utils.parse_pkg_list_group_meta(
-                self.config.pkglist_path, lines=_pkg_lines)
-        except (OSError, ValueError) as e:
-            console.print(f"ERROR: cannot read package list {self.config.pkglist_path}: {e}")
-            logger.error(f"parse_pkg_list_groups({self.config.pkglist_path}): {e}")
-            _pkg_groups = {}
-            _pkg_group_meta = {}
-        self.dep_tree.pkg_group_meta = _pkg_group_meta
+            console.print(f"Parsing {self.config.pkglist_path}...")
+            try:
+                _pkg_lines = utils.readfile(self.config.pkglist_path).splitlines()
+                _pkg_groups = utils.parse_pkg_list_groups(
+                    self.config.pkglist_path, lines=_pkg_lines)
+                _pkg_group_meta = utils.parse_pkg_list_group_meta(
+                    self.config.pkglist_path, lines=_pkg_lines)
+            except (OSError, ValueError) as e:
+                console.print(f"ERROR: cannot read package list {self.config.pkglist_path}: {e}")
+                logger.error(f"parse_pkg_list_groups({self.config.pkglist_path}): {e}")
+                _pkg_groups = {}
+                _pkg_group_meta = {}
+            self.dep_tree.pkg_group_meta = _pkg_group_meta
 
-        _total_manual_added = 0
-        for _group, _seeds in _pkg_groups.items():
-            _pre_group_keys = set(self.dep_tree.selected_pkgs.keys())
-            # Filter out names already in selected_pkgs (required /
-            # important / earlier groups) — resolve_packages no-ops on
-            # them anyway but the count stays accurate.
-            _new_seeds = [_p for _p in _seeds if _p not in _pre_group_keys]
-            if _new_seeds:
-                self.dep_tree.resolve_packages(_new_seeds)
-            # Per-group package names = delta in selected_pkgs.keys(),
-            # collapsed to canonical names.  selected_pkgs is keyed by
-            # BOTH real Package: names AND every virtual Provides: name
-            # — for downstream code that only reasons about what dpkg
-            # actually installs (tasksel/task_avail, base_include,
-            # install batches), the virtual aliases are noise that
-            # masquerade as separate packages.
-            #
-            # Why this matters specifically for tasksel: the .desc's
-            # `Key:` list ends up downstream of these names; tasksel's
-            # `task_avail()` calls `apt-cache dumpavail` to verify each
-            # Key is installable, and dumpavail only emits real
-            # `Package:` stanzas (Provides aren't separate stanzas).
-            # A single virtual name in Key → task hidden from menu.
-            # Caught 2026-05-15 — athena-development-tools had 10/49
-            # Key entries that were virtuals (cpp, c++-compiler,
-            # git-core, …); tasksel silently filtered the whole task.
-            _delta_keys = (
-                set(self.dep_tree.selected_pkgs.keys()) - _pre_group_keys
+            _total_manual_added = 0
+            for _group, _seeds in _pkg_groups.items():
+                _pre_group_keys = set(self.dep_tree.selected_pkgs.keys())
+                # Filter out names already in selected_pkgs (required /
+                # important / earlier groups) — resolve_packages no-ops on
+                # them anyway but the count stays accurate.
+                _new_seeds = [_p for _p in _seeds if _p not in _pre_group_keys]
+                if _new_seeds:
+                    self.dep_tree.resolve_packages(_new_seeds)
+                # Per-group package names = delta in selected_pkgs.keys(),
+                # collapsed to canonical names.  selected_pkgs is keyed by
+                # BOTH real Package: names AND every virtual Provides: name
+                # — for downstream code that only reasons about what dpkg
+                # actually installs (tasksel/task_avail, base_include,
+                # install batches), the virtual aliases are noise that
+                # masquerade as separate packages.
+                #
+                # Why this matters specifically for tasksel: the .desc's
+                # `Key:` list ends up downstream of these names; tasksel's
+                # `task_avail()` calls `apt-cache dumpavail` to verify each
+                # Key is installable, and dumpavail only emits real
+                # `Package:` stanzas (Provides aren't separate stanzas).
+                # A single virtual name in Key → task hidden from menu.
+                # Caught 2026-05-15 — athena-development-tools had 10/49
+                # Key entries that were virtuals (cpp, c++-compiler,
+                # git-core, …); tasksel silently filtered the whole task.
+                _delta_keys = (
+                    set(self.dep_tree.selected_pkgs.keys()) - _pre_group_keys
+                )
+                self.dep_tree.pkg_group_pkg_names[_group] = {
+                    self.dep_tree.selected_pkgs[_n]['Package']
+                    for _n in _delta_keys
+                    if _n in self.dep_tree.selected_pkgs
+                }
+                _delta = len(self.dep_tree.pkg_group_pkg_names[_group])
+                _total_manual_added += _delta
+                console.print(
+                    f"  [{_group}] {len(_seeds)} seed(s) → {_delta} canonical "
+                    "package(s) (delta from prior groups + required/important)"
+                )
+
+            # Non-base groups: their packages get filtered from
+            # _base_include + live install batches but stay in the pool.
+            self.dep_tree.pkg_group_extras_pkg_names = set().union(*[
+                _names for _group, _names in self.dep_tree.pkg_group_pkg_names.items()
+                if _group != 'base'
+            ])
+
+            console.print(
+                f"Manual: {len(_pkg_groups)} group(s), "
+                f"{_total_manual_added} total canonical added"
             )
-            self.dep_tree.pkg_group_pkg_names[_group] = {
-                self.dep_tree.selected_pkgs[_n]['Package']
-                for _n in _delta_keys
-                if _n in self.dep_tree.selected_pkgs
-            }
-            _delta = len(self.dep_tree.pkg_group_pkg_names[_group])
-            _total_manual_added += _delta
+
+            __num_total = self.dep_tree.selected_count
+            console.print(f"Dependencies for manually added packages : {__num_total - __num_required}")
+
+            # --- Pass IV: live.list ------------------------------------------------
+            # Snapshot pkg.list closure here — anything pulled in beyond this point
+            # by live.list / installer.list goes into the corresponding exclusive
+            # set.  Required + important + pkg.list are ALL in pkg_closure (as
+            # intended — exclusivity is computed against everything pkg.list
+            # transitively needs, not just the literal pkg.list lines).
+            _pkg_closure = set(self.dep_tree.selected_pkgs.keys())
+
+            console.print("Pass IV: Checking dependency for live-only packages", tui.COLOR_INFO)
+            _live_list = self._read_pkg_list(self.config.livelist_path,
+                                             already_selected=_pkg_closure)
+            if _live_list:
+                self.dep_tree.resolve_packages(_live_list)
+            self.dep_tree.live_exclusive_pkg_names = (
+                set(self.dep_tree.selected_pkgs.keys()) - _pkg_closure
+            )
             console.print(
-                f"  [{_group}] {len(_seeds)} seed(s) → {_delta} canonical "
-                "package(s) (delta from prior groups + required/important)"
+                f"Live-exclusive packages : {len(self.dep_tree.live_exclusive_pkg_names)}"
             )
 
-        # Non-base groups: their packages get filtered from
-        # _base_include + live install batches but stay in the pool.
-        self.dep_tree.pkg_group_extras_pkg_names = set().union(*[
-            _names for _group, _names in self.dep_tree.pkg_group_pkg_names.items()
-            if _group != 'base'
-        ])
-
-        console.print(
-            f"Manual: {len(_pkg_groups)} group(s), "
-            f"{_total_manual_added} total canonical added"
-        )
-
-        __num_total = self.dep_tree.selected_count
-        console.print(f"Dependencies for manually added packages : {__num_total - __num_required}")
-
-        # --- Pass IV: live.list ------------------------------------------------
-        # Snapshot pkg.list closure here — anything pulled in beyond this point
-        # by live.list / installer.list goes into the corresponding exclusive
-        # set.  Required + important + pkg.list are ALL in pkg_closure (as
-        # intended — exclusivity is computed against everything pkg.list
-        # transitively needs, not just the literal pkg.list lines).
-        _pkg_closure = set(self.dep_tree.selected_pkgs.keys())
-
-        console.print("Pass IV: Checking dependency for live-only packages", tui.COLOR_INFO)
-        _live_list = self._read_pkg_list(self.config.livelist_path,
-                                         already_selected=_pkg_closure)
-        if _live_list:
-            self.dep_tree.resolve_packages(_live_list)
-        self.dep_tree.live_exclusive_pkg_names = (
-            set(self.dep_tree.selected_pkgs.keys()) - _pkg_closure
-        )
-        console.print(
-            f"Live-exclusive packages : {len(self.dep_tree.live_exclusive_pkg_names)}"
-        )
-
-        # --- Pass V: installer.list (mixed deb + udeb per-entry dispatch) ----
-        # installer.list contains BOTH udeb names (for the installer
-        # ramdisk) AND deb names like efibootmgr/grub-pc-bin
-        # (for the target system to apt-pull at install time).  Each entry
-        # is looked up in both hashtables:
-        #   - udeb match → goes into the udeb seed set (Pass VI below)
-        #   - deb match  → goes into the deb dep tree (this pass) and ends
-        #                  up in installer_exclusive_pkg_names
-        #   - both match → both happen
-        console.print("Pass V: Dispatching installer.list (deb arm)", tui.COLOR_INFO)
-        _installer_raw = self._read_pkg_list(
-            self.config.installerlist_path, already_selected=set())
-        _udeb_table = self.cache.udeb_hashtable
-        _deb_table  = self.cache.package_hashtable
-        _installer_deb_names: list = []
-        _installer_udeb_names: list = []
-        _installer_unknown: list = []
-        for _name in _installer_raw:
-            _in_deb  = _name in _deb_table
-            _in_udeb = _name in _udeb_table
-            if _in_deb:
-                _installer_deb_names.append(_name)
-            if _in_udeb:
-                _installer_udeb_names.append(_name)
-            if not (_in_deb or _in_udeb):
-                _installer_unknown.append(_name)
-        if _installer_unknown:
-            console.print(
-                f"WARNING: installer.list has {len(_installer_unknown)} "
-                f"name(s) not in deb or udeb cache: "
-                f"{', '.join(_installer_unknown[:5])}"
-                f"{'…' if len(_installer_unknown) > 5 else ''}"
+            # --- Pass V: installer.list (mixed deb + udeb per-entry dispatch) ----
+            # installer.list contains BOTH udeb names (for the installer
+            # ramdisk) AND deb names like efibootmgr/grub-pc-bin
+            # (for the target system to apt-pull at install time).  Each entry
+            # is looked up in both hashtables:
+            #   - udeb match → goes into the udeb seed set (Pass VI below)
+            #   - deb match  → goes into the deb dep tree (this pass) and ends
+            #                  up in installer_exclusive_pkg_names
+            #   - both match → both happen
+            console.print("Pass V: Dispatching installer.list (deb arm)", tui.COLOR_INFO)
+            _installer_raw = self._read_pkg_list(
+                self.config.installerlist_path, already_selected=set())
+            _udeb_table = self.cache.udeb_hashtable
+            _deb_table  = self.cache.package_hashtable
+            _installer_deb_names: list = []
+            _installer_udeb_names: list = []
+            _installer_unknown: list = []
+            for _name in _installer_raw:
+                _in_deb  = _name in _deb_table
+                _in_udeb = _name in _udeb_table
+                if _in_deb:
+                    _installer_deb_names.append(_name)
+                if _in_udeb:
+                    _installer_udeb_names.append(_name)
+                if not (_in_deb or _in_udeb):
+                    _installer_unknown.append(_name)
+            if _installer_unknown:
+                console.print(
+                    f"WARNING: installer.list has {len(_installer_unknown)} "
+                    f"name(s) not in deb or udeb cache: "
+                    f"{', '.join(_installer_unknown[:5])}"
+                    f"{'…' if len(_installer_unknown) > 5 else ''}"
+                )
+                logger.warning(
+                    f"installer.list unknown names: {_installer_unknown}"
+                )
+            # Filter deb arm to entries not already in the closure (Pass IV may
+            # have pulled some in transitively).
+            _installer_deb_new = [
+                n for n in _installer_deb_names
+                if n not in self.dep_tree.selected_pkgs
+            ]
+            if _installer_deb_new:
+                self.dep_tree.resolve_packages(_installer_deb_new)
+            self.dep_tree.installer_exclusive_pkg_names = (
+                set(self.dep_tree.selected_pkgs.keys())
+                - _pkg_closure
+                - self.dep_tree.live_exclusive_pkg_names
             )
-            logger.warning(
-                f"installer.list unknown names: {_installer_unknown}"
+            console.print(
+                f"Installer-exclusive deb packages : {len(self.dep_tree.installer_exclusive_pkg_names)}"
             )
-        # Filter deb arm to entries not already in the closure (Pass IV may
-        # have pulled some in transitively).
-        _installer_deb_new = [
-            n for n in _installer_deb_names
-            if n not in self.dep_tree.selected_pkgs
-        ]
-        if _installer_deb_new:
-            self.dep_tree.resolve_packages(_installer_deb_new)
-        self.dep_tree.installer_exclusive_pkg_names = (
-            set(self.dep_tree.selected_pkgs.keys())
-            - _pkg_closure
-            - self.dep_tree.live_exclusive_pkg_names
-        )
-        console.print(
-            f"Installer-exclusive deb packages : {len(self.dep_tree.installer_exclusive_pkg_names)}"
-        )
 
-        __num_total = self.dep_tree.selected_count
-        console.print(f"Total Selected (deb) Packages : {__num_total}", tui.COLOR_HIGHLIGHT)
-        _spiner.done()
+            __num_total = self.dep_tree.selected_count
+            console.print(f"Total Selected (deb) Packages : {__num_total}", tui.COLOR_HIGHLIGHT)
+            _spiner.done()
 
-        # --- Pass VI: udeb world (parallel dep tree) -------------------------
-        # Build a parallel DependencyTree against Cache.udeb_view() (which
-        # presents udeb_hashtable as package_hashtable).  Seeds = the
-        # udeb-priority required + important sets + every udeb-bound name
-        # in installer.list.  Resolves transitively through the udeb dep
-        # graph into udeb_dep_tree.selected_pkgs.
-        console.print("Pass VI: Resolving udeb (installer ramdisk) tree", tui.COLOR_INFO)
-        _udeb_spiner = Spinner("Resolving udeb dependencies")
-        _udeb_view = self.cache.udeb_view()
-        self.udeb_dep_tree = dependencytree.DependencyTree(
-            # UdebCacheView is a cache-like view over the udeb world —
-            # DependencyTree consumes it through the same read surface as Cache.
-            cast(Cache, _udeb_view), select_recommended=False,
-            arch=self.config.arch,
-            build_profiles=self.config.build_profiles,
-            # Udeb world commonly has multi-Package-name
-            # "providers" that are really just kernel-ABI variants of the
-            # same module (ext4-modules-6.1.0-{NN}-amd64-di etc.).  Auto-
-            # pick the highest version across names instead of prompting.
-            auto_pick_highest_when_ambiguous=True,
-            pins=_pins,
-        )
-        _udeb_seeds_required = list(self.cache.udeb_required)
-        _udeb_seeds_important = list(self.cache.udeb_important)
-        if _udeb_seeds_required:
-            self.udeb_dep_tree.resolve_packages(_udeb_seeds_required)
-        if _udeb_seeds_important:
-            self.udeb_dep_tree.resolve_packages(_udeb_seeds_important)
-        _udeb_seeds_from_list = [
-            n for n in _installer_udeb_names
-            if n not in self.udeb_dep_tree.selected_pkgs
-        ]
-        if _udeb_seeds_from_list:
-            self.udeb_dep_tree.resolve_packages(_udeb_seeds_from_list)
-        console.print(
-            f"Udeb closure: {self.udeb_dep_tree.selected_count} udeb(s) "
-            f"(seeds: {len(_udeb_seeds_required)} required + "
-            f"{len(_udeb_seeds_important)} important + "
-            f"{len(_installer_udeb_names)} from installer.list)",
-            tui.COLOR_HIGHLIGHT,
-        )
-        _udeb_spiner.done()
-
-        # --- Pass VII: pool.list (deb-only, conflicts not enforced) ----------
-        # Pool extras: shipped in the apt pool on the installer ISO but
-        # never installed in any chroot.  Goes through the resolver
-        # normally (Depends pulled in transitively) BUT with
-        # `check_conflicts=False` so mutually-conflicting bootloader
-        # metas (grub-pc + grub-efi-amd64) coexist in selected_pkgs.
-        # `validate_selection` skips Breaks/Conflicts where either side
-        # is in `pool_extras_pkg_names` — see dependencytree.py for the
-        # membership-based bypass and pool.list for the contract.
-        console.print("Pass VII: Resolving pool.list (deb arm, conflicts disabled)", tui.COLOR_INFO)
-        _pool_raw = self._read_pkg_list(
-            self.config.poollist_path, already_selected=set())
-        _pool_deb_names = []
-        _pool_unknown   = []
-        for _name in _pool_raw:
-            if _name in _deb_table:
-                _pool_deb_names.append(_name)
-            else:
-                _pool_unknown.append(_name)
-        if _pool_unknown:
-            console.print(
-                f"WARNING: pool.list has {len(_pool_unknown)} name(s) not in deb cache: "
-                f"{', '.join(_pool_unknown[:5])}{'…' if len(_pool_unknown) > 5 else ''}"
+            # --- Pass VI: udeb world (parallel dep tree) -------------------------
+            # Build a parallel DependencyTree against Cache.udeb_view() (which
+            # presents udeb_hashtable as package_hashtable).  Seeds = the
+            # udeb-priority required + important sets + every udeb-bound name
+            # in installer.list.  Resolves transitively through the udeb dep
+            # graph into udeb_dep_tree.selected_pkgs.
+            console.print("Pass VI: Resolving udeb (installer ramdisk) tree", tui.COLOR_INFO)
+            _udeb_spiner = Spinner("Resolving udeb dependencies")
+            _udeb_view = self.cache.udeb_view()
+            self.udeb_dep_tree = dependencytree.DependencyTree(
+                # UdebCacheView is a cache-like view over the udeb world —
+                # DependencyTree consumes it through the same read surface as Cache.
+                cast(Cache, _udeb_view), select_recommended=False,
+                arch=self.config.arch,
+                build_profiles=self.config.build_profiles,
+                # Udeb world commonly has multi-Package-name
+                # "providers" that are really just kernel-ABI variants of the
+                # same module (ext4-modules-6.1.0-{NN}-amd64-di etc.).  Auto-
+                # pick the highest version across names instead of prompting.
+                auto_pick_highest_when_ambiguous=True,
+                pins=_pins, settled_hint=_settled_udeb,
             )
-            logger.warning(f"pool.list unknown names: {_pool_unknown}")
-        _pre_pool_closure = set(self.dep_tree.selected_pkgs.keys())
-        if _pool_deb_names:
-            self.dep_tree.resolve_packages(
-                _pool_deb_names, check_conflicts=False)
-        self.dep_tree.pool_extras_pkg_names = (
-            set(self.dep_tree.selected_pkgs.keys()) - _pre_pool_closure
-        )
-        console.print(
-            "Pool extras (shipped in pool, not installed) : "
-            f"{len(self.dep_tree.pool_extras_pkg_names)}"
-        )
+            _udeb_seeds_required = list(self.cache.udeb_required)
+            _udeb_seeds_important = list(self.cache.udeb_important)
+            if _udeb_seeds_required:
+                self.udeb_dep_tree.resolve_packages(_udeb_seeds_required)
+            if _udeb_seeds_important:
+                self.udeb_dep_tree.resolve_packages(_udeb_seeds_important)
+            _udeb_seeds_from_list = [
+                n for n in _installer_udeb_names
+                if n not in self.udeb_dep_tree.selected_pkgs
+            ]
+            if _udeb_seeds_from_list:
+                self.udeb_dep_tree.resolve_packages(_udeb_seeds_from_list)
+            console.print(
+                f"Udeb closure: {self.udeb_dep_tree.selected_count} udeb(s) "
+                f"(seeds: {len(_udeb_seeds_required)} required + "
+                f"{len(_udeb_seeds_important)} important + "
+                f"{len(_installer_udeb_names)} from installer.list)",
+                tui.COLOR_HIGHLIGHT,
+            )
+            _udeb_spiner.done()
 
-        # IncludeRecommends is a HARD-closure flag: when on, the dep_tree
-        # above was built with select_recommended=True, so Recommends are
-        # already folded into selected_pkgs transitively (installed in
-        # live/target).  The old soft depth-1 pool-only path
-        # (pull_recommends_extras) is intentionally bypassed.
-        if self.config.include_recommends:
-            console.print(
-                "RECOMMENDS: folded into hard closure (transitive, installed) ",
-                tui.COLOR_INFO)
-        else:
-            console.print(
-                "RECOMMENDS: excluded — set IncludeRecommends to include ",
-                tui.COLOR_INFO)
-
-        # IncludeBuildClosure: widen the selection with the build closure —
-        # the Build-Depends of every selected source, resolved transitively —
-        # so the toolchain itself is built from + served by our own mirror.
-        # OFF by default (the build closure is ~5-6x the runtime source set).
-        # Reuses the proven resolver path (like pool.list, conflicts disabled),
-        # then segregates the added set into toolchain/language/leaf tiers.
-        if self.config.include_build_closure:
-            console.print(
-                "Pass VIII: Resolving build closure (Build-Depends, "
-                "conflicts disabled)", tui.COLOR_INFO)
-            _bd_names: set = set()
-            for _src in self.dep_tree.selected_srcs.values():
-                for _grp in _src.build_depends(
-                        self.config.arch,
-                        frozenset(self.config.build_profiles),
-                        cache=self.cache):
-                    # first alternative present in the deb cache wins
-                    _chosen = next(
-                        (_alt[0] for _alt in _grp if _alt[0] in _deb_table),
-                        _grp[0][0] if _grp else None)
-                    if _chosen:
-                        _bd_names.add(_chosen)
-            _pre_bc = set(self.dep_tree.selected_pkgs.keys())
-            _bd_resolvable = sorted(n for n in _bd_names if n in _deb_table)
-            if _bd_resolvable:
+            # --- Pass VII: pool.list (deb-only, conflicts not enforced) ----------
+            # Pool extras: shipped in the apt pool on the installer ISO but
+            # never installed in any chroot.  Goes through the resolver
+            # normally (Depends pulled in transitively) BUT with
+            # `check_conflicts=False` so mutually-conflicting bootloader
+            # metas (grub-pc + grub-efi-amd64) coexist in selected_pkgs.
+            # `validate_selection` skips Breaks/Conflicts where either side
+            # is in `pool_extras_pkg_names` — see dependencytree.py for the
+            # membership-based bypass and pool.list for the contract.
+            console.print("Pass VII: Resolving pool.list (deb arm, conflicts disabled)", tui.COLOR_INFO)
+            _pool_raw = self._read_pkg_list(
+                self.config.poollist_path, already_selected=set())
+            _pool_deb_names = []
+            _pool_unknown   = []
+            for _name in _pool_raw:
+                if _name in _deb_table:
+                    _pool_deb_names.append(_name)
+                else:
+                    _pool_unknown.append(_name)
+            if _pool_unknown:
+                console.print(
+                    f"WARNING: pool.list has {len(_pool_unknown)} name(s) not in deb cache: "
+                    f"{', '.join(_pool_unknown[:5])}{'…' if len(_pool_unknown) > 5 else ''}"
+                )
+                logger.warning(f"pool.list unknown names: {_pool_unknown}")
+            _pre_pool_closure = set(self.dep_tree.selected_pkgs.keys())
+            if _pool_deb_names:
                 self.dep_tree.resolve_packages(
-                    _bd_resolvable, check_conflicts=False)
-            _bc_delta = {
-                n for n in (set(self.dep_tree.selected_pkgs.keys()) - _pre_bc)
-                if n == self.dep_tree.selected_pkgs[n]['Package']
-            }
-            self.dep_tree.build_closure_pkg_names = _bc_delta
-            _adj: dict = {
-                n: list(p.depends_on)
-                for n, p in self.dep_tree.selected_pkgs.items()
-                if n == p['Package']
-            }
-            _tiers = build_closure.classify_tiers(_bc_delta, _adj)
-            self.dep_tree.build_closure_tiers = _tiers
+                    _pool_deb_names, check_conflicts=False)
+            self.dep_tree.pool_extras_pkg_names = (
+                set(self.dep_tree.selected_pkgs.keys()) - _pre_pool_closure
+            )
             console.print(
-                "BUILD CLOSURE: added "
-                f"{len(_bc_delta)} pkg(s) — toolchain {len(_tiers['toolchain'])}"
-                f" / language {len(_tiers['language'])}"
-                f" / leaf {len(_tiers['leaf'])} ",
-                tui.COLOR_INFO)
-        else:
+                "Pool extras (shipped in pool, not installed) : "
+                f"{len(self.dep_tree.pool_extras_pkg_names)}"
+            )
+
+            # IncludeRecommends is a HARD-closure flag: when on, the dep_tree
+            # above was built with select_recommended=True, so Recommends are
+            # already folded into selected_pkgs transitively (installed in
+            # live/target).  The old soft depth-1 pool-only path
+            # (pull_recommends_extras) is intentionally bypassed.
+            if self.config.include_recommends:
+                console.print(
+                    "RECOMMENDS: folded into hard closure (transitive, installed) ",
+                    tui.COLOR_INFO)
+            else:
+                console.print(
+                    "RECOMMENDS: excluded — set IncludeRecommends to include ",
+                    tui.COLOR_INFO)
+
+            # IncludeBuildClosure: widen the selection with the build closure —
+            # the Build-Depends of every selected source, resolved transitively —
+            # so the toolchain itself is built from + served by our own mirror.
+            # OFF by default (the build closure is ~5-6x the runtime source set).
+            # Reuses the proven resolver path (like pool.list, conflicts disabled),
+            # then segregates the added set into toolchain/language/leaf tiers.
+            if self.config.include_build_closure:
+                console.print(
+                    "Pass VIII: Resolving build closure (Build-Depends, "
+                    "conflicts disabled)", tui.COLOR_INFO)
+                _bd_names: set = set()
+                for _src in self.dep_tree.selected_srcs.values():
+                    for _grp in _src.build_depends(
+                            self.config.arch,
+                            frozenset(self.config.build_profiles),
+                            cache=self.cache):
+                        # first alternative present in the deb cache wins
+                        _chosen = next(
+                            (_alt[0] for _alt in _grp if _alt[0] in _deb_table),
+                            _grp[0][0] if _grp else None)
+                        if _chosen:
+                            _bd_names.add(_chosen)
+                _pre_bc = set(self.dep_tree.selected_pkgs.keys())
+                _bd_resolvable = sorted(n for n in _bd_names if n in _deb_table)
+                if _bd_resolvable:
+                    self.dep_tree.resolve_packages(
+                        _bd_resolvable, check_conflicts=False)
+                _bc_delta = {
+                    n for n in (set(self.dep_tree.selected_pkgs.keys()) - _pre_bc)
+                    if n == self.dep_tree.selected_pkgs[n]['Package']
+                }
+                self.dep_tree.build_closure_pkg_names = _bc_delta
+                _adj: dict = {
+                    n: list(p.depends_on)
+                    for n, p in self.dep_tree.selected_pkgs.items()
+                    if n == p['Package']
+                }
+                _tiers = build_closure.classify_tiers(_bc_delta, _adj)
+                self.dep_tree.build_closure_tiers = _tiers
+                console.print(
+                    "BUILD CLOSURE: added "
+                    f"{len(_bc_delta)} pkg(s) — toolchain {len(_tiers['toolchain'])}"
+                    f" / language {len(_tiers['language'])}"
+                    f" / leaf {len(_tiers['leaf'])} ",
+                    tui.COLOR_INFO)
+            else:
+                console.print(
+                    "BUILD CLOSURE: disabled — set IncludeBuildClosure to "
+                    "self-host the toolchain ", tui.COLOR_INFO)
+
+
+        _resolve_passes()
+        _div = self.dep_tree.order_independence_report()
+        _udiv = (self.udeb_dep_tree.order_independence_report()
+                 if self.udeb_dep_tree is not None else {'greedy_only': []})
+        if _div['greedy_only'] or _udiv['greedy_only']:
             console.print(
-                "BUILD CLOSURE: disabled — set IncludeBuildClosure to "
-                "self-host the toolchain ", tui.COLOR_INFO)
+                "SELECT-02: order-dependent picks detected "
+                f"(deb: {len(_div['greedy_only'])}, "
+                f"udeb: {len(_udiv['greedy_only'])}) — re-resolving with "
+                "the order-independent settled closure…", tui.COLOR_INFO)
+            # carry pass-1 prompt picks so pass 2 never re-prompts
+            _pins.update(self.dep_tree._pinned_chosen)
+            _hint_deb = frozenset(self.dep_tree.fixpoint_closure())
+            _hint_udeb = None
+            if self.udeb_dep_tree is not None:
+                _pins.update(self.udeb_dep_tree._pinned_chosen)
+                _hint_udeb = frozenset(self.udeb_dep_tree.fixpoint_closure())
+            _resolve_passes(_hint_deb, _hint_udeb)
+            # tripwire: the guided pass must be order-independent; residue
+            # means a decision point escaped the hint — investigate, never
+            # ship silently divergent closures again.
+            _post = self.dep_tree.order_independence_report()
+            if _post['greedy_only']:
+                console.print(
+                    "WARNING: SELECT-02 guided pass still diverges "
+                    f"(greedy_only={_post['greedy_only'][:10]}) — a "
+                    "decision point escaped the settled hint; report this",
+                    tui.COLOR_WARNING)
 
         # --- Validation ---------------------------------------------------------
         console.print("Checking Breaks and Conflicts...")

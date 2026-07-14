@@ -69,10 +69,19 @@ class DependencyTree:
     def __init__(self, cache: Cache, select_recommended: bool, arch: str,
                  build_profiles: frozenset = frozenset(), lookahead=None,
                  auto_pick_highest_when_ambiguous: bool = False,
-                 pins=None):
+                 pins=None, settled_hint=None):
 
         self.__recommended = select_recommended
         self.__cache = cache
+        # SELECT-02 stage 2b: the ORDER-INDEPENDENT settled closure from a
+        # prior greedy pass (fixpoint_closure()).  When present, the two
+        # order-sensitive decision points consult it: OR groups prefer an
+        # alternative in the settled set, and candidate resolution filters
+        # to settled members (so a fork's Provides wins over the real
+        # package the fork displaces — the desktop-base/athena-branding
+        # stranded-subtree case).  None = classic greedy (pass 1).
+        self._settled_hint: 'Optional[frozenset]' = (
+            frozenset(settled_hint) if settled_hint else None)
         # pinned alternative picks fed from selection.state so a
         # genuine multi-provider prompt (mawk vs gawk for `awk`, telnet vs
         # inetutils-telnet for `telnet-client`) resolves deterministically and
@@ -391,6 +400,32 @@ class DependencyTree:
             logger.error(f"parse_dependency({pkg}) returned None")
         return unresolved
 
+    def fixpoint_closure(self) -> set:
+        """The ORDER-INDEPENDENT closure over this tree's accumulated seeds
+        and edges (or_resolve.resolve_closure — Pass A hard-dep fixpoint,
+        Pass B OR groups against the settled set).  The SELECT-02 stage-2b
+        guidance set: feed it to a second DependencyTree as settled_hint.
+        May contain unknown leaves (names the cache cannot resolve) — they
+        are harmless as a hint and filtered by order_independence_report."""
+        import or_resolve
+        _deps: 'Dict[str, list]' = {}
+        _provides: 'Dict[str, list]' = {}
+        for _name, _p in self.canonical_pkgs.items():
+            _edges: 'list' = [
+                _d[0] for _d in list(_p.depends) + list(_p.pre_depends)]
+            if self.__recommended:
+                _edges += [_d[0] for _d in _p.recommends]
+            for _alt in list(_p.alt_depends) + list(_p.alt_pre_depends):
+                _group = tuple(_ad[0] for _ad in _alt)
+                if _group:
+                    _edges.append(_group)
+            _deps[_name] = _edges
+            # or_resolve wants {package: [virtual names it Provides]}.
+            for _vn, _ in _p.get_provides():
+                _provides.setdefault(_name, []).append(_vn)
+        return or_resolve.resolve_closure(
+            self._seed_history, _deps, provides=_provides)
+
     def order_independence_report(self) -> 'Dict[str, list]':
         """SELECT-02 shadow: recompute the closure over the SAME seeds with the
         ORDER-INDEPENDENT fixpoint (``or_resolve.resolve_closure``) and diff it
@@ -411,25 +446,8 @@ class DependencyTree:
         on; run it on a real cache to see the actual divergence set.
         """
         try:
-            import or_resolve
+            _fixpoint = self.fixpoint_closure()
             _greedy = set(self.canonical_pkgs.keys())
-            _deps: 'Dict[str, list]' = {}
-            _provides: 'Dict[str, list]' = {}
-            for _name, _p in self.canonical_pkgs.items():
-                _edges: 'list' = [
-                    _d[0] for _d in list(_p.depends) + list(_p.pre_depends)]
-                if self.__recommended:
-                    _edges += [_d[0] for _d in _p.recommends]
-                for _alt in list(_p.alt_depends) + list(_p.alt_pre_depends):
-                    _group = tuple(_ad[0] for _ad in _alt)
-                    if _group:
-                        _edges.append(_group)
-                _deps[_name] = _edges
-                # or_resolve wants {package: [virtual names it Provides]}.
-                for _vn, _ in _p.get_provides():
-                    _provides.setdefault(_name, []).append(_vn)
-            _fixpoint = or_resolve.resolve_closure(
-                self._seed_history, _deps, provides=_provides)
             # The fixpoint keeps unresolvable names as "unknown leaves"
             # inside its closure (e.g. a Recommends target that does not
             # exist in the archive at all — fwupd → secureboot-db on
@@ -516,6 +534,19 @@ class DependencyTree:
                         and not _satisfies_via_provides(_existing)):
                     logger.warning(f"'{package_name}({_existing.version})' in selected not matching required {_constraint} {version}")
                 return _existing
+
+        # SELECT-02 stage 2b: with a settled hint, candidates narrow to
+        # settled members when any exist — the real package a fork displaces
+        # is NOT in the settled set, so the fork's Provides candidate wins
+        # deterministically instead of by walk order (real-beats-virtual
+        # still applies WITHIN the narrowed set).  No settled candidate →
+        # classic behaviour (version constraints outrank the hint model).
+        _hint = getattr(self, '_settled_hint', None)   # object.__new__ tests
+        if _hint:
+            _hinted = [_pkg for _pkg in _pkg_candidates
+                       if _pkg['Package'] in _hint]
+            if _hinted:
+                _pkg_candidates = _hinted
 
         # At this point, if lookahead is available use that to select packages.
         _selected_pkg_lookahead = [pkg for pkg in _pkg_candidates if pkg['Package'] in self.__lookahead]
@@ -662,6 +693,18 @@ class DependencyTree:
             list(_selected_pkg.alt_pre_depends)
 
         for _alt in _alt_depends:
+            # SELECT-02 stage 2b: with a settled hint, the group resolves to
+            # the first alternative in the settled set — a decision that
+            # depends only on the (order-independent) hint, never on what
+            # happens to be selected at walk time.  No settled alternative →
+            # classic behaviour below.
+            _hint = getattr(self, '_settled_hint', None)
+            if _hint:
+                _hint_alt = next((_ad for _ad in _alt
+                                  if _ad[0] in _hint), None)
+                if _hint_alt is not None:
+                    _depends.append(_hint_alt)
+                    continue
             # Find alts already selected whose version constraint is also satisfied.
             # `_alt_dep` here is a dep-tuple (name, ver, op) — distinct from
             # `_pkg` elsewhere in this method which is a Package object.
