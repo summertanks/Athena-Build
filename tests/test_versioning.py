@@ -1832,6 +1832,8 @@ def test_bump_version_freeze_stamp_excludes_gitignored_buildstamp():
          mock.patch.object(bump_version, '_current_version',
                            return_value='1.2.3'), \
          mock.patch.object(bump_version, '_rewrite'), \
+         mock.patch.object(bump_version, '_roll_changelog',
+                           return_value=False), \
          mock.patch.object(bump_version, '_write_buildstamp') as _ws:
         _rc = bump_version.main(['patch', '--freeze-stamp', '--no-tag'])
 
@@ -1910,6 +1912,9 @@ def test_bump_version_freeze_stamp_commits_without_gitignored_stamp():
             _fh.write('_BASE_VERSION = "0.1.0"\n')
         with open(os.path.join(_d, '.gitignore'), 'w') as _fh:
             _fh.write('scripts/_buildstamp.py\n')
+        with open(os.path.join(_d, 'CHANGELOG.md'), 'w') as _fh:
+            _fh.write('# Changelog\n\n## [Unreleased]\n\n'
+                      '- **A capability.**\n\n## [0.1.0]\n\n- older\n')
 
         def _g(*_a):
             _sp.run(['git', '-C', _d, *_a], check=True, capture_output=True)
@@ -1919,16 +1924,18 @@ def test_bump_version_freeze_stamp_commits_without_gitignored_stamp():
         _g('add', '-A')
         _g('commit', '-q', '-m', 'init')
 
-        _saved = (_bv._ROOT, _bv._PYPROJECT, _bv._VERSION_PY, _bv._BUILDSTAMP_PY)
+        _saved = (_bv._ROOT, _bv._PYPROJECT, _bv._VERSION_PY,
+                  _bv._BUILDSTAMP_PY, _bv._CHANGELOG)
         _bv._ROOT = _d
         _bv._PYPROJECT = os.path.join(_d, 'pyproject.toml')
         _bv._VERSION_PY = os.path.join(_scripts, '_version.py')
         _bv._BUILDSTAMP_PY = os.path.join(_scripts, '_buildstamp.py')
+        _bv._CHANGELOG = os.path.join(_d, 'CHANGELOG.md')
         try:
             _rc = _bv.main(['patch', '--freeze-stamp', '--no-tag'])
         finally:
             (_bv._ROOT, _bv._PYPROJECT, _bv._VERSION_PY,
-             _bv._BUILDSTAMP_PY) = _saved
+             _bv._BUILDSTAMP_PY, _bv._CHANGELOG) = _saved
         assert _rc == 0
         _log = _sp.run(['git', '-C', _d, 'log', '--oneline'],
                        capture_output=True, text=True).stdout
@@ -1940,6 +1947,37 @@ def test_bump_version_freeze_stamp_commits_without_gitignored_stamp():
         assert '_buildstamp.py' not in _tracked, _tracked
         with open(os.path.join(_d, 'pyproject.toml')) as _fh:
             assert 'version = "0.1.1"' in _fh.read()
+        # the changelog rolled into the release commit: dated section, fresh
+        # empty [Unreleased] on top, file in the commit set
+        with open(os.path.join(_d, 'CHANGELOG.md')) as _fh:
+            _cl = _fh.read()
+        assert '## [0.1.1] — ' in _cl and '- **A capability.**' in _cl
+        assert _cl.index('## [Unreleased]') < _cl.index('## [0.1.1]')
+        _show = _sp.run(['git', '-C', _d, 'show', '--stat', 'HEAD'],
+                        capture_output=True, text=True).stdout
+        assert 'CHANGELOG.md' in _show, _show
+
+
+def test_bump_version_changelog_roll_pure():
+    """[Unreleased] entries move under a dated [X.Y.Z] header with a
+    fresh empty [Unreleased] left on top; an empty or absent [Unreleased]
+    rolls nothing (None) — the release proceeds with a warning instead of
+    minting an empty section."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump_version as _bv
+    _text = ('# Changelog\n\n## [Unreleased]\n\n- **X.**\n- **Y.**\n\n'
+             '## [0.1.2] — 2026-06-25\n\n- older\n')
+    _out = _bv._rolled_changelog_text(_text, '0.1.3', '2026-07-14')
+    assert _out is not None
+    assert '## [0.1.3] — 2026-07-14' in _out
+    assert _out.index('## [Unreleased]') < _out.index('## [0.1.3]')
+    assert _out.index('## [0.1.3]') < _out.index('- **X.**')
+    assert _out.index('- **Y.**') < _out.index('## [0.1.2]')
+    assert _bv._rolled_changelog_text(
+        '# C\n\n## [Unreleased]\n\n## [0.1.2]\n- older\n',
+        '0.1.3', '2026-07-14') is None
+    assert _bv._rolled_changelog_text('# C\n- no sections\n',
+                                      '0.1.3', '2026-07-14') is None
 
 TESTS = [
     test_iso_installer_stage_disk_info_copies_files_skipping_readme,
@@ -2019,6 +2057,7 @@ TESTS = [
     test_get_version_is_cached,
     test_http_session_is_module_level_singleton,
     test_bump_version_freeze_stamp_commits_without_gitignored_stamp,
+    test_bump_version_changelog_roll_pure,
 ]
 
 

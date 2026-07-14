@@ -9,8 +9,12 @@ RELEASE you run this once to advance the semantic version:
     python3 scripts/bump_version.py 0.2.0          # or an explicit version
 
 It rewrites the version in lockstep across its two homes — pyproject.toml
-[project].version and scripts/_version.py `_BASE_VERSION` — commits that as a
-`release: vX.Y.Z` commit, and creates a SIGNED annotated tag `vX.Y.Z`.  The tag
+[project].version and scripts/_version.py `_BASE_VERSION` — rolls
+CHANGELOG.md's [Unreleased] section into a dated [X.Y.Z] section (leaving a
+fresh empty [Unreleased] on top; skipped with a warning when there is nothing
+to roll — the v0.1.3 release shipped without a changelog section because this
+step used to be manual), commits it all as a `release: vX.Y.Z` commit, and
+creates a SIGNED annotated tag `vX.Y.Z`.  The tag
 is the immutable anchor: never move or delete a release tag (same rule as a
 published .deb filename).
 
@@ -21,6 +25,7 @@ Flags:
     --no-sign       annotated but UNsigned tag (default is `git tag -s`)
     --allow-dirty   permit a dirty tree (default: refuse, so the release commit
                     is exactly the version bump)
+    --no-changelog  skip the CHANGELOG.md [Unreleased] -> [X.Y.Z] roll
     --freeze-stamp  also (re)write scripts/_buildstamp.py from the new state —
                     the frozen fallback for exported/packaged trees with no .git
 
@@ -39,6 +44,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PYPROJECT = os.path.join(_ROOT, 'pyproject.toml')
 _VERSION_PY = os.path.join(_ROOT, 'scripts', '_version.py')
 _BUILDSTAMP_PY = os.path.join(_ROOT, 'scripts', '_buildstamp.py')
+_CHANGELOG = os.path.join(_ROOT, 'CHANGELOG.md')
 
 _SEMVER = re.compile(r'^(\d+)\.(\d+)\.(\d+)$')
 
@@ -108,6 +114,45 @@ def _rewrite(path: str, pattern: str, replacement: str, dry_run: bool) -> None:
             _fh.write(_new)
 
 
+def _rolled_changelog_text(text: str, version: str,
+                           date: str) -> 'str | None':
+    """Pure: CHANGELOG text with the [Unreleased] section rolled into a
+    dated [version] section, a fresh empty [Unreleased] left on top.
+    None when there is nothing to roll (no section, or no entries)."""
+    _m = re.search(r'(?ms)^## \[Unreleased\]\s*?\n(.*?)(?=^## \[|\Z)', text)
+    if not _m or not _m.group(1).strip():
+        return None
+    return (text[:_m.start()]
+            + '## [Unreleased]\n\n'
+            + f'## [{version}] — {date}\n\n'
+            + _m.group(1).lstrip('\n')
+            + text[_m.end():])
+
+
+def _roll_changelog(version: str, dry_run: bool) -> bool:
+    """Roll CHANGELOG.md's [Unreleased] into [version]; True when rolled
+    (the file joins the release commit set)."""
+    import datetime
+    try:
+        with open(_CHANGELOG) as _fh:
+            _text = _fh.read()
+    except OSError:
+        print("  CHANGELOG.md unreadable — roll skipped")
+        return False
+    _new = _rolled_changelog_text(
+        _text, version, datetime.date.today().isoformat())
+    if _new is None:
+        print("  CHANGELOG.md: [Unreleased] empty/absent — nothing to roll "
+              "(capability entries missing for this release?)")
+        return False
+    print(f"  {'(dry-run) ' if dry_run else ''}roll CHANGELOG.md "
+          f"[Unreleased] -> [{version}]")
+    if not dry_run:
+        with open(_CHANGELOG, 'w') as _fh:
+            _fh.write(_new)
+    return True
+
+
 def _write_buildstamp(version: str, dry_run: bool) -> None:
     _commit = _git('rev-parse', '--short', 'HEAD')
     _date = _git('show', '-s', '--format=%cs', 'HEAD')   # YYYY-MM-DD, no clock
@@ -136,6 +181,7 @@ def main(argv: 'list[str] | None' = None) -> int:
     _p.add_argument('--no-tag', action='store_true')
     _p.add_argument('--no-sign', action='store_true')
     _p.add_argument('--allow-dirty', action='store_true')
+    _p.add_argument('--no-changelog', action='store_true')
     _p.add_argument('--freeze-stamp', action='store_true')
     _a = _p.parse_args(argv)
 
@@ -168,6 +214,7 @@ def main(argv: 'list[str] | None' = None) -> int:
              rf'\g<1>{_next}\g<2>', _a.dry_run)
     if _a.freeze_stamp:
         _write_buildstamp(_next, _a.dry_run)
+    _rolled = False if _a.no_changelog else _roll_changelog(_next, _a.dry_run)
 
     if _a.no_commit:
         print("--no-commit: files rewritten, not committed (no tag).")
@@ -184,6 +231,8 @@ def main(argv: 'list[str] | None' = None) -> int:
     #    aborted the release mid-way (pyproject + _version.py rewritten, stamp
     #    written, but NO commit and NO tag).
     _files = [_PYPROJECT, _VERSION_PY]
+    if _rolled:
+        _files.append(_CHANGELOG)
     _git('add', *_files)
     _git('commit', '-m', f'release: {_tag}')
     print(f"committed release: {_tag}")
