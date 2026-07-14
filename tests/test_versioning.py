@@ -1835,7 +1835,8 @@ def test_bump_version_freeze_stamp_excludes_gitignored_buildstamp():
          mock.patch.object(bump_version, '_roll_changelog',
                            return_value=False), \
          mock.patch.object(bump_version, '_write_buildstamp') as _ws:
-        _rc = bump_version.main(['patch', '--freeze-stamp', '--no-tag'])
+        _rc = bump_version.main(
+            ['patch', '--freeze-stamp', '--no-tag', '--yes'])
 
     assert _rc == 0
     assert _ws.called, "freeze-stamp must still write the stamp to disk"
@@ -1932,7 +1933,8 @@ def test_bump_version_freeze_stamp_commits_without_gitignored_stamp():
         _bv._BUILDSTAMP_PY = os.path.join(_scripts, '_buildstamp.py')
         _bv._CHANGELOG = os.path.join(_d, 'CHANGELOG.md')
         try:
-            _rc = _bv.main(['patch', '--freeze-stamp', '--no-tag'])
+            _rc = _bv.main(
+                ['patch', '--freeze-stamp', '--no-tag', '--yes'])
         finally:
             (_bv._ROOT, _bv._PYPROJECT, _bv._VERSION_PY,
              _bv._BUILDSTAMP_PY, _bv._CHANGELOG) = _saved
@@ -1956,6 +1958,43 @@ def test_bump_version_freeze_stamp_commits_without_gitignored_stamp():
         _show = _sp.run(['git', '-C', _d, 'show', '--stat', 'HEAD'],
                         capture_output=True, text=True).stdout
         assert 'CHANGELOG.md' in _show, _show
+
+
+def test_bump_version_confirmation_aborts_before_any_change():
+    """UX: the bump shows what ships and asks for confirmation BEFORE
+    touching anything — answering 'n' aborts with zero rewrites, no roll,
+    no git add; --yes (and --dry-run) skip the prompt.  A non-interactive
+    context without --yes aborts cleanly instead of hanging."""
+    import builtins
+    from unittest import mock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump_version as _bv
+    _calls = []
+    with mock.patch.object(_bv, '_git', side_effect=lambda *a: (
+            _calls.append(a), '')[1]), \
+         mock.patch.object(_bv, '_git_ok', return_value=False), \
+         mock.patch.object(_bv, '_current_version', return_value='1.2.3'), \
+         mock.patch.object(_bv, '_rewrite') as _rw, \
+         mock.patch.object(_bv, '_roll_changelog') as _rl, \
+         mock.patch.object(builtins, 'input', return_value='n'):
+        try:
+            _bv.main(['patch'])
+            raise AssertionError('n must abort')
+        except SystemExit as _e:
+            assert 'aborted' in str(_e)
+    assert not _rw.called and not _rl.called, 'abort must precede any change'
+    assert not any(_c and _c[0] == 'add' for _c in _calls)
+    with mock.patch.object(_bv, '_git', side_effect=lambda *a: ''), \
+         mock.patch.object(_bv, '_git_ok', return_value=False), \
+         mock.patch.object(_bv, '_current_version', return_value='1.2.3'), \
+         mock.patch.object(_bv, '_rewrite') as _rw2, \
+         mock.patch.object(builtins, 'input', side_effect=EOFError):
+        try:
+            _bv.main(['patch'])
+            raise AssertionError('EOF must abort')
+        except SystemExit as _e:
+            assert '--yes' in str(_e)
+    assert not _rw2.called
 
 
 def test_bump_version_changelog_roll_pure():
@@ -2057,6 +2096,7 @@ TESTS = [
     test_get_version_is_cached,
     test_http_session_is_module_level_singleton,
     test_bump_version_freeze_stamp_commits_without_gitignored_stamp,
+    test_bump_version_confirmation_aborts_before_any_change,
     test_bump_version_changelog_roll_pure,
 ]
 

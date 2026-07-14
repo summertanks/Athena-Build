@@ -26,6 +26,7 @@ Flags:
     --allow-dirty   permit a dirty tree (default: refuse, so the release commit
                     is exactly the version bump)
     --no-changelog  skip the CHANGELOG.md [Unreleased] -> [X.Y.Z] roll
+    --yes           skip the interactive confirmation (CI / scripted use)
     --freeze-stamp  also (re)write scripts/_buildstamp.py from the new state —
                     the frozen fallback for exported/packaged trees with no .git
 
@@ -114,12 +115,23 @@ def _rewrite(path: str, pattern: str, replacement: str, dry_run: bool) -> None:
             _fh.write(_new)
 
 
+_UNRELEASED_RE = re.compile(r'(?ms)^## \[Unreleased\]\s*?\n(.*?)(?=^## \[|\Z)')
+
+
+def _unreleased_body(text: str) -> str:
+    """The [Unreleased] section's entry text ('' when absent/empty) —
+    what the next release ships; shown at confirmation and rolled at
+    release."""
+    _m = _UNRELEASED_RE.search(text)
+    return _m.group(1).strip() if _m else ''
+
+
 def _rolled_changelog_text(text: str, version: str,
                            date: str) -> 'str | None':
     """Pure: CHANGELOG text with the [Unreleased] section rolled into a
     dated [version] section, a fresh empty [Unreleased] left on top.
     None when there is nothing to roll (no section, or no entries)."""
-    _m = re.search(r'(?ms)^## \[Unreleased\]\s*?\n(.*?)(?=^## \[|\Z)', text)
+    _m = _UNRELEASED_RE.search(text)
     if not _m or not _m.group(1).strip():
         return None
     return (text[:_m.start()]
@@ -182,6 +194,7 @@ def main(argv: 'list[str] | None' = None) -> int:
     _p.add_argument('--no-sign', action='store_true')
     _p.add_argument('--allow-dirty', action='store_true')
     _p.add_argument('--no-changelog', action='store_true')
+    _p.add_argument('--yes', action='store_true')
     _p.add_argument('--freeze-stamp', action='store_true')
     _a = _p.parse_args(argv)
 
@@ -204,6 +217,34 @@ def main(argv: 'list[str] | None' = None) -> int:
         raise SystemExit(
             "working tree is dirty — commit/stash first so the release commit "
             "is exactly the version bump (or pass --allow-dirty)")
+
+    # UX: show what this release SHIPS (commits since the last tag + the
+    # CHANGELOG [Unreleased] entries) and require explicit confirmation
+    # BEFORE anything is touched — an aborted bump changes nothing.
+    if _git_ok('rev-parse', '-q', '--verify', f'refs/tags/v{_current}'):
+        _n_commits = _git('rev-list', '--count', f'v{_current}..HEAD')
+        print(f"\nsince v{_current}: {_n_commits} commit(s)")
+    try:
+        with open(_CHANGELOG) as _fh:
+            _entries = _unreleased_body(_fh.read())
+    except OSError:
+        _entries = ''
+    if _entries:
+        print("shipping (CHANGELOG [Unreleased]):")
+        for _line in _entries.splitlines():
+            print(f"  {_line}")
+    else:
+        print("WARNING: CHANGELOG [Unreleased] is empty — this release will "
+              "carry no changelog section")
+    if not _a.dry_run and not _a.yes:
+        try:
+            _resp = input(f"\nProceed with release {_tag}? [y/N] ")
+        except EOFError:
+            raise SystemExit(
+                "no interactive input available — pass --yes for scripted "
+                "use; aborted, nothing changed") from None
+        if _resp.strip().lower() not in ('y', 'yes'):
+            raise SystemExit("aborted — nothing changed")
 
     # 1. rewrite the two lockstep homes
     _rewrite(_PYPROJECT,
