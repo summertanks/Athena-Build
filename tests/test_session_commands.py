@@ -67,6 +67,30 @@ def test_tunneled_binnmu_gate_parity_check_build_vs_audit():
                 f'{_mod} must pass the universe hook'
 
 
+def test_chroot_build_all_wired_and_flag_gated():
+    """`chroot build all` runs live → installer → disk in sequence, judges
+    each sub-build by its READINESS FLAG (the handlers return None on both
+    success and failure paths), and stops the chain on the first surface
+    that fails to reach ready."""
+    import re as _re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as _fh:
+        _b = _fh.read()
+    _m = _re.search(r"def cmd_chroot\(self.*?(?=\n    def )", _b, _re.DOTALL)
+    assert _m, 'cmd_chroot not found'
+    _src = _m.group(0)
+    assert "'build all'" in _src, 'help table must document build all'
+    for _flag in ('chroot_ready', 'chroot_installer_ready',
+                  'chroot_disk_ready'):
+        assert _flag in _src, f'all-chain must gate on {_flag}'
+    # order: live before installer before disk
+    assert (_src.index("'live', self.cmd_build_chroot_live")
+            < _src.index("'installer', self.cmd_build_chroot_installer")
+            < _src.index("'disk', self.cmd_build_chroot_disk"))
+    assert 'return False' in _src.split("args[0] == 'all'", 1)[1] \
+        .split("# Default to live", 1)[0], 'failure must stop the chain'
+
+
 def test_source_emit_command_wired_and_record_safe():
     """MAT-02 stage 3: `source emit` is dispatched from the source group and
     the backfill writes SOURCE artifacts under separate record keys — never
@@ -8929,6 +8953,7 @@ def test_do_tunnel_records_provenance_and_outputs():
 TESTS = [
     test_init_remote_builds_image_and_gates_localmirror,
     test_tunneled_binnmu_gate_parity_check_build_vs_audit,
+    test_chroot_build_all_wired_and_flag_gated,
     test_source_emit_command_wired_and_record_safe,
     test_startup_banner_runs_config_check,
     test_container_init_remote_ensures_image,

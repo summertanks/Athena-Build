@@ -2032,9 +2032,42 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             'build [live]':    'install the [Live] Groups closure into buildroot/live (default)',
             'build installer': 'unpack udeb closure into buildroot-installer/ (no postinst configure)',
             'build disk':      'install the [Disk] Groups closure into buildroot/disk (minimal)',
+            'build all':       'live + installer + disk in sequence, stopping '
+                               'on the first failure (readiness-flag gated)',
             'verify':          '8-check chroot health verifier',
         }
         if action == 'build':
+            if args and args[0] == 'all':
+                if len(args) > 1:
+                    console.print(
+                        "Usage: chroot build all  (no extra arguments — "
+                        "per-surface options need the individual commands)")
+                    return None
+                # Sequential; each sub-build's success is judged by its
+                # readiness flag (the handlers return None on both paths),
+                # and a failure stops the chain — a later surface building
+                # against a broken earlier state helps nobody.
+                for _name, _fn, _flag in (
+                        ('live', self.cmd_build_chroot_live,
+                         'chroot_ready'),
+                        ('installer', self.cmd_build_chroot_installer,
+                         'chroot_installer_ready'),
+                        ('disk', self.cmd_build_chroot_disk,
+                         'chroot_disk_ready')):
+                    console.print(f"chroot build all: → {_name}",
+                                  tui.COLOR_HIGHLIGHT)
+                    setattr(self.flags, _flag, False)
+                    _fn()
+                    if not getattr(self.flags, _flag, False):
+                        console.print(
+                            f"chroot build all: {_name} did NOT reach ready "
+                            "— stopping (later surfaces skipped)",
+                            tui.COLOR_ERROR)
+                        return False
+                console.print(
+                    "chroot build all: live + installer + disk complete",
+                    tui.COLOR_HIGHLIGHT)
+                return True
             # Default to live; explicit `live`/`installer`/`disk` consumes
             # the next token as the sub-action.  Anything else is treated as
             # args to the live build (preserves `chroot build with_debug`).
