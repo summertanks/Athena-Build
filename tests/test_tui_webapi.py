@@ -108,6 +108,22 @@ def test_dispatcher_handles_cancelled_future():
 
 
 
+def test_safe_addstr_right_margin_multibyte_safe():
+    """The right-margin insert in _safe_addstr must use insstr, not
+    insch: insch takes a single-byte chtype, so a non-ASCII final
+    character raised OverflowError and froze the renderer (2026-07-18,
+    identity-scan findings ending in localized debconf text).  Pin the
+    call and the OverflowError backstop in the except clause."""
+    import inspect
+    import tui.render as _r
+    _src = inspect.getsource(_r._safe_addstr)
+    assert '.insch(' not in _src, \
+        'insch cannot take multibyte chars — use insstr'
+    assert '.insstr(' in _src, 'right-margin insert must use insstr'
+    assert 'OverflowError' in _src, \
+        'OverflowError must be caught as a render backstop'
+
+
 def test_render_anchors_widgets_to_bottom_band():
     """Regression (audit #191): when content doesn't fill the pane, widgets
     must be anchored to the bottom band, not floated under the last line."""
@@ -1201,6 +1217,7 @@ TESTS = [
     test_tier3_tui_auth_source_pins,
     test_api_backend_prunes_completed_jobs,
     test_dispatcher_handles_cancelled_future,
+    test_safe_addstr_right_margin_multibyte_safe,
     test_render_anchors_widgets_to_bottom_band,
     test_read_artifact_truncated_uses_byte_counts,
     test_progress_reads_buildlogs_via_context_manager,

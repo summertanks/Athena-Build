@@ -66,11 +66,17 @@ def _safe_addstr(win, y: int, x: int, text: str, attr: int = 0) -> None:
                 win.addstr(y, x, head)
         if fills_last_col:
             last_x = x + budget - 1     # == max_x - 1, the right margin
+            # insstr, not insch: insch takes a single-byte chtype, so a
+            # non-ASCII final character raises OverflowError ("byte
+            # doesn't fit in chtype") — froze the renderer on 2026-07-18
+            # when identity-scan findings ended in localized debconf
+            # text.  insstr does the same insert-without-advance for
+            # multi-byte strings.
             if attr:
-                win.insch(y, last_x, s[-1], attr)
+                win.insstr(y, last_x, s[-1], attr)
             else:
-                win.insch(y, last_x, s[-1])
-    except curses.error:
+                win.insstr(y, last_x, s[-1])
+    except (curses.error, OverflowError):
         pass
 
 

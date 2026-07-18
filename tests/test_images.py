@@ -37,12 +37,46 @@ def test_mat03_live_chroot_identity_scanned_before_squashfs():
     assert re.search(r'audit_identity_scan.*\n.*_audit_staged_iso', _s), \
         'scan must be gated by [Audit] IdentityScan'
     assert 'IdentityScan = false' in _s, 'disabled gate must warn loudly'
+    # The chroot scan is a POSITIVE surface manifest, not a full-root
+    # walk — a full walk drowned in 8,311 factual upstream mentions
+    # (2026-07-18 first run).
+    assert 'include_globs=BOOTED_IDENTITY_SURFACES' in _s, \
+        'chroot scan must be scoped to the booted-root surface manifest'
     _al = os.path.join(_ROOT, 'audit', 'identity-allowlist')
     with open(_al) as _fh:
         _a = _fh.read()
     for _glob in ('usr/share/doc/*', 'usr/share/common-licenses/*',
-                  'usr/share/man/*'):
+                  'usr/share/man/*', 'etc/dpkg/origins/*',
+                  'usr/share/desktop-directories/Debian.directory'):
         assert _glob in _a, f'allowlist must carve out {_glob}'
+
+
+def test_identity_scan_include_globs_positive_manifest():
+    """audit_identity(include_globs=...) scans ONLY matching rel-paths —
+    the MAT-03 booted-root scan depends on out-of-manifest files being
+    out of scope entirely (not merely allowlisted).  Also pins that the
+    manifest covers os-release and grub fragments and that `*` crosses
+    `/` (fnmatch semantics: etc/dpkg/origins/* matches nested names)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from identity_scan import audit_identity, BOOTED_IDENTITY_SURFACES
+    with tempfile.TemporaryDirectory() as _td:
+        os.makedirs(os.path.join(_td, 'etc'))
+        os.makedirs(os.path.join(_td, 'usr/bin'))
+        with open(os.path.join(_td, 'etc', 'os-release'), 'w') as _fh:
+            _fh.write('PRETTY_NAME="Debian GNU/Linux 12"\n')
+        with open(os.path.join(_td, 'usr/bin', 'tzselect'), 'w') as _fh:
+            _fh.write('# report bugs to the Debian maintainers\n')
+        _fs = audit_identity(_td, None,
+                             include_globs=BOOTED_IDENTITY_SURFACES)
+        _paths = {_f['path'] for _f in _fs}
+        assert 'etc/os-release' in _paths, 'in-manifest leak must flag'
+        assert 'usr/bin/tzselect' not in _paths, \
+            'out-of-manifest file must be out of scope'
+    for _surf in ('etc/os-release', 'usr/lib/os-release',
+                  'etc/default/grub.d/*', 'etc/grub.d/*',
+                  'usr/share/desktop-directories/*'):
+        assert _surf in BOOTED_IDENTITY_SURFACES, \
+            f'{_surf} missing from booted-root manifest'
 
 
 def test_verify_chroot_disk_surface_skips_live_boot():
@@ -661,6 +695,7 @@ def test_iso_installer_accepts_tasks_desc_text():
 
 TESTS = [
     test_mat03_live_chroot_identity_scanned_before_squashfs,
+    test_identity_scan_include_globs_positive_manifest,
     test_verify_chroot_disk_surface_skips_live_boot,
     test_write_iso_md5sum_manifest_mat08,
     test_iso_builders_write_md5sum_manifest_mat08,

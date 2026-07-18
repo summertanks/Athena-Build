@@ -92,10 +92,29 @@ README.md	*	operator-facing fork-tree README — documents fork rationale
 
 # MAT-03 — booted-root (squashfs chroot) scan carve-outs.  Upstream
 # attribution and licensing texts legally RETAIN the Debian name; the
-# invariant targets OUR identity surfaces (os-release, menus, debconf,
-# boot), not upstream provenance.  Same rationale as the fork
-# debian/copyright entries above.
+# invariant targets OUR identity surfaces (os-release, menus, boot) —
+# the chroot scan walks only identity_scan.BOOTED_IDENTITY_SURFACES,
+# and these entries excuse the known-structural content WITHIN that
+# manifest (plus doc/license retention for the staged-ISO full walk).
 usr/share/doc/*	*	upstream attribution/changelogs — legally retained
 usr/share/common-licenses/*	*	license texts — verbatim by definition
 usr/share/man/*	*	upstream manpages document upstream reality
+# dpkg vendor chain: origins/debian declares `Parent-Vendor: Debian` by
+# design (Vendor: is Asgard); origins/default is a symlink to it.
+etc/dpkg/origins/*	*	dpkg-vendor parent-distro declaration (structural)
+# GRUB config fragments: 50-athena.cfg is OURS (comments document the
+# upstream default it overrides — same file as athena-branding/data/
+# 50-athena.cfg in the fork tree); init-select.cfg is an upstream
+# no-op workaround stub whose comments link bugs.debian.org; the
+# 05_debian_theme script is upstream shell code — the RENDERED menu
+# text comes from GRUB_DISTRIBUTOR (lsb_release → "Asgard") and the
+# background from athena-branding, both of which stay scanned.
+etc/default/grub.d/50-athena.cfg	*	our grub fragment — comments document upstream behavior
+etc/default/grub.d/init-select.cfg	*	upstream workaround stub — bugs.debian.org links in comments
+etc/grub.d/05_debian_theme	*	upstream theme script code — rendered text governed by GRUB_DISTRIBUTOR
+# "Debian" submenu label from menu-xdg-style .directory files.  GNOME
+# shell does not render .directory submenus, so visibility is limited
+# to traditional-menu environments.  Rebrand TODO (low-visibility) —
+# same precedent as base-files/share/info.dir above.
+usr/share/desktop-directories/Debian.directory	*	desktop submenu label — rebrand TODO (low-visibility)
 

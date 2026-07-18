@@ -241,16 +241,22 @@ class _IsoMixin:
         # The squashfs is opaque to every later audit (SEC-07 covered
         # text/config staging surfaces only; _audit_staged_iso can't see
         # inside the blob), so Debian identity residue in the BOOTED root
-        # (os-release, debconf db, menus) would ship undetected.  Scan the
-        # chroot tree BEFORE the expensive mksquashfs — reuses the staged-ISO
-        # walker + the same allowlist (which carves out legally-retained
-        # upstream attribution under usr/share/doc/).  Root-only-readable
-        # files (shadow etc.) are skipped by the walker — they are
-        # credentials, not identity surface.  Gated by [Audit] IdentityScan
-        # like the staged-ISO scan.
+        # (os-release, boot menu, desktop menus) would ship undetected.
+        # Scan BEFORE the expensive mksquashfs.  Scope is the POSITIVE
+        # surface manifest (identity_scan.BOOTED_IDENTITY_SURFACES), not a
+        # full-root walk: an installed system factually says "Debian" in
+        # thousands of upstream places (dpkg status db, script comments,
+        # systemd catalogs) that are provenance, not identity — first full
+        # walk (2026-07-18) hit 8,311 of them.  Root-only-readable files
+        # (shadow etc.) are skipped by the walker — credentials, not
+        # identity surface.  Gated by [Audit] IdentityScan like the
+        # staged-ISO scan (which keeps its full walk: staging trees are
+        # small and everything there is ours).
         if getattr(self._config, 'audit_identity_scan', True):
             from iso_installer import _audit_staged_iso
-            if not _audit_staged_iso(self._dir_chroot, self._dir_image):
+            from identity_scan import BOOTED_IDENTITY_SURFACES
+            if not _audit_staged_iso(self._dir_chroot, self._dir_image,
+                                     include_globs=BOOTED_IDENTITY_SURFACES):
                 tui.console.print(
                     "ERROR: identity residue in the live chroot root — "
                     "fix or allowlist (audit/identity-allowlist) before the "

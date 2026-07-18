@@ -139,8 +139,36 @@ def _is_binary_file(abs_path: str, probe_bytes: int = 4096) -> bool:
     return b'\x00' in chunk
 
 
+# MAT-03 — identity surfaces of a BOOTED root filesystem.  A full-root
+# token scan over an installed system is hopeless: pristine upstream
+# packages legitimately say "Debian" in tens of thousands of factual
+# places (script comments, dpkg's status db, systemd message catalogs,
+# tzselect's --help…).  First live-chroot scan (2026-07-18) produced
+# 8,311 hits across ~1,500 files — every one upstream provenance, zero
+# actionable.  The invariant MAT-03 protects is OUR identity surface:
+# what the booted system *presents* as its distribution identity.  So
+# the chroot scan is a positive manifest, not a full walk.  fnmatch
+# globs (note: `*` crosses `/`, same semantics as _SKIP_GLOBS).
+BOOTED_IDENTITY_SURFACES = (
+    # OS self-identification
+    'etc/os-release', 'usr/lib/os-release',
+    'etc/lsb-release', 'usr/lib/lsb-release',
+    'etc/issue', 'etc/issue.net', 'etc/motd', 'etc/hostname',
+    # dpkg vendor identity (structural Parent-Vendor entries allowlisted)
+    'etc/dpkg/origins/*',
+    # boot menu / bootloader-visible text
+    'etc/default/grub', 'etc/default/grub.d/*', 'etc/grub.d/*',
+    'boot/grub/*',
+    # boot splash
+    'usr/share/plymouth/themes/*',
+    # desktop menu structure (submenu labels are user-visible)
+    'etc/xdg/menus/*', 'usr/share/desktop-directories/*',
+)
+
+
 def audit_identity(root: str,
-                   allowlist_path: Optional[str] = None
+                   allowlist_path: Optional[str] = None,
+                   include_globs: Optional[Tuple[str, ...]] = None
                    ) -> List[Dict[str, object]]:
     """Walk `root`, grep each text file for IDENTITY_TOKENS.
 
@@ -148,6 +176,11 @@ def audit_identity(root: str,
     `path` (relative to root), `line_no` (1-based), `line` (stripped),
     `token` (name from IDENTITY_TOKENS).  Allowlisted hits are NOT
     in the result.  Caller decides whether to fail/warn/just log.
+
+    `include_globs` — when given, ONLY rel-paths matching one of these
+    fnmatch globs are scanned (positive manifest, e.g.
+    BOOTED_IDENTITY_SURFACES for a live chroot root); everything else
+    is out of scope, not merely allowlisted.  None → full walk.
 
     Empty root or missing root → empty list.  Files that error on
     read (permission, decode) → skipped silently."""
@@ -163,6 +196,9 @@ def audit_identity(root: str,
         for fn in filenames:
             abs_path = os.path.join(dirpath, fn)
             rel_path = os.path.relpath(abs_path, root)
+            if include_globs is not None and not any(
+                    fnmatch.fnmatch(rel_path, _g) for _g in include_globs):
+                continue
             if _should_skip(rel_path):
                 continue
             if _is_binary_file(abs_path):

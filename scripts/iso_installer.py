@@ -25,7 +25,7 @@ import re
 import shutil
 import string
 import subprocess
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional, Tuple, TYPE_CHECKING
 
 import tui
 import utils
@@ -1080,12 +1080,17 @@ def _run_grub_mkrescue(staging: str, iso_path: str,
     return True
 
 
-def _audit_staged_iso(staging: str, dir_image: str) -> bool:
+def _audit_staged_iso(staging: str, dir_image: str,
+                      include_globs: Optional[Tuple[str, ...]] = None
+                      ) -> bool:
     """Identity-residue scan over the staged ISO root.
 
     Walks `staging` for Debian-name tokens that survived staging-time
     substitution.  Reuses identity_scan.audit_identity (same walker
     + skip-globs the S1 fork audit uses; pool/*.deb is binary-filtered).
+    `include_globs` restricts the walk to a positive surface manifest
+    (used by the MAT-03 live-chroot scan, where a full-root walk drowns
+    in factual upstream "Debian" mentions).
 
     Allowlist resolution: walks up the parents of `dir_image` looking
     for `audit/identity-allowlist`.  In production, `dir_image` is
@@ -1114,7 +1119,8 @@ def _audit_staged_iso(staging: str, dir_image: str) -> bool:
     logger.info(
         f"audit staged ISO {staging} (allowlist={_allow_path})"
     )
-    _findings = audit_identity(staging, _allow_path)
+    _findings = audit_identity(staging, _allow_path,
+                               include_globs=include_globs)
     if not _findings:
         logger.info("audit staged ISO: no identity residue")
         return True
