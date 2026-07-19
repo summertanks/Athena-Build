@@ -1,7 +1,7 @@
 # Plan — COMP-04: architecture support beyond amd64 (i386 + arm64)
 
-## Status: DRAFT (2026-07-19) — full-tree arch audit complete; stage 0
-## oracle not yet run; no code landed
+## Status: STAGE 0 COMPLETE (2026-07-19) — oracle GREEN, gate open for
+## operator review; no code landed
 
 ## Scope (operator-confirmed 2026-07-19)
 
@@ -305,3 +305,80 @@ throughout (stages 1-3 are pure refactor + additive under amd64).
   per-arch pools, revisit only if mixed-arch installs become a goal),
   armhf, qemu-emulated builds, cross-compilation, CONF-17 pool-layout
   migration (unified layout works multi-arch; CONF-17 stays parked).
+
+## Stage 0 — RESULTS (2026-07-19, oracle run on BS1/GCP)
+
+Method: isolated per-arch working dirs (`~/oracle-comp04/{i386,arm64}`),
+real `cache build` + `cache parse` machinery, fresh selection baseline,
+full 13-source layered index set (bookworm + -updates + -security ×
+{main, contrib, non-free-firmware} + fork mirror) at the pinned
+snapshot `20260705T190150Z`.  Probes over raw layered indexes for skew
+and transpose.  amd64 reference = the live BS1 selection (1,615 bins /
+1,007 sources).
+
+### Verdict: GREEN — proceed to stage 1 as planned
+
+| Probe | i386 | arm64 | Verdict |
+|---|---|---|---|
+| Closure size (debs) | 1,599 | 1,587 | vs amd64 1,615 — no mass loss |
+| Sources locked | 999 | 991 | vs 1,007 |
+| Udeb closure | 157 | 149 | seeds resolve cross-arch (see U1) |
+| Dropped vs amd64 | 18 | 31 | ALL explainable (see below) |
+| Gained vs amd64 | 2 | 3 | per-arch toolchain/sanitizer |
+| Real version skew (layered) | **0** | **0** | after bookworm+updates+security overlay |
+| binNMU-only skew | 2 (`apg`, `bc`) | 2 (same) | existing +bN machinery covers it |
+| Transpose invariants | 0 fails / 21,354 versions (683 novel shapes) | 0 fails / 21,363 (583 novel) | arch-portable, proven at universe scale |
+| Fork packages | selected `+athena2` @ i386 | same @ arm64 | per-arch builders rebuild forks natively (D1 ✓) |
+
+### Closure diff — every drop explained
+
+- **Kernel flavor (both arches)**: `linux-image/headers-amd64`,
+  `linux-*-6.1.0-50-amd64`, `linux-kbuild`, `linux-compiler-gcc-12-x86`
+  drop because the seeds are amd64-named — and **no replacement kernel
+  is seeded** (the i386 run selects no `-686-pae`, arm64 no `-arm64`
+  kernel).  Exactly the D2/D5 work items; the oracle run proves the
+  seed mapping is the ONLY missing piece.
+- **Secure-boot chain (both)**: `shim-*`, `mokutil`,
+  `grub-efi-amd64-signed` — bookworm shim is amd64-only; consistent
+  with the existing "no Secure Boot" posture (`pool.list:53`).
+- **i386-specific**: `liblsan0`/`libtsan2` (sanitizers absent on
+  i386 — gcc-12's arch-conditional deps followed correctly; note
+  arm64 GAINS `libhwasan0` the same way), `libmfx1` (Intel media,
+  64-bit only).
+- **arm64-specific**: the whole x86 surface — grub-pc/efi-amd64,
+  intel/amd64-microcode + `iucode-tool`, Intel/VMware/QXL video
+  (`libdrm-intel1`, `xserver-xorg-video-{intel,vmware,qxl}`,
+  `libxatracker2`, `libxvmc1`, `libsmbios-c2`), `libquadmath0`
+  (no quad-math on arm64).
+- **Gains**: `binutils-{i686,aarch64}-linux-gnu` (arch's own binutils
+  alias), `fwupd-{i386,arm64}-signed`, `libhwasan0`.
+
+**No surprise losses**: browsers, desktop, toolchain, federation
+surface all intact on both arches.
+
+### Additional findings
+
+- **U1 — udeb seeds are virtual-name portable.**  `installer.list`
+  seeds by virtual module names; each arch's flavored udebs
+  (`*-686-pae-di`, `*-arm64-di`) Provide them, so the udeb closure
+  resolved WITHOUT list changes (86 seeds resolve on i386, 82 on
+  arm64 — the 4-seed delta is x86-only modules, to fold into D5).
+- **U2 — SELECT-02 fixpoint machinery is arch-clean**: the two-pass
+  shadow ran on both arches (i386 converged 1,348 → 1,344).
+- **U3 — mirror host disk is a stage-4/6 blocker**: 45 GB total,
+  23 GB free, repo 19 GB; three-arch pools + ISO surface ≈ +20 GB.
+  Grow the mirror volume before the first foreign-arch publish.
+- **U4 — headless UX gap (minor, file separately)**: `--yes` does not
+  answer multi-choice provider prompts; a fresh-state headless
+  `cache parse` dies with EOFError (`no input for required choice`).
+  Oracle worked around via piped answers.  Candidate: `--yes` takes
+  the displayed default.
+- **U5 — per-arch fwupd signing chain**: `fwupd-<arch>-signed` exists
+  per arch and was auto-selected — the Tunneled list in `build.conf`
+  (amd64-named entries) needs D5 arch-qualification like the seeds.
+
+### Gate
+
+Operator review of the diff above.  On acceptance: proceed to
+Stage 1 (literal kill + `arch_profile.py`) — no compute dependency,
+all work on existing hardware.
