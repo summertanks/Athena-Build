@@ -454,3 +454,128 @@ surface all intact on both arches.
 Operator review of the diff above.  On acceptance: proceed to
 Stage 1 (literal kill + `arch_profile.py`) — no compute dependency,
 all work on existing hardware.
+
+## Adversarial analysis v2 — module-by-module (2026-07-19, five-sweep)
+
+Five parallel adversarial sweeps over ALL modules (selection/build path,
+repo/mirror/federation, images/installer, onboarding/operations,
+source/versioning) against the decided design.  Every finding verified
+in code with file:line.  Net verdict: the ownership/conflict core and
+the selection machinery are genuinely ready; the coord-head/ledger/
+audit trio, the patch/P machinery, and a handful of image-side paths
+carry the real risk.  Stage sizing revised below.
+
+### Blockers
+
+| # | Site | Failure | Fix home |
+|---|---|---|---|
+| B1 | `buildcontainer.py:229` | Docker image tag omits arch — BS1/BS3 share tag `athenalinux:build-<rel>-<snap>` under the shared snapshot pin; reuse check hashes only the (arch-identical) Dockerfile → i386 builds silently run in the amd64 rootfs image (found independently by two sweeps) | stage 1.5: arch in tag + `athena.arch` label asserted on reuse |
+| B2 | `buildcontainer.py:1222` | No 32-bit personality: nothing wraps the build in `setarch i386`; `uname -m` in the i386 container returns x86_64 → autotools/cmake mis-target (Debian's i386 buildds always run linux32) | stage 1.5: `linux_personality` field in D2 profile, wrap build cmd |
+| B3 | `coord/publish.py:1484,1589` | Shared coord-head pins ONE scalar `inrelease_sha256` + `closure_ledger_sha256` — last publisher's arch wins; every other builder's audit fires CRITICAL `inrelease_sha_mismatch` and the anti-rollback pull check misfires | stage 3: per-arch map in coord-head (REAL schema bump, not additive) |
+| B4 | `cmd_mirror.py:2912,894`; `mirror.py:1399` | Audits compare ALL-builder claims against ONE pool: `claim_not_in_apt_index` + `missing_on_disk` CRITICALs for every foreign-arch claim; no per-claim→pool binding exists | stage 3: D4 arch field + claim filters to `{own arch, all, source-if-primary}` (adopt `audit_closure_ledger`'s `_audited_arches` pattern) |
+| B5 | `coord/publish.py:1557-1573` | Closure ledger generated from the LOCAL repo only, then overwrites the shared one — single-arch ledger; foreign builders see `closure_ledger_entry_missing` + every own claim "stranded" at pull | stage 3: union ledger (fetched ∪ own arch slice), never overwrite |
+| B6 | `cmd_mirror.py:2049-2096,3654`; `utils.py:520` | `mirror pull` walks the whole ledger with no arch filter and routes EVERYTHING into own `binary-<arch>` (foreign debs 404 or corrupt the tree; sources land in foreign publishable tree against D1) | stage 3: the already-filed pull-routing item — plus arch filtering |
+| B7 | `patch/source/<pkg>/<ver>/` + `bump.py:1293-1321` | Patch tree has NO arch dimension (i386-only fix inexpressible) AND P is history-dependent (`prior.P+1` vs per-checkout record) — independent builders converge on identical patch bytes with different P → foreign binary versions reference source versions the primary never published; `patch_set_hash` never reaches claims so no audit can see it | stage 3: P = pure function of patch content; `patch_set_hash` into claims; optional per-arch patch subdirs |
+| B8 | `cmd_source.py:1912,2158`; `cmd_tunnel.py:520`; `publish.py:215,253` | D3 unimplemented: `_emit_after_build` fires unconditionally (3 sites) and `generate_pending_claims` exempts sources from ANY filter — a second builder against shared coord is unsafe TODAY | stage 3: role-gate emit; drop `_all`+source pending claims on non-primary |
+| B9 | `utils.py:2781`; `build-system.sh`; `disk_image.py:381-477` | A5 host-arch preflight confirmed absent at every candidate hook; image code chroots into target rootfs (`useradd`, `update-initramfs`, `grub-install`) → cross-arch run dies mid-build with Exec format error instead of clean refusal | stage 1.5: config-ARCH vs `dpkg --print-architecture` gate (allowing i386-on-amd64) |
+| B10 | `disk_image.py:114,458,821`; `cmd_build.py:976` | `build_disk_image` takes NO arch param; `--target=x86_64-efi` is mandatory (hard fail on both new arches); `_verify_grub_artifacts` checks the x86_64-efi module dir | stage 5/7: thread profile through disk_image (G3 core) |
+| B11 | `mirror.py:2280-2296` | No `coord_url` override — per-arch pool URLs silently derive per-arch coord trees; shared federation unreachable (several call sites: publish/audit/pull/reconcile/sync) | stage 3: registration override threaded through all `coord_root_for` sites |
+
+### Majors
+
+- **Peer `_all` fetch is all-new machinery** — `neighbours_known` is
+  display/drift-only (`cmd_mirror.py:819,1571`); no primitive fetches a
+  file from a peer pool.  Bigger than D1's "small feature" sizing.
+- **`_all` reclaim/deprecation divergence** — primary rewriting or
+  deprecating an `_all` leaves stale copies indexed in foreign repos;
+  reclaim → foreign `claim_apt_sha_mismatch` CRITICAL, deprecation →
+  silently served stale (presence check suppressed).  Propagation
+  needed (`schema.py:48-108`, `store.py:396`).
+- **`src_idx {} vs None` conflation** (`mirror.py:1945`) — foreign
+  repo with legitimately no source tree → false
+  `closure_ledger_entry_not_published` CRITICALs once the union ledger
+  lands.  One-line gate fix; land WITH stage 3.
+- **Emit `.dsc` bytes are arch-universe-dependent** — re-emit passes
+  the local cache to the STA-55 demotion (`source_emit.py:332`);
+  moot once D3 lands (foreign builders don't emit) but
+  belt-and-suspenders: primary-universe or no lookup at emit.
+- **`[arch]` qualifiers touch FOUR readers + one parser, not one**:
+  `utils.py:4182,4208` (`parse_pkg_list_groups`), `surfaces.py:144`
+  (`read_flat_roots`), `selection_lock.py:224` (`_read_flat_seeds` —
+  duplicate reader feeding the SIGNED seeds), and the `Tunneled`
+  comma-parser (`utils.py:3022`).  Plus `render_pkg_list` restore
+  fallback (`selection_lock.py:382`) would strip qualifiers/entries on
+  legacy lockfiles — forbid or make round-trip-faithful.  Stage 2
+  re-sized accordingly.
+- **choose-mirror bakes `/asgard/`** (`fork/source/choose-mirror/
+  Mirrors.masterlist:4`) — the installed system's apt line; needs
+  arch-parameterization at installer build.  And the D1 promise
+  "deb-src → repo-amd64" has NO mechanism: choose-mirror carries ONE
+  directory for both lines (`generators/50mirror:288`); needs a new
+  finish-install hook (currently masked by
+  `enable-source-repositories false`).
+- **Remote-build machinery is arch-blind** (`remote_orchestrate.py`,
+  `remote_build.py`, `remote_agent.py`) — agent never reports its
+  arch; an arm64 remote would produce wrong-arch debs published as
+  amd64.  Handshake must carry `dpkg --print-architecture` + refusal.
+- **D1 wording vs implemented signing model**: the tier-1 GPG repo
+  key is SHARED (onboarding imports + verifies it,
+  `onboarding.py:363-482`); client images bake ONE archive keyring
+  from the local signing home.  D1's "each builder signs with its own
+  gnupg key" is wrong — per-builder keys would break cross-repo trust
+  (no aggregation exists).  Keep the shared tier-1 key; correct D1.
+- **`build-system.sh:343,365`** amd64-hardcoded host-package hints;
+  **QEMU smoke harness x86-only** (`tests/installer_smoke/run.py:167,
+  94-103`); **`console_extra` consumed nowhere** (both grub.cfg
+  emitters hardcode x86 consoles); **partition renumber cascade** in
+  `disk_image` when arm64 drops BIOS-Boot p1 (decision: renumber vs
+  keep placeholder — default to Debian convention, renumber);
+  **docs/mirror-setup.md + onboarding wizard** assume single repo
+  throughout (`onboarding.py:104-109,335`); **onboarding never
+  prompts/validates ARCH**.
+
+### Minors
+
+`/tmp/athena_crash.log` fixed path clobbered across checkouts
+(`build.py:27`); dead amd64-pinned `_KERNEL_PKG_RE` constant left by
+stage 1 (`iso_installer.py:58`) — delete; flock is host-global by
+design — KEEP it host-global when coord_url lands (`mirror.py:2431`).
+
+### Refuted (verified safe — no work needed)
+
+Ownership/conflict/supersession all key on FILENAME (or name+arch),
+never bare name — foreign-arch rebuilds of every package are safe
+(`publish.py:551`, `store.py:349`, `reconcile.py:360,379`).  Container
+names/networks/build-cache collision-free; pid-scoped reaping safe.
+Selection HMAC + mirror.conf are per-checkout (no cross-checkout
+hazard).  localmirror is a per-checkout bind-mount (no ports).
+`arch_filter` correct for i386 (cputable i686 mapping verified).
+Sources chain safe-skips on a repo with no source tree.  Image code
+has zero live hardcoded `repo/` paths.  Identity-scan manifest
+arch-clean.  `installer_chroot` is cross-arch safe (pure unpack).
+Tunnel writes no config at runtime.  Builder-ID collision
+TOFU-guarded.  D4b native-base guard behaves on i386.  Empty Sources
+index on foreign ISOs benign.
+
+### Revised stage sizing
+
+- **NEW stage 1.5 (small, immediate, amd64-safe):** B1 arch-qualified
+  image tag + label assert; B2 `linux_personality` profile field +
+  setarch wrap; B9 host-arch preflight; delete dead `_KERNEL_PKG_RE`;
+  per-pid crash log.
+- **Stage 2 (bigger than planned):** four readers + Tunneled parser +
+  restore-fallback guard, one shared qualifier-splitting helper.
+- **Stage 3 (the true epic core — substantially under-scoped before):**
+  coord-head per-arch schema bump (B3), union ledger (B5), audit arch
+  filters on D4 arch field (B4), pull arch-filter + routing (B6),
+  peer-fetch primitive + `_all` propagation on reclaim/deprecate,
+  D3 emit/claim gates (B8), P-determinism + `patch_set_hash` in claims
+  (B7), `coord_url` override (B11), `src_idx` gate fix, D1 signing
+  wording correction.
+- **Stage 5/7 additions:** disk_image arch threading (B10) +
+  partition renumber, choose-mirror masterlist templating + deb-src
+  finish-install hook, `console_extra` consumption in both grub.cfg
+  emitters, aarch64 QEMU harness.
+- **Stage 8 additions:** mirror-setup docs + onboarding wizard
+  (ARCH prompt, per-arch remote paths, shared coord), build-system.sh
+  arch-aware hints, remote-build arch handshake.
