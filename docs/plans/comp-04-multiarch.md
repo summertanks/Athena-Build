@@ -82,25 +82,63 @@ gaps**:
 
 ## Design decisions
 
-### D1 — one builder = one arch; the *mirror* is where multi-arch happens
+### D1 — one builder = one arch; PER-ARCH REPO TREES, one shared coord
+
+(Revised 2026-07-19, operator decision: per-arch repos.)
 
 Each builder machine keeps today's single-arch model end to end
 (selection, cache, container, records, images) with its own
-`distro.conf ARCH`.  The published repo becomes multi-arch by
-federation: `dists/thor/main/binary-{amd64,i386,arm64}/` each populated
-by its owning builder, one shared `pool/`, one top-level Release whose
-`Architectures:` line is **derived from the on-disk `binary-*` dirs**
-(the pattern `local_mirror.py:283-295` already uses) instead of the
-config arch.  No per-machine code learns to loop over arches — this is
-the smallest possible perturbation of a heavily-validated single-arch
-pipeline, and it is exactly the topology the federation layer (claims,
-flock, ownership matrix, coord-head) was designed for.
+`distro.conf ARCH`, and **publishes to its own complete apt repo
+tree** on the mirror host:
+
+    asgard/          (amd64 — legacy path, existing clients unbroken)
+    asgard-i386/
+    asgard-arm64/
+    asgard-coord/    (SHARED — one federation for all builders)
+
+Each per-arch repo is a full single-arch repo exactly like today's —
+own `dists/thor/…/binary-<arch>/`, own pool, own InRelease.  No merged
+multi-arch `dists/`, no derive-`Architectures:`-from-disk Release
+logic, no cross-builder contention inside one tree: publish is
+byte-for-byte today's flow pointed at a different remote root.
+Builder-side, `dir_repo` already comes from `[Directories] Repo`
+(`utils.py:3215`) and the remote root from the registered mirror URL —
+per-arch checkouts just configure different values (zero layout code).
+
+**Shared coord (operator decision).**  `coord_root_for()` derives the
+coord tree from the pool URL (`mirror.py:2279`: `asgard-i386` would
+silently become `asgard-i386-coord`), so mirror registration gains an
+optional explicit `coord_url` key (default: derived) and all builders
+point it at `asgard-coord`.  This keeps the year's federation
+invariants global: one provenance chain, one ownership matrix,
+cross-builder hash-conflict scan, one keyring/coord-head lineage.
+
+**arch:all bytes in foreign repos.**  apt on i386/arm64 needs
+`_all.deb` files indexed and present in ITS repo's pool, but under D3
+only BS1 claims them.  Foreign builders therefore *republish the
+primary's bytes verbatim*: fetched claim-verified via the
+`neighbours_known` peer path from the primary pool, placed in the
+foreign repo, indexed there — same filename, same bytes everywhere, so
+the shared-coord conflict scan sees only harmless
+`reproducible_duplicate`s.  A foreign builder's locally-rebuilt `_all`
+with differing bytes is a publish-gate refusal (same `local_ahead`
+machinery, message points at the primary's claim).
 
 Builders: **BS1** (amd64, existing GCP VM) — also hosts the i386
 builder as a second checkout + second builder identity (**BS3**,
 `ARCH = i386`, 32-bit containers on the same CPU).  **BS2** (arm64) —
 new ARM VM (GCP Axion/C4A class; T2A/C4A region availability to be
 checked at provision time), federating over the same mirror SSH.
+
+**Sources live in the primary repo only** (operator decision):
+arch-independent by definition, indexed once under `asgard/`;
+i386/arm64 images bake an extra `deb-src` line pointing at the primary
+repo — Debian-conventional, and the mirror's source pool does not
+triple.
+
+Client sources.list per arch (baked at image build via the D2
+profile): `deb http://<mirror>/asgard-<arch> thor main` (amd64 keeps
+`/asgard`), plus the shared `deb-src http://<mirror>/asgard thor main`.
 
 ### D2 — `arch_profile.py`: single authority for per-arch facts
 
@@ -176,7 +214,8 @@ accepted, dated constraint, not a blocker.
   strand of a signed claim if pushed around the gate.  Killed by D3 —
   and stage-3 tests must include the adversarial case: non-primary
   builder with a *differing* `_all.deb` in its record attempts publish;
-  expect the claim filtered, not conflicted.
+  expect the claim filtered AND the byte-push refused until the
+  primary's verbatim bytes are restored (per-arch repos, D1).
 - **A2 — per-arch binNMU skew.**  Debian binNMUs are per-arch: the
   same source can sit at `1.0+b1` on amd64 and `1.0` on arm64, and
   *selected versions may differ per arch*.  Our transpose strips/anchors
@@ -233,7 +272,8 @@ accepted, dated constraint, not a blocker.
 |---|---|---|
 | Config read | `utils.py:2781` (+validation), `distro.conf` | mechanical |
 | Arch profile (new) | `scripts/arch_profile.py` + consumers | new module |
-| Publish/Release | `apt_repo.py:144,780` (+derive-from-disk), `remote_localmirror.py:162` | mechanical + D1 derive |
+| Publish/Release | `apt_repo.py:144,780`, `remote_localmirror.py:162` — all → `config.arch` (per-arch repos: each Release advertises its ONE arch) | mechanical |
+| Coord decoupling | mirror registration `coord_url` override (`coord_root_for`, `mirror.py:2279`); peer fetch of `_all` bytes via `neighbours_known` | small feature (D1) |
 | Mirror pull/audit | `mirror.py:1194` (+multi-arch index walk), `cmd_mirror.py:1153` | mechanical + loop |
 | Kernel pick | `iso_installer.py:58,338`, `cmd_build.py:809` → profile | mechanical via D2 |
 | Artifact names | `iso.py:359`, `cmd_build.py:606`, `cmd_mirror.py:1067`, `print_commands.py` | mechanical |
@@ -255,17 +295,22 @@ throughout (stages 1-3 are pure refactor + additive under amd64).
   offline for both; diff selected sets, binNMU skew (A2), udeb seed
   names (A4); verify mirror-host disk (A8).  **GATE: operator reviews
   the three-way diff before any code.**
-- **Stage 1 — kill the literals.**  Clusters 1-5 → `config.arch` /
-  derive-from-disk; new `arch_profile.py` with the D2 table; the three
-  kernel-regex sites consume it.  Zero behavior change on amd64
-  (test-pinned).
+- **Stage 1 — kill the literals.**  Clusters 1-5 → `config.arch` (per-
+  arch repos mean every Release simply advertises its own single arch —
+  no multi-arch derivation anywhere); new `arch_profile.py` with the
+  D2 table; the three kernel-regex sites consume it.  Zero behavior
+  change on amd64 (test-pinned).
 - **Stage 2 — seed-list arch qualifiers (D5).**  Parser + qualify the
   ~12 arch-specific entries.  amd64 selection closure byte-identical
   (pin via selection lock).
 - **Stage 3 — federation arch-awareness.**  Claim `arch` field (D4),
-  `archallowner` role + `_all`/source claim filter (D3), multi-arch
-  Release derivation (D1), multi-arch mirror audit walk.  Federation-lab
-  tests: two-arch publish, A1 adversarial case, A7 re-pin.
+  `archallowner` role + `_all`/source claim filter (D3), `coord_url`
+  override + shared-coord registration (D1), peer-fetch of primary
+  `_all` bytes into foreign repos, multi-repo mirror audit awareness
+  (per-arch repos audited independently; shared coord folded once).
+  Federation-lab tests: two-arch publish into sibling repo roots, A1
+  adversarial case (foreign builder with differing `_all` bytes →
+  publish-gate refusal, not hash-conflict), A7 re-pin.
 - **Stage 4 — i386 bring-up (BS3 on BS1 hardware).**  Second checkout +
   builder identity, i386 base rootfs + container, `cache parse` (expect
   stage-0 predicted set), world build (VM temporarily resized), publish
@@ -292,7 +337,10 @@ throughout (stages 1-3 are pure refactor + additive under amd64).
   (e2-standard-8/16); arm64 world build on a C4A/T2A VM sized 16-32 GB
   for the build window, downsized after.  Steady-state adds one small
   ARM VM.
-- **Storage:** mirror pool ×3 (est. +9-10 GB), ISO surface ×3; BS1
+- **Storage:** three sibling repo trees; concrete-arch pools are
+  disjoint (+~9-10 GB), `_all.deb` bytes DUPLICATED per repo
+  (+~2-3 GB total, the price of per-arch repo simplicity), sources
+  NOT duplicated (primary-only); ISO surface ×3; BS1
   disk gains a second (i386) checkout+pool — the 80 GB disk will need
   review at stage 4.
 - **Risk posture:** highest-risk items are front-loaded into stage 0
