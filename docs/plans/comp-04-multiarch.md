@@ -91,18 +91,21 @@ Each builder machine keeps today's single-arch model end to end
 `distro.conf ARCH`, and **publishes to its own complete apt repo
 tree** on the mirror host:
 
-    asgard-amd64/
-    asgard-i386/
-    asgard-arm64/
-    asgard-coord/    (SHARED — one federation for all builders)
+    repo-amd64/
+    repo-i386/
+    repo-arm64/
+    repo-coord/      (SHARED — one federation for all builders)
 
-Uniform naming for all three arches (operator decision: nothing is
-released to the environment yet, so no legacy `asgard/` path is
-carried — the existing tree is renamed `asgard-amd64/` at stage-3
-rollout: a server-side `mv` plus re-registration of the mirror URL
-and public_url; the coord tree is untouched by the rename).  Local
-working dirs follow the same convention per checkout
-(`[Directories] Repo = repo-<arch>`).
+Uniform, distro-neutral naming for all three arches (operator
+decisions: nothing is released to the environment yet, so no legacy
+path is carried; and directory names do NOT embed the distribution
+name — where a branded name is needed it is derived from the distro
+identity in `distro.conf`, never baked into the layout).  The existing
+`asgard/` tree is renamed `repo-amd64/` at stage-3 rollout (server-
+side `mv` + re-registration of the mirror URL and public_url) and the
+coord tree moves to `repo-coord/` the same way.  Local working dirs
+use the identical convention per checkout
+(`[Directories] Repo = repo-<arch>`) — one naming scheme everywhere.
 
 Each per-arch repo is a full single-arch repo exactly like today's —
 own `dists/thor/…/binary-<arch>/`, own pool, own InRelease.  No merged
@@ -114,10 +117,10 @@ Builder-side, `dir_repo` already comes from `[Directories] Repo`
 per-arch checkouts just configure different values (zero layout code).
 
 **Shared coord (operator decision).**  `coord_root_for()` derives the
-coord tree from the pool URL (`mirror.py:2279`: `asgard-i386` would
-silently become `asgard-i386-coord`), so mirror registration gains an
+coord tree from the pool URL (`mirror.py:2279`: `repo-i386` would
+silently become `repo-i386-coord`), so mirror registration gains an
 optional explicit `coord_url` key (default: derived) and all builders
-point it at `asgard-coord`.  This keeps the year's federation
+point it at `repo-coord/`.  This keeps the year's federation
 invariants global: one provenance chain, one ownership matrix,
 cross-builder hash-conflict scan, one keyring/coord-head lineage.
 
@@ -139,14 +142,14 @@ new ARM VM (GCP Axion/C4A class; T2A/C4A region availability to be
 checked at provision time), federating over the same mirror SSH.
 
 **Sources live in the primary repo only** (operator decision):
-arch-independent by definition, indexed once under `asgard-amd64/`;
+arch-independent by definition, indexed once under `repo-amd64/`;
 i386/arm64 images bake an extra `deb-src` line pointing at the primary
 repo — Debian-conventional, and the mirror's source pool does not
 triple.
 
 Client sources.list per arch (baked at image build via the D2
-profile): `deb http://<mirror>/asgard-<arch> thor main`, plus the
-shared `deb-src http://<mirror>/asgard-amd64 thor main` (primary).
+profile): `deb http://<mirror>/repo-<arch> thor main`, plus the
+shared `deb-src http://<mirror>/repo-amd64 thor main` (primary).
 
 ### D2 — `arch_profile.py`: single authority for per-arch facts
 
