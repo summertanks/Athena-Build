@@ -320,9 +320,21 @@ throughout (stages 1-3 are pure refactor + additive under amd64).
   override + shared-coord registration (D1), peer-fetch of primary
   `_all` bytes into foreign repos, multi-repo mirror audit awareness
   (per-arch repos audited independently; shared coord folded once).
-  Federation-lab tests: two-arch publish into sibling repo roots, A1
-  adversarial case (foreign builder with differing `_all` bytes →
-  publish-gate refusal, not hash-conflict), A7 re-pin.
+  **`mirror pull` destination routing (operator requirement
+  2026-07-19): pulled files must land in the RIGHT directory for the
+  new layout** — `.deb`/`.udeb` into the pulling builder's own
+  `repo-<arch>/dists/<codename>/<comp>/binary-<arch>/` (resp.
+  `debian-installer/binary-<arch>/`) tree, source artifacts into the
+  PRIMARY repo's `source/` dir only (D1: sources are primary-only —
+  a foreign builder's pull fetches source files for local build use
+  but never places them in its own publishable tree).  The MAT-02
+  `_artifact_dest_dir` source-routing and the restore-own path in
+  `cmd_mirror` are the code to extend; both currently assume the
+  single-repo layout.  Federation-lab tests: two-arch publish into
+  sibling repo roots, pull-side routing round-trip (deb → own tree,
+  source → primary/local-only), A1 adversarial case (foreign builder
+  with differing `_all` bytes → publish-gate refusal, not
+  hash-conflict), A7 re-pin.
 - **Stage 4 — i386 bring-up (BS3 on BS1 hardware).**  Second checkout +
   builder identity, i386 base rootfs + container, `cache parse` (expect
   stage-0 predicted set), world build (VM temporarily resized), publish
