@@ -1,7 +1,8 @@
 # Plan — COMP-04: architecture support beyond amd64 (i386 + arm64)
 
-## Status: STAGE 0 COMPLETE (2026-07-19) — oracle GREEN, gate open for
-## operator review; no code landed
+## Status: STAGE 1 COMPLETE (2026-07-19) — arch_profile.py landed, six
+## literal clusters dead, amd64 behavior pinned unchanged (954be65).
+## Stage 0 oracle GREEN.  Next: stage 2 (seed-list [arch] qualifiers)
 
 ## Scope (operator-confirmed 2026-07-19)
 
