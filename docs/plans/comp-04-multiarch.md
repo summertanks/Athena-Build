@@ -91,10 +91,18 @@ Each builder machine keeps today's single-arch model end to end
 `distro.conf ARCH`, and **publishes to its own complete apt repo
 tree** on the mirror host:
 
-    asgard/          (amd64 — legacy path, existing clients unbroken)
+    asgard-amd64/
     asgard-i386/
     asgard-arm64/
     asgard-coord/    (SHARED — one federation for all builders)
+
+Uniform naming for all three arches (operator decision: nothing is
+released to the environment yet, so no legacy `asgard/` path is
+carried — the existing tree is renamed `asgard-amd64/` at stage-3
+rollout: a server-side `mv` plus re-registration of the mirror URL
+and public_url; the coord tree is untouched by the rename).  Local
+working dirs follow the same convention per checkout
+(`[Directories] Repo = repo-<arch>`).
 
 Each per-arch repo is a full single-arch repo exactly like today's —
 own `dists/thor/…/binary-<arch>/`, own pool, own InRelease.  No merged
@@ -131,14 +139,14 @@ new ARM VM (GCP Axion/C4A class; T2A/C4A region availability to be
 checked at provision time), federating over the same mirror SSH.
 
 **Sources live in the primary repo only** (operator decision):
-arch-independent by definition, indexed once under `asgard/`;
+arch-independent by definition, indexed once under `asgard-amd64/`;
 i386/arm64 images bake an extra `deb-src` line pointing at the primary
 repo — Debian-conventional, and the mirror's source pool does not
 triple.
 
 Client sources.list per arch (baked at image build via the D2
-profile): `deb http://<mirror>/asgard-<arch> thor main` (amd64 keeps
-`/asgard`), plus the shared `deb-src http://<mirror>/asgard thor main`.
+profile): `deb http://<mirror>/asgard-<arch> thor main`, plus the
+shared `deb-src http://<mirror>/asgard-amd64 thor main` (primary).
 
 ### D2 — `arch_profile.py`: single authority for per-arch facts
 
