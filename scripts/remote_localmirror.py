@@ -154,12 +154,22 @@ def _write_index(directory: str, packages_blob: str, snapshot_ts: str) -> bool:
         if os.path.isfile(_p):
             _rows.append((_name, os.path.getsize(_p),
                           _hash(_p, 'md5'), _hash(_p, 'sha256')))
+    # Derive Architectures from the .debs actually present (the
+    # _<arch>.deb filename token), matching local_mirror.py — a
+    # non-amd64 plan would otherwise ship the wrong arch line.
+    _arches: 'set[str]' = set()
+    for _name, _size, _md5, _sha in _rows:
+        if _name.endswith(('.deb', '.udeb')) and _name.count('_') >= 2:
+            _a = _name.rsplit('_', 1)[1].rsplit('.', 1)[0]
+            if _a and _a != 'all':
+                _arches.add(_a)
+    _arch_line = ' '.join(sorted(_arches) + ['all'])
     _lines = [
         f'Origin: {LOCAL_ORIGIN}',
         'Label: Athena Local Build Mirror',
         'Suite: local',
         'Codename: local',
-        'Architectures: amd64 all',
+        f'Architectures: {_arch_line}',
         'Components:',
         f'Date: {formatdate(time.time(), usegmt=True)}',
         'Description: Athena local build-closure mirror',

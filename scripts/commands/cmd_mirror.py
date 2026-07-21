@@ -1064,11 +1064,12 @@ class MirrorCommandsMixin(SessionState):
         _snap = utils.snapshot_iso_tag(self.config)
         _distro = str(self.config.build_distribution).strip('"').strip("'")
         _img = self.config.dir_image
-        _suffix = f"-{_snap}-amd64.iso" if _snap else "-amd64.iso"
+        _arch = self.config.arch
+        _suffix = f"-{_snap}-{_arch}.iso" if _snap else f"-{_arch}.iso"
         _candidates = [
             ('live',      f"athena-{_ver}{_suffix}"),
             ('installer', f"athena-installer-{_ver}{_suffix}"),
-            ('disk',      f"{_distro.lower()}-{_ver}-amd64.qcow2"),
+            ('disk',      f"{_distro.lower()}-{_ver}-{_arch}.qcow2"),
         ]
         _found: 'list[dict]' = []
         for _kind, _fname in _candidates:
@@ -1150,7 +1151,7 @@ class MirrorCommandsMixin(SessionState):
         _manifest = release_index.build_release_manifest(
             distribution=_distro, version=_ver,
             snapshot=utils.snapshot_iso_tag(self.config),
-            codename=_codename, component='main', arch='amd64',
+            codename=_codename, component='main', arch=self.config.arch,
             public_url=public_url,
             signed_by_keyring=(
                 '/usr/share/keyrings/athena-archive-keyring.gpg'),

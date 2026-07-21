@@ -1191,7 +1191,8 @@ def audit_packages_chain(
     pool_url: str, codename: str, release: 'Any',
     fetched_dir: str, ssh_key: 'Optional[str]' = None,
     components: 'tuple[str, ...]' = (),     # () = all components in InRelease
-    arches: 'tuple[str, ...]' = ('amd64',),
+    *,
+    arches: 'tuple[str, ...]',
 ) -> 'tuple[dict[str, dict], list[tuple[str, str, str]]]':
     """For each ``<component>/binary-<arch>/Packages`` referenced in the
     verified InRelease, pull and verify its SHA-256 against the

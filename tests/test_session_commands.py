@@ -8299,6 +8299,7 @@ def test_release_iso_descriptors_finds_and_reports_missing():
             dir_image = _img
             build_version = '1'
             build_distribution = 'asgard'
+            arch = 'amd64'
         _sess = BuildSession.__new__(BuildSession)
         _sess.config = _Cfg()
 

@@ -494,8 +494,8 @@ def status_lines(session) -> 'list[tuple[str, int]]':
             _snap = _cfgts if _cfgts.lower() != 'latest' else ''
 
     def _iso_name(_prefix: str) -> str:
-        return (f"{_prefix}-{_ver}-{_snap}-amd64.iso" if _snap
-                else f"{_prefix}-{_ver}-amd64.iso")
+        return (f"{_prefix}-{_ver}-{_snap}-{_arch}.iso" if _snap
+                else f"{_prefix}-{_ver}-{_arch}.iso")
 
     _art('ISO live', _iso_name('athena'),
          'iso_live_ready', 'pending chroot verify')
@@ -601,12 +601,13 @@ def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
     # not auto-invoked — see docstring above.
     tui.console.print("")
     _version = cfg.build_version.strip('"').strip("'")
-    # Mirror the builders' snapshot-tagged names: athena-<ver>[-<snap>]-amd64.iso
+    # Mirror the builders' snapshot-tagged names: athena-<ver>[-<snap>]-<arch>.iso
     _snap = utils.snapshot_iso_tag(cfg)
-    _live_iso_name      = (f"athena-{_version}-{_snap}-amd64.iso" if _snap
-                           else f"athena-{_version}-amd64.iso")
-    _installer_iso_name = (f"athena-installer-{_version}-{_snap}-amd64.iso" if _snap
-                           else f"athena-installer-{_version}-amd64.iso")
+    _arch = getattr(cfg, 'arch', 'amd64')
+    _live_iso_name      = (f"athena-{_version}-{_snap}-{_arch}.iso" if _snap
+                           else f"athena-{_version}-{_arch}.iso")
+    _installer_iso_name = (f"athena-installer-{_version}-{_snap}-{_arch}.iso" if _snap
+                           else f"athena-installer-{_version}-{_arch}.iso")
     _live_iso_path      = os.path.join(cfg.dir_image, _live_iso_name)
     _installer_iso_path = os.path.join(cfg.dir_image, _installer_iso_name)
 

@@ -21,7 +21,6 @@ but never inspects content.
 import glob
 import logging
 import os
-import re
 import shutil
 import string
 import subprocess
@@ -30,6 +29,8 @@ from typing import Any, Optional, Tuple, TYPE_CHECKING
 import tui
 import utils
 import _version
+
+import arch_profile
 
 if TYPE_CHECKING:
     import buildcontainer   # forward-reference target for type hints
@@ -54,9 +55,7 @@ logger = logging.getLogger('athena.iso')
 #   linux-image-cloud-amd64_6.1.170-3_amd64.deb   (meta — cloud flavor)
 # We only want files matching the numeric-ABI pattern and the plain
 # amd64 flavor (no -rt-, -cloud-, -trunk-, -dbg- suffix).
-_KERNEL_PKG_RE = re.compile(
-    r'^linux-image-(\d+\.\d+\.\d+-\d+)-amd64_'
-)
+_KERNEL_PKG_RE = arch_profile.profile('amd64').kernel_pkg_re
 
 
 def build_installer_iso(
@@ -76,6 +75,7 @@ def build_installer_iso(
     deb_whitelist: 'set[str]',
     signing_homedir: Optional[str] = None,
     signing_pubkey_path: Optional[str] = None,
+    arch: str = 'amd64',
     pkg_groups: Optional['dict[str, set]'] = None,
     group_meta: Optional['dict[str, dict[str, str]]'] = None,
     expected_kernel_pkg: Optional[str] = None,
@@ -125,7 +125,8 @@ def build_installer_iso(
         return False
 
     _kernel_src = _find_kernel(dir_repo, dir_chroot_installer, password,
-                               expected_kernel_pkg=expected_kernel_pkg)
+                               expected_kernel_pkg=expected_kernel_pkg,
+                               arch=arch)
     if not _kernel_src:
         return False
     if not _stage_kernel(_kernel_src, _staging):
@@ -208,7 +209,8 @@ def build_installer_iso(
             "— Debian residue can ship without flagging"
         )
 
-    if not generate_apt_repo(_staging, suite, codename, version, password):
+    if not generate_apt_repo(_staging, suite, codename, version, password,
+                             arch=arch):
         return False
 
     # Sign Release with the project key and ship the matching pubkey at
@@ -287,7 +289,8 @@ def _prepare_staging(staging: str, password: str) -> bool:
 
 def _find_kernel(dir_repo: str, dir_chroot_installer: str,
                  password: str,
-                 expected_kernel_pkg: Optional[str] = None) -> Optional[str]:
+                 expected_kernel_pkg: Optional[str] = None,
+                 arch: str = 'amd64') -> Optional[str]:
     """Locate a usable vmlinuz.
 
     Strategy:
@@ -334,18 +337,19 @@ def _find_kernel(dir_repo: str, dir_chroot_installer: str,
     #   - non-vanilla flavors (-rt-, -cloud-, etc.) — work but we want
     #     the plain kernel for a generic installer
     #   - debug packages (-dbg-) — symbols, no vmlinuz
+    _prof = arch_profile.profile(arch)
     _all_linux_debs = sorted(glob.glob(
-        os.path.join(dir_repo, 'linux-image-*-amd64*.deb')))
+        os.path.join(dir_repo, _prof.kernel_deb_glob)))
     _linux_debs = [
         _d for _d in _all_linux_debs
-        if _KERNEL_PKG_RE.match(os.path.basename(_d))
+        if _prof.kernel_pkg_re.match(os.path.basename(_d))
         and 'dbg' not in os.path.basename(_d).lower()
     ]
     if not _linux_debs:
         tui.console.print(
             "ERROR: no kernel found.  Looked in:\n"
             f"  {dir_chroot_installer}/boot/vmlinuz-*\n"
-            f"  {dir_repo}/linux-image-<ABI>-amd64*.deb\n"
+            f"  {dir_repo}/{_prof.kernel_deb_glob}\n"
             "Is the linux-image package built and in repo/?"
         )
         if _all_linux_debs:

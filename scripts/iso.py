@@ -356,8 +356,9 @@ class _IsoMixin:
         # Tag the filename with the snapshot pin so ISOs built from different
         # snapshots are distinguishable.  Empty when snapshots off.
         _snap = utils.snapshot_iso_tag(cfg)
-        _iso_name = (f"athena-{_version}-{_snap}-amd64.iso" if _snap
-                     else f"athena-{_version}-amd64.iso")
+        _arch = cfg.arch
+        _iso_name = (f"athena-{_version}-{_snap}-{_arch}.iso" if _snap
+                     else f"athena-{_version}-{_arch}.iso")
         _iso_path   = os.path.join(self._dir_image, _iso_name)
 
         if container is None:

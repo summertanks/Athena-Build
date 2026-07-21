@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./build-system.sh -c config/build.conf -p config/pkg.list --headless --yes --cmd \"key verify\" --cmd \"mirror status\" --cmd \"source audit\")",
+      "Bash(tar xzf *)",
+      "Bash(chmod 600 ~/mirror.key gnupg/signing/private-keys-v1.d/*.key)"
+    ]
+  }
+}

@@ -1229,6 +1229,7 @@ def test_buildcontainer_run_grub_mkrescue_constructs_correct_docker_call():
     # run_grub_mkrescue reads.
     _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
     _bc._image_tag = 'athenalinux:build-test'
+    _bc.arch = 'amd64'
     _bc._container_labels = {}  # set by __init__ (bypassed here)
     import threading as _threading
     _bc._live_lock = _threading.Lock()
@@ -1294,6 +1295,7 @@ def test_run_grub_mkrescue_mounts_localmirror_when_active():
     import buildcontainer
     _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
     _bc._image_tag = 'athenalinux:build-test'
+    _bc.arch = 'amd64'
     _bc._container_labels = {}
     import threading as _threading
     _bc._live_lock = _threading.Lock()
@@ -1328,6 +1330,7 @@ def test_buildcontainer_run_grub_mkrescue_propagates_failure():
 
     _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
     _bc._image_tag = 'athenalinux:build-test'
+    _bc.arch = 'amd64'
     _bc._container_labels = {}  # set by __init__ (bypassed here)
     import threading as _threading
     _bc._live_lock = _threading.Lock()

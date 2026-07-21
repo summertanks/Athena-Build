@@ -1867,10 +1867,12 @@ class BuildContainer:
         # for BIOS + EFI) plus the boot-image assemblers grub-mkrescue
         # invokes internally — xorriso for the ISO, mtools + dosfstools
         # for the FAT-formatted EFI System Partition image.
+        import arch_profile as _ap
+        _grub_bins = ' '.join(_ap.profile(self.arch).grub_bins)
         _apt_install = (
             'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && '
             'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y '
-            'grub-common grub-pc-bin grub-efi-amd64-bin '
+            f'grub-common {_grub_bins} '
             'xorriso mtools dosfstools'
         )
 

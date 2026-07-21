@@ -51,6 +51,84 @@ def test_mat03_live_chroot_identity_scanned_before_squashfs():
         assert _glob in _a, f'allowlist must carve out {_glob}'
 
 
+def test_arch_profile_d2_table_and_kernel_regexes():
+    """COMP-04 D2: arch_profile is the single authority for per-arch
+    facts.  Pins the table rows the image builders depend on, the
+    kernel regex semantics (real ABI kernels match; metas, -rt-/-cloud-
+    flavors and foreign flavors do not), and that an unknown arch is a
+    loud ValueError rather than a silent amd64 fallback."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import arch_profile as ap
+    assert ap.supported_arches() == ('amd64', 'arm64', 'i386')
+    # kernel flavor != dpkg arch (the G1 gap this module closes)
+    assert ap.profile('i386').kernel_flavor == '686-pae'
+    assert ap.profile('amd64').kernel_meta == 'linux-image-amd64'
+    assert ap.profile('arm64').kernel_meta == 'linux-image-arm64'
+    # arm64 boot model: EFI-only, no BIOS, no microcode, no grub-pc
+    _a64 = ap.profile('arm64')
+    assert not _a64.bios_boot
+    assert _a64.grub_bins == ('grub-efi-arm64-bin',)
+    assert _a64.microcode == ()
+    assert _a64.efi_removable_name == 'BOOTAA64.EFI'
+    assert _a64.grub_efi_target == 'arm64-efi'
+    # x86 profiles keep the hybrid BIOS+EFI model
+    for _x in ('amd64', 'i386'):
+        assert ap.profile(_x).bios_boot
+        assert 'grub-pc-bin' in ap.profile(_x).grub_bins
+    # kernel-deb regex semantics, per arch
+    _cases = {
+        'amd64': ('linux-image-6.1.0-47-amd64_6.1.170-3_amd64.deb',
+                  'linux-image-amd64_6.1.170-3_amd64.deb'),
+        'i386':  ('linux-image-6.1.0-47-686-pae_6.1.170-3_i386.deb',
+                  'linux-image-686-pae_6.1.170-3_i386.deb'),
+        'arm64': ('linux-image-6.1.0-47-arm64_6.1.170-3_arm64.deb',
+                  'linux-image-arm64_6.1.170-3_arm64.deb'),
+    }
+    for _arch, (_real, _meta) in _cases.items():
+        _p = ap.profile(_arch)
+        assert _p.kernel_pkg_re.match(_real), f'{_arch}: real must match'
+        assert not _p.kernel_pkg_re.match(_meta), f'{_arch}: meta must not'
+        assert not _p.kernel_pkg_re.match(
+            'linux-image-6.1.0-47-rt-amd64_6.1.170-3_amd64.deb')
+    # foreign flavor never crosses profiles
+    assert not ap.profile('i386').kernel_pkg_re.match(_cases['amd64'][0])
+    # installed-name regex agrees with the deb regex
+    assert ap.profile('amd64').kernel_name_re.match('linux-image-6.1.0-50-amd64')
+    assert not ap.profile('amd64').kernel_name_re.match('linux-image-amd64')
+    # loud failure on unknown arch
+    try:
+        ap.profile('riscv64')
+        raise AssertionError('unknown arch must raise')
+    except ValueError as _e:
+        assert 'riscv64' in str(_e)
+
+
+def test_comp04_stage1_no_live_amd64_literals():
+    """COMP-04 stage 1: the six literal clusters are dead — artifact
+    names, Release Architectures, kernel regexes and the container grub
+    toolset all derive from config.arch / arch_profile.  Pins the
+    absence of the load-bearing literal FORMS (docstrings/comments may
+    still mention amd64 as an example)."""
+    _checks = {
+        'scripts/apt_repo.py':      ["_ARCH = 'amd64'",
+                                     'Architectures=amd64'],
+        'scripts/iso.py':           ['-amd64.iso"'],
+        'scripts/commands/cmd_build.py':  ['-amd64.iso"', '-amd64$'],
+        'scripts/commands/cmd_mirror.py': ['-amd64.iso"', '-amd64.qcow2"',
+                                           "arch='amd64'"],
+        'scripts/print_commands.py': ['-amd64.iso"'],
+        'scripts/buildcontainer.py': ['grub-pc-bin grub-efi-amd64-bin'],
+        'scripts/remote_localmirror.py': ['Architectures: amd64 all'],
+        'scripts/mirror.py':        ["= ('amd64',)"],
+        'scripts/iso_installer.py': ["-amd64_'", "'linux-image-*-amd64*.deb'"],
+    }
+    for _rel, _needles in _checks.items():
+        with open(os.path.join(_ROOT, _rel)) as _fh:
+            _src = _fh.read()
+        for _n in _needles:
+            assert _n not in _src, f'{_rel}: live literal {_n!r} resurfaced'
+
+
 def test_identity_scan_include_globs_positive_manifest():
     """audit_identity(include_globs=...) scans ONLY matching rel-paths —
     the MAT-03 booted-root scan depends on out-of-manifest files being
@@ -603,10 +681,10 @@ def test_iso_filenames_carry_snapshot_tag():
     with open(_iso) as fh:
         _ib = fh.read()
     assert 'utils.snapshot_iso_tag(cfg)' in _ib
-    assert 'athena-{_version}-{_snap}-amd64.iso' in _ib
+    assert 'athena-{_version}-{_snap}-{_arch}.iso' in _ib
     _bb = _session_source()
     assert 'utils.snapshot_iso_tag(self.config)' in _bb
-    assert 'athena-installer-{_version}-{_snap}-amd64.iso' in _bb
+    assert 'athena-installer-{_version}-{_snap}-{_arch}.iso' in _bb
     # snapshot threaded into the installer ISO build
     assert re.search(r'snapshot=_snap', _bb), "snapshot not passed to build_installer_iso"
 
@@ -695,6 +773,8 @@ def test_iso_installer_accepts_tasks_desc_text():
 
 TESTS = [
     test_mat03_live_chroot_identity_scanned_before_squashfs,
+    test_arch_profile_d2_table_and_kernel_regexes,
+    test_comp04_stage1_no_live_amd64_literals,
     test_identity_scan_include_globs_positive_manifest,
     test_verify_chroot_disk_surface_skips_live_boot,
     test_write_iso_md5sum_manifest_mat08,

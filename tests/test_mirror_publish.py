@@ -2367,6 +2367,7 @@ def test_cmd_mirror_publish_refuses_indl_to_fresh_mirror():
             _fh.write('Date: 2026-06-04\n')
 
         class _Cfg:
+            arch = 'amd64'
             dir_config = _cfg_dir
             dir_cache  = _cache_dir
             dir_repo   = _repo_dir
@@ -4683,6 +4684,7 @@ def test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base():
             _fh.write('Date: 2026-06-01\n')
 
         class _Cfg:
+            arch = 'amd64'
             dir_config = _cfg_dir
             dir_cache  = _cache_dir
             dir_repo   = _repo_dir

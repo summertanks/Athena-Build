@@ -602,9 +602,10 @@ class BuildCommandsMixin(SessionState):
             # the base snapshot is distinguishable from one built after
             # stepping the snapshot.  Empty when snapshots off.
             _snap = utils.snapshot_iso_tag(self.config)
+            _arch = self.config.arch
             _iso_basename = (
-                f"athena-installer-{_version}-{_snap}-amd64.iso" if _snap
-                else f"athena-installer-{_version}-amd64.iso")
+                f"athena-installer-{_version}-{_snap}-{_arch}.iso" if _snap
+                else f"athena-installer-{_version}-{_arch}.iso")
             console.print(
                 f"Building installer ISO {_iso_basename}..."
             )
@@ -804,10 +805,8 @@ class BuildCommandsMixin(SessionState):
             # from a pre-rollback snapshot, breaking the installer
             # because the ramdisk's modules won't match
             # symptom from 2026-05-19).
-            import re as _re
-            _kernel_pat = _re.compile(
-                r'^linux-image-\d+\.\d+\.\d+-\d+-amd64$'
-            )
+            import arch_profile as _ap
+            _kernel_pat = _ap.profile(self.config.arch).kernel_name_re
             _kernel_candidates = [
                 _n for _n in self.cache.package_hashtable.keys()
                 if _kernel_pat.match(_n)
@@ -824,6 +823,7 @@ class BuildCommandsMixin(SessionState):
                 )
 
             _ok = iso_installer.build_installer_iso(
+                arch=self.config.arch,
                 dir_chroot_installer=self.config.dir_chroot_installer,
                 dir_repo=self.config.dir_repo_main,
                 dir_repo_main_udeb=self.config.dir_repo_main_udeb,

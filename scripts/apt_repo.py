@@ -113,13 +113,14 @@ def inrelease_index_stale(inrelease_path: str, dist_root: str) -> bool:
 
 def generate_apt_repo(
     staging: str, suite: str, codename: str, version: str, password: str,
+    arch: str = 'amd64',
 ) -> bool:
     """Generate apt-repo metadata under staging/dists/<suite>/.
 
     Layout produced (Debian apt-repo convention):
       dists/<suite>/Release                                        (top-level)
-      dists/<suite>/main/binary-amd64/{Release,Packages,Packages.gz,Packages.xz}
-      dists/<suite>/main/debian-installer/binary-amd64/{Release,Packages,Packages.gz,Packages.xz}
+      dists/<suite>/main/binary-<arch>/{Release,Packages,Packages.gz,Packages.xz}
+      dists/<suite>/main/debian-installer/binary-<arch>/{Release,Packages,Packages.gz,Packages.xz}
       dists/<suite>/main/source/{Release,Sources,Sources.gz,Sources.xz}
 
     Pool layout stays FLAT — apt reads Filename: from each Packages
@@ -141,7 +142,7 @@ def generate_apt_repo(
     All three are standard Debian utilities in dpkg-dev + apt-utils.
     """
     _COMPONENT = 'main'
-    _ARCH = 'amd64'
+    _ARCH = arch
 
     _suite_base   = os.path.join(staging, 'dists', suite)
     _comp_base    = os.path.join(_suite_base, _COMPONENT)
@@ -208,7 +209,7 @@ def generate_apt_repo(
     # Suite/Codename and apt refuses the repo.
     if not _generate_top_release(
             staging, suite, codename, version,
-            os.path.join(_suite_base, 'Release'), password):
+            os.path.join(_suite_base, 'Release'), password, arch=arch):
         return False
 
     tui.console.print(
@@ -402,7 +403,7 @@ def generate_repo_indexes(
         _top_release = os.path.join(repo_root, 'dists', _suite, 'Release')
         if not _generate_top_release(
                 repo_root, _suite, _codename, version,
-                _top_release, password,
+                _top_release, password, arch=arch,
                 components=_populated_components,
                 description=_desc):
             return False
@@ -735,6 +736,7 @@ def _write_subdir_release(
 def _generate_top_release(
     staging: str, suite: str, codename: str, version: str,
     output_path: str, password: str,
+    arch: str = 'amd64',
     components: 'Optional[list[str]]' = None,    # Stage B
     description: str = 'Athena installer disc',
 ) -> bool:
@@ -777,7 +779,7 @@ def _generate_top_release(
         '-o', f'APT::FTPArchive::Release::Suite={suite}',
         '-o', f'APT::FTPArchive::Release::Codename={codename}',
         '-o', f'APT::FTPArchive::Release::Version={version}',
-        '-o', 'APT::FTPArchive::Release::Architectures=amd64',
+        '-o', f'APT::FTPArchive::Release::Architectures={arch}',
         '-o', f'APT::FTPArchive::Release::Components={" ".join(components)}',
         '-o', f'APT::FTPArchive::Release::Description={description}',
     ]
