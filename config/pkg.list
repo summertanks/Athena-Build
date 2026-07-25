@@ -8,12 +8,17 @@
 
 [base]
 ## Description: Athena base system — kernel, bootloader, init, shell.
-# Linux kernel
-linux-image-amd64
+# Linux kernel — per-arch flavor (COMP-04 D5: dpkg arch i386 boots
+# the 686-pae flavor; qualifiers keep this one file per-arch true)
+linux-image-amd64 [amd64]
+linux-image-686-pae [i386]
+linux-image-arm64 [arm64]
 # Kernel headers — needed only by DKMS / out-of-tree module compiles.
 # Not required for a vanilla running system; kept for developer/admin
 # convenience.
-linux-headers-amd64
+linux-headers-amd64 [amd64]
+linux-headers-686-pae [i386]
+linux-headers-arm64 [arm64]
 # Free firmware blobs the kernel recommends.  Covers BSD-licensed
 # firmware for various NICs, GPUs, and storage controllers.  No
 # non-free-firmware component needed.  For non-free firmware blobs
@@ -44,8 +49,12 @@ firmware-linux-free
 # the Release file and installing the pubkey at /target before the
 # apt-cdrom step runs, so the workaround is no longer needed.  Switching
 # to bin-only also unblocks EFI installs (Phase D, this change).
-grub-pc-bin
-grub-efi-amd64-bin
+# BIOS grub is x86-only; EFI grub is per-arch (arm64 media are
+# EFI-only — no grub-pc there)
+grub-pc-bin [amd64 i386]
+grub-efi-amd64-bin [amd64]
+grub-efi-ia32-bin [i386]
+grub-efi-arm64-bin [arm64]
 
 # Essential Packages
 # base-files: same-name fork at fork/source/base-files/, version

@@ -553,7 +553,8 @@ class CacheCommandsMixin(SessionState):
             try:
                 _pkg_lines = utils.readfile(self.config.pkglist_path).splitlines()
                 _pkg_groups = utils.parse_pkg_list_groups(
-                    self.config.pkglist_path, lines=_pkg_lines)
+                    self.config.pkglist_path, lines=_pkg_lines,
+                    arch=self.config.arch)
                 _pkg_group_meta = utils.parse_pkg_list_group_meta(
                     self.config.pkglist_path, lines=_pkg_lines)
             except (OSError, ValueError) as e:

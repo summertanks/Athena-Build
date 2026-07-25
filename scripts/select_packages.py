@@ -131,6 +131,9 @@ class SelectPackages:
     def _load_model(self) -> None:
         self._rows_cache = None          # structure rebuilt below
         _lines = utils.readfile(self._path).splitlines()
+        # arch=None DELIBERATELY: the editor round-trips the file, so
+        # entries keep their [arch] qualifiers verbatim (COMP-04 D5) —
+        # filtering happens at closure-seed consumers, not here.
         groups = utils.parse_pkg_list_groups(self._path, lines=_lines)
         self._meta = utils.parse_pkg_list_group_meta(self._path, lines=_lines)
         for gname, names in groups.items():

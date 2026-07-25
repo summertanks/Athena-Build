@@ -123,8 +123,10 @@ class BuildCommandsMixin(SessionState):
         # closure (not the credit-based group deltas) decides membership.
         import surfaces
         _live_seeds = surfaces.group_seed_names(
-            self.config.pkglist_path, self.config.live_groups)
-        _live_seeds |= set(surfaces.read_flat_roots(self.config.livelist_path))
+            self.config.pkglist_path, self.config.live_groups,
+            arch=self.config.arch)
+        _live_seeds |= set(surfaces.read_flat_roots(
+            self.config.livelist_path, arch=self.config.arch))
         _live_seeds |= set(self.cache.required) | set(self.cache.important)
         _live_set = surfaces.surface_closure(
             self.dep_tree, _live_seeds, include_recommends_extras=True)
@@ -176,7 +178,8 @@ class BuildCommandsMixin(SessionState):
                 _pkg_lines = utils.readfile(
                     self.config.pkglist_path).splitlines()
                 _groups = utils.parse_pkg_list_groups(
-                    self.config.pkglist_path, lines=_pkg_lines)
+                    self.config.pkglist_path, lines=_pkg_lines,
+                    arch=self.config.arch)
                 _meta = utils.parse_pkg_list_group_meta(
                     self.config.pkglist_path, lines=_pkg_lines)
             except (OSError, ValueError) as _e:
@@ -258,7 +261,8 @@ class BuildCommandsMixin(SessionState):
         # rides [base]).  No live.list (not a live boot), no Recommends.
         import surfaces
         _disk_seeds = surfaces.group_seed_names(
-            self.config.pkglist_path, self.config.disk_groups)
+            self.config.pkglist_path, self.config.disk_groups,
+            arch=self.config.arch)
         _disk_seeds |= set(self.cache.required) | set(self.cache.important)
         _disk_set = surfaces.surface_closure(self.dep_tree, _disk_seeds)
         console.print(
@@ -670,6 +674,7 @@ class BuildCommandsMixin(SessionState):
             try:
                 _raw_pkg_groups = utils.parse_pkg_list_groups(
                     self.config.pkglist_path,
+                    arch=self.config.arch,
                 )
             except Exception:
                 _raw_pkg_groups = {}
@@ -742,7 +747,8 @@ class BuildCommandsMixin(SessionState):
                         tui.COLOR_ERROR)
                     return
             _di_roots = surfaces.read_flat_roots(
-                self.config.installer_defaults_path)
+                self.config.installer_defaults_path,
+                arch=self.config.arch)
             _di_missing = [_r for _r in _di_roots
                            if _r not in self.dep_tree.selected_pkgs]
             if _di_missing:
@@ -779,7 +785,8 @@ class BuildCommandsMixin(SessionState):
             # itself needs on /target; udeb names in the file are simply
             # not in the deb tree and fall out of the closure.
             _manifest_seeds.update(
-                surfaces.read_flat_roots(self.config.installerlist_path))
+                surfaces.read_flat_roots(self.config.installerlist_path,
+                                         arch=self.config.arch))
             assert self.cache is not None
             _manifest_seeds |= set(self.cache.required)
             _manifest_seeds |= set(self.cache.important)

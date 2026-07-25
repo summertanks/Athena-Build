@@ -195,7 +195,7 @@ nic-modules
 nic-shared-modules
 nic-usb-modules
 nic-wireless-modules
-nic-pcmcia-modules
+nic-pcmcia-modules [amd64 i386]
 
 # ─── Stock d-i seed: pkg-lists/base ────────────────────────────────
 # Verbatim from debian-installer 20230607+deb12u13 pkg-lists/base.  These
@@ -281,12 +281,12 @@ kbd-udeb
 fat-modules
 input-modules
 fb-modules
-serial-modules
+serial-modules [amd64 i386]
 usb-serial-modules
 uinput-modules
-firewire-core-modules
+firewire-core-modules [amd64 i386]
 mmc-modules
-acpi-modules
+acpi-modules [amd64 i386]
 
 # ─── Software selection (Phase 2 of GROUPS-01) ─────────────────────
 # pkgsel drives d-i's "Software selection" step at install time.  It
@@ -308,7 +308,7 @@ athena-pkgsel
 # if live.list ever drops them.  Already in live.list under the locked
 # decision.
 efibootmgr
-grub-pc-bin
+grub-pc-bin [amd64 i386]
 
 # ─── Athena fork packages (FORK-01) ────────────────────────────────
 # athena-installer-data ships installer-side stub templates + (future)

@@ -226,6 +226,114 @@ def test_parse_pkg_list_group_meta_flat_file_returns_base_only():
 
 
 
+def test_d5_arch_qualifier_semantics_and_reader_views():
+    """COMP-04 D5: [arch] seed qualifiers.  dpkg restriction semantics
+    (positive any-match, all-negated none-match, mixing forbidden,
+    wildcards via dpkg's arch table); parse_pkg_list_groups returns the
+    VERBATIM view at arch=None (editor round-trip) and the
+    filtered+stripped view for a concrete arch; flat readers filter the
+    same way; a seed line's [arch] suffix never parses as a section
+    header."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import arch_profile as ap
+    import utils
+    assert ap.entry_applies('a [amd64]', 'amd64') == (True, 'a')
+    assert ap.entry_applies('a [amd64]', 'i386') == (False, 'a')
+    assert ap.entry_applies('b [amd64 i386]', 'i386') == (True, 'b')
+    assert ap.entry_applies('c', 'arm64') == (True, 'c')
+    assert ap.entry_applies('d [!arm64]', 'arm64') == (False, 'd')
+    assert ap.entry_applies('d [!arm64]', 'i386') == (True, 'd')
+    assert ap.entry_applies('e [linux-any]', 'arm64') == (True, 'e')
+    for _bad in ('x [amd64 !i386]', 'x []'):
+        try:
+            ap.split_qualifier(_bad)
+            raise AssertionError(f'{_bad!r} must raise')
+        except ValueError:
+            pass
+    _text = (
+        '[base]\n'
+        'linux-image-amd64 [amd64]\n'
+        'linux-image-686-pae [i386]\n'
+        'shared-entry\n'
+        '[desktop]\n'
+        'grub-efi-arm64-bin [arm64]\n')
+    _lines = _text.splitlines()
+    _raw = utils.parse_pkg_list_groups('t.list', lines=_lines)
+    assert _raw['base'] == ['linux-image-amd64 [amd64]',
+                            'linux-image-686-pae [i386]', 'shared-entry'], \
+        'arch=None must be the verbatim editor view'
+    _amd = utils.parse_pkg_list_groups('t.list', lines=_lines, arch='amd64')
+    assert _amd['base'] == ['linux-image-amd64', 'shared-entry']
+    assert _amd['desktop'] == []
+    _i386 = utils.parse_pkg_list_groups('t.list', lines=_lines, arch='i386')
+    assert _i386['base'] == ['linux-image-686-pae', 'shared-entry']
+    _arm = utils.parse_pkg_list_groups('t.list', lines=_lines, arch='arm64')
+    assert _arm['desktop'] == ['grub-efi-arm64-bin']
+    # flat readers: surfaces.read_flat_roots + selection_lock._read_flat_seeds
+    import surfaces
+    import selection_lock
+    with tempfile.TemporaryDirectory() as _td:
+        _p = os.path.join(_td, 'flat.list')
+        with open(_p, 'w') as _fh:
+            _fh.write('# comment\nplain\nx-only [amd64 i386]\narm-only [arm64]\n')
+        assert surfaces.read_flat_roots(_p, arch='arm64') == \
+            ['plain', 'arm-only']
+        assert surfaces.read_flat_roots(_p, arch='amd64') == \
+            ['plain', 'x-only']
+        assert selection_lock._read_flat_seeds(_p, 'i386') == \
+            ['plain', 'x-only']
+        # arch=None keeps verbatim (round-trip callers)
+        assert selection_lock._read_flat_seeds(_p) == \
+            ['plain', 'x-only [amd64 i386]', 'arm-only [arm64]']
+
+
+def test_d5_shipped_lists_amd64_view_and_wiring():
+    """The shipped config lists carry qualifiers now: the amd64 view
+    must still include its kernel/grub entries and EXCLUDE the foreign
+    seeds; the Tunneled parser and the closure-feeding call sites must
+    route through the arch filter (source pins)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    import arch_profile as ap
+    _pkg = os.path.join(_ROOT, 'config', 'pkg.list')
+    _amd = utils.parse_pkg_list_groups(_pkg, arch='amd64')['base']
+    _i386 = utils.parse_pkg_list_groups(_pkg, arch='i386')['base']
+    _arm = utils.parse_pkg_list_groups(_pkg, arch='arm64')['base']
+    assert 'linux-image-amd64' in _amd and 'grub-pc-bin' in _amd
+    assert 'linux-image-686-pae' not in _amd
+    assert 'linux-image-686-pae' in _i386 and 'grub-efi-ia32-bin' in _i386
+    assert 'linux-image-arm64' in _arm and 'grub-pc-bin' not in _arm
+    # Tunneled: build.conf entries are qualified; amd64 view drops the
+    # foreign signing chains
+    _tun = [t.strip() for t in open(
+        os.path.join(_ROOT, 'config', 'build.conf')).read().split(
+        'Tunneled =', 1)[1].splitlines()[0].split(',')]
+    _amd_tun = ap.filter_seed_lines(_tun, 'amd64')
+    assert 'fwupd-amd64-signed' in _amd_tun
+    assert 'fwupd-i386-signed' not in _amd_tun
+    assert 'shim-signed' in _amd_tun
+    assert ap.filter_seed_lines(_tun, 'arm64') == \
+        ['firmware-nonfree', 'fwupd-arm64-signed', 'ffmpegthumbnailer']
+    # wiring pins
+    with open(os.path.join(_ROOT, 'scripts', 'utils.py')) as _fh:
+        _u = _fh.read()
+    assert 'filter_seed_lines(' in _u, 'Tunneled parser must arch-filter'
+    with open(os.path.join(_ROOT, 'scripts', 'commands',
+                           'cmd_build.py')) as _fh:
+        _cb = _fh.read()
+    assert _cb.count('arch=self.config.arch') >= 7, \
+        'cmd_build closure-seed readers must pass arch'
+    with open(os.path.join(_ROOT, 'scripts', 'selection_lock.py')) as _fh:
+        _sl = _fh.read()
+    assert "arch=_arch" in _sl and 'seeds_raw' in _sl
+    assert 'name-render fallback' in _sl, \
+        'restore fallback must warn (qualifiers not reconstructible)'
+    with open(os.path.join(_ROOT, 'scripts', 'select_packages.py')) as _fh:
+        _sp = _fh.read()
+    assert 'arch=None DELIBERATELY' in _sp, \
+        'editor must stay on the verbatim view'
+
+
 def test_pkg_list_base_includes_athena_tasksel():
     """FORK-01 Step 5: athena-tasksel (Provides + Conflicts + Replaces
     tasksel) must be in pkg.list [base] so it's debootstrapped onto
@@ -1413,14 +1521,15 @@ def test_surfaces_group_seed_names_and_flat_roots():
     with tempfile.TemporaryDirectory() as _root:
         _pkg = os.path.join(_root, 'pkg.list')
         open(_pkg, 'w').write('[base]\na\nb\n[gnome-desktop]\nc\n')
-        assert _sf.group_seed_names(_pkg, ['base']) == {'a', 'b'}
-        assert _sf.group_seed_names(_pkg, ['base', 'gnome-desktop']) == \
+        assert _sf.group_seed_names(_pkg, ['base'], arch='amd64') == {'a', 'b'}
+        assert _sf.group_seed_names(_pkg, ['base', 'gnome-desktop'],
+                                    arch='amd64') == \
             {'a', 'b', 'c'}
-        assert _sf.group_seed_names(_pkg, ['nope']) == set()
+        assert _sf.group_seed_names(_pkg, ['nope'], arch='amd64') == set()
         _flat = os.path.join(_root, 'installer-defaults.list')
         open(_flat, 'w').write('# d-i roots\ngrub-pc\n\nintel-microcode\n')
-        assert _sf.read_flat_roots(_flat) == ['grub-pc', 'intel-microcode']
-        assert _sf.read_flat_roots(_flat + '.missing') == []
+        assert _sf.read_flat_roots(_flat, arch='amd64') == ['grub-pc', 'intel-microcode']
+        assert _sf.read_flat_roots(_flat + '.missing', arch='amd64') == []
 
 
 
@@ -1437,12 +1546,12 @@ def test_buildconfig_surface_group_knobs():
         'config/installer-defaults.list')
     # the authored defaults file parses + carries the d-i roots
     import surfaces as _sf
-    _roots = _sf.read_flat_roots(_cfg.installer_defaults_path)
+    _roots = _sf.read_flat_roots(_cfg.installer_defaults_path, arch='amd64')
     for _must in ('grub-pc', 'grub-efi-amd64', 'console-setup',
                   'intel-microcode', 'open-vm-tools'):
         assert _must in _roots, f'{_must} missing from installer-defaults'
     # every root is also a pool.list build/publish root (sync invariant)
-    _pool = set(_sf.read_flat_roots(_cfg.poollist_path))
+    _pool = set(_sf.read_flat_roots(_cfg.poollist_path, arch='amd64'))
     _missing = [_r for _r in _roots if _r not in _pool]
     assert not _missing, f'installer-defaults not in pool.list: {_missing}'
 
@@ -1622,6 +1731,8 @@ TESTS = [
     test_parse_pkg_list_groups_empty_section_name_raises,
     test_parse_pkg_list_group_meta_extracts_descriptions,
     test_parse_pkg_list_group_meta_flat_file_returns_base_only,
+    test_d5_arch_qualifier_semantics_and_reader_views,
+    test_d5_shipped_lists_amd64_view_and_wiring,
     test_pkg_list_base_includes_athena_tasksel,
     test_verify_dep_resolution_skips_extras,
     test_verify_dep_resolution_still_catches_real_violations,

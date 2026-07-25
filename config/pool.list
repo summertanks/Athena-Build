@@ -48,8 +48,10 @@
 # apt on the target — both .debs sit indexed in /cdrom/pool side by
 # side here.  (Genuinely pool-only: pkg.list ships grub-*-bin, not the
 # metas.)
-grub-pc
-grub-efi-amd64
+grub-pc [amd64 i386]
+grub-efi-amd64 [amd64]
+grub-efi-ia32 [i386]
+grub-efi-arm64 [arm64]
 # NOTE: shim-signed is intentionally OMITTED — Athena has no Secure Boot
 # story shipped today.  grub-installer's "Additionally installing
 # shim-signed" step soft-fails (non-fatal); install completes on
@@ -138,8 +140,8 @@ asgard-printing-extras
 # install-time firmware machinery can apt-install the matching microcode/
 # firmware for the target's hardware.  NOT pre-installed in any chroot.
 #   microcode — apt-installed by hw-detect for the matching CPU vendor
-intel-microcode
-amd64-microcode
+intel-microcode [amd64 i386]
+amd64-microcode [amd64 i386]
 #   Wi-Fi / NIC firmware (the common "no network after install" devices)
 firmware-iwlwifi
 firmware-realtek

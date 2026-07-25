@@ -3027,7 +3027,13 @@ class BuildConfig:
             _skiptest_raw = config_parser.get('Source', 'SkipTest', fallback='')
             self.skip_build_test = [p.strip() for p in _skiptest_raw.split(',') if p.strip()]
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
-            self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]
+            # Tunneled entries may carry [arch] qualifiers (COMP-04 D5)
+            # — e.g. `shim-signed [amd64]`: signed-boot shims exist per
+            # arch and must not tunnel on the others.
+            import arch_profile as _arch_profile
+            self.tunnel_packages: list[str] = _arch_profile.filter_seed_lines(
+                [p.strip() for p in _tunneled_raw.split(',') if p.strip()],
+                self.arch)
             # BuildProfiles → DEB_BUILD_PROFILES (which Build-Depends a
             # source package activates at build time).
             # BuildOptions  → DEB_BUILD_OPTIONS  (how the build itself
@@ -4146,7 +4152,8 @@ def parse_build_pkg_list(path: str) -> 'list[str]':
 
 def parse_pkg_list_groups(
         path: str,
-        lines: 'Optional[list[str]]' = None) -> 'dict[str, list[str]]':
+        lines: 'Optional[list[str]]' = None,
+        arch: 'Optional[str]' = None) -> 'dict[str, list[str]]':
     """Parse a pkg.list file into named groups.
 
     Two supported layouts:
@@ -4174,8 +4181,23 @@ def parse_pkg_list_groups(
     """
     _lines = readfile(path).splitlines() if lines is None else lines
 
+    # [arch] qualifier handling (COMP-04 D5): with `arch` given, entries
+    # are filtered to those applying to that arch and returned BARE
+    # (qualifier stripped) — the closure-seed view.  With arch=None,
+    # entries return VERBATIM including any qualifier — the round-trip
+    # view the interactive editor and meta parser need.
+    import arch_profile as _arch_profile
+
+    def _emit(_entry: str) -> 'Optional[str]':
+        if arch is None:
+            return _entry
+        _ok, _bare = _arch_profile.entry_applies(_entry, arch)
+        return _bare if (_ok and _bare) else None
+
     # First pass: does the file contain ANY `[section]` header?  Decides
-    # which mode to parse in.
+    # which mode to parse in.  A seed line's [arch] qualifier is a
+    # SUFFIX (`name [amd64]`) and never matches the header regex, which
+    # requires the bracket to open the line.
     _section_re = re.compile(r'^\s*\[([^\]]*)\]\s*$')
     _has_sections = any(_section_re.match(_l) for _l in _lines)
 
@@ -4186,7 +4208,9 @@ def parse_pkg_list_groups(
             _name = _l.strip()
             if not _name or _name.startswith('#'):
                 continue
-            _seeds.append(_name)
+            _e = _emit(_name)
+            if _e is not None:
+                _seeds.append(_e)
         return {'base': _seeds}
 
     # INI mode.  Track current section; reject seeds before any header.
@@ -4212,7 +4236,9 @@ def parse_pkg_list_groups(
                 "package under a named section.  Add `[base]` at the top "
                 "if the file was previously flat."
             )
-        _groups[_current].append(_stripped)
+        _e = _emit(_stripped)
+        if _e is not None:
+            _groups[_current].append(_e)
     return _groups
 
 

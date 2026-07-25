@@ -1,6 +1,8 @@
 # Plan — COMP-04: architecture support beyond amd64 (i386 + arm64)
 
-## Status: STAGE 1.5 COMPLETE (2026-07-25) — B1/B2/B9 landed +
+## Status: STAGE 2 COMPLETE (2026-07-25) — [arch] qualifiers live in
+## all four readers + Tunneled, lists qualified, amd64-invariance
+## proven; STAGE 1.5 COMPLETE (2026-07-25) — B1/B2/B9 landed +
 ## dead constant + per-pid crash log; STAGE 1 COMPLETE (2026-07-19) — arch_profile.py landed, six
 ## literal clusters dead, amd64 behavior pinned unchanged (954be65).
 ## Stage 0 oracle GREEN.  Next: stage 2 (seed-list [arch] qualifiers)
@@ -570,8 +572,22 @@ index on foreign ISOs benign.
   `ATHENA_ALLOW_FOREIGN_ARCH=1` analysis escape); dead
   `_KERNEL_PKG_RE` deleted (test now pins the profile regex);
   crash log is pid-scoped, removed on clean exit when empty.
-- **Stage 2 (bigger than planned):** four readers + Tunneled parser +
-  restore-fallback guard, one shared qualifier-splitting helper.
+- **Stage 2 (bigger than planned):** DONE 2026-07-25 — shared helper
+  in arch_profile (`split_qualifier`/`entry_applies`/
+  `filter_seed_lines`, dpkg restriction semantics incl. wildcards +
+  mixing-forbidden); `parse_pkg_list_groups` gains `arch=` (None =
+  verbatim editor view — select_packages pinned to it; concrete arch =
+  filtered+stripped closure view); `read_flat_roots`/`group_seed_names`
+  take required `arch` kwarg (all call sites threaded);
+  `_read_flat_seeds`/`seeds_from_config` produce the arch view for the
+  SIGNED parsed seeds while `seeds_raw` keeps qualifiers verbatim;
+  Tunneled comma-parser filters at config load; restore name-render
+  fallback warns loudly (sound only because pre-seeds_raw lockfiles
+  predate qualifiers).  Lists qualified: pkg/pool/installer-defaults/
+  installer (x86-only udeb modules incl. the U1 four) + build.conf
+  Tunneled, with inert i386/arm64 kernel/grub/fwupd seeds added.
+  amd64-invariance proven: all four lists parse to seed sets identical
+  to pre-qualifier HEAD (293 seeds).
 - **Stage 3 (the true epic core — substantially under-scoped before):**
   coord-head per-arch schema bump (B3), union ledger (B5), audit arch
   filters on D4 arch field (B4), pull arch-filter + routing (B6),

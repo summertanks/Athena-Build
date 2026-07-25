@@ -133,6 +133,86 @@ def supported_arches() -> 'tuple[str, ...]':
     return tuple(sorted(_PROFILES))
 
 
+# ── [arch] seed-list qualifiers (COMP-04 D5, stage 2) ───────────────────
+# Seed lists stay single-file across arches; an entry may carry a
+# dpkg-style architecture restriction:
+#     linux-image-amd64 [amd64]
+#     grub-pc-bin [amd64 i386]
+#     linux-image-arm64 [arm64]
+#     foo [!arm64]
+# Unqualified lines apply everywhere (today's behavior — the 400+
+# existing entries need no migration).  Semantics follow dpkg
+# Build-Depends restrictions: a positive list applies when ANY token
+# matches the target arch; an all-negated list applies when NO negated
+# token matches; mixing negated and plain tokens is an error.  Tokens
+# may be dpkg wildcards (linux-any, any-amd64) — matched via dpkg's
+# own arch table.
+
+_QUALIFIER_RE = re.compile(r'^(?P<entry>.*?)\s*\[(?P<tokens>[^\]]*)\]\s*$')
+
+_ARCH_TABLE = None
+
+
+def _arch_table():
+    global _ARCH_TABLE
+    if _ARCH_TABLE is None:
+        from debian.debian_support import DpkgArchTable
+        _ARCH_TABLE = DpkgArchTable.load_arch_table()
+    return _ARCH_TABLE
+
+
+def _token_matches(token: str, arch: str) -> bool:
+    if token == arch or token == 'any':
+        return True
+    _r = _arch_table().matches_architecture(arch, token)
+    return bool(_r)
+
+
+def split_qualifier(line: str) -> 'tuple[str, tuple[str, ...]]':
+    """Split a seed-list line into (entry, restriction-tokens).  A line
+    with no [ ... ] suffix returns (line, ()) — applies to every arch.
+    An empty restriction (`foo []`) is an error (silently applying
+    nowhere OR everywhere would both surprise)."""
+    _m = _QUALIFIER_RE.match(line.strip())
+    if not _m:
+        return line.strip(), ()
+    _entry = _m.group('entry').strip()
+    _tokens = tuple(_t for _t in _m.group('tokens').split() if _t)
+    if not _tokens:
+        raise ValueError(
+            f"empty [arch] restriction on seed entry {_entry!r}")
+    _negs = [_t for _t in _tokens if _t.startswith('!')]
+    if _negs and len(_negs) != len(_tokens):
+        raise ValueError(
+            f"seed entry {_entry!r} mixes negated and plain arch tokens "
+            f"{_tokens} — dpkg restriction lists are all-or-none negated")
+    return _entry, _tokens
+
+
+def entry_applies(line: str, arch: str) -> 'tuple[bool, str]':
+    """(applies, bare-entry) for a seed-list line against a target
+    arch.  The bare entry has the restriction stripped either way, so
+    callers filter and normalize in one step."""
+    _entry, _tokens = split_qualifier(line)
+    if not _tokens:
+        return True, _entry
+    if _tokens[0].startswith('!'):
+        return (not any(_token_matches(_t[1:], arch) for _t in _tokens),
+                _entry)
+    return any(_token_matches(_t, arch) for _t in _tokens), _entry
+
+
+def filter_seed_lines(lines: 'list[str]', arch: str) -> 'list[str]':
+    """Order-preserving [arch]-filter over already-stripped seed
+    entries: keeps lines applying to *arch*, restriction stripped."""
+    _out: 'list[str]' = []
+    for _l in lines:
+        _ok, _entry = entry_applies(_l, arch)
+        if _ok and _entry:
+            _out.append(_entry)
+    return _out
+
+
 _HOST_ARCH: 'str | None' = None
 
 

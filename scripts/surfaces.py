@@ -127,12 +127,13 @@ def surface_closure(dep_tree, seed_names: 'Iterable[str]',
 
 
 def group_seed_names(pkglist_path: str,
-                     groups: 'Iterable[str]') -> 'Set[str]':
-    """Union of pkg.list seed names for the requested `[group]`s.  Unknown
-    group names yield nothing here — the cmd_build pre-flight validates
-    group existence loudly."""
+                     groups: 'Iterable[str]', *, arch: str) -> 'Set[str]':
+    """Union of pkg.list seed names for the requested `[group]`s, in the
+    target arch's view ([arch]-qualified entries filtered, COMP-04 D5).
+    Unknown group names yield nothing here — the cmd_build pre-flight
+    validates group existence loudly."""
     try:
-        _all = utils.parse_pkg_list_groups(pkglist_path)
+        _all = utils.parse_pkg_list_groups(pkglist_path, arch=arch)
     except (OSError, ValueError):
         return set()
     _out: 'Set[str]' = set()
@@ -141,10 +142,12 @@ def group_seed_names(pkglist_path: str,
     return _out
 
 
-def read_flat_roots(path: str) -> 'List[str]':
-    """Seed names from a flat list file (one per line, `#` comments) —
-    used for config/installer-defaults.list and live.list roots.
+def read_flat_roots(path: str, *, arch: str) -> 'List[str]':
+    """Seed names from a flat list file (one per line, `#` comments) in
+    the target arch's view ([arch]-qualified entries filtered, COMP-04
+    D5) — used for config/installer-defaults.list and live.list roots.
     Missing/unreadable → empty (callers validate)."""
+    import arch_profile
     _out: 'List[str]' = []
     try:
         _raw = utils.readfile(path).split('\n')
@@ -154,4 +157,4 @@ def read_flat_roots(path: str) -> 'List[str]':
         _name = _line.strip()
         if _name and not _name.startswith('#'):
             _out.append(_name)
-    return _out
+    return arch_profile.filter_seed_lines(_out, arch)

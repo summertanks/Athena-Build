@@ -218,10 +218,13 @@ def diff_closure(
 # ───────────────────────── full-state assembly + policy ──────────────────────
 
 
-def _read_flat_seeds(path: str) -> list:
-    """Raw seed names from a flat list file (one per line, # comments and
-    blanks ignored).  Order-preserving — used to round-trip a file on
-    `cache restore`."""
+def _read_flat_seeds(path: str, arch: 'Optional[str]' = None) -> list:
+    """Seed names from a flat list file (one per line, # comments and
+    blanks ignored).  Order-preserving.  With `arch`, [arch]-qualified
+    entries are filtered/stripped (COMP-04 D5) — the parsed-seeds view
+    is the TARGET ARCH's view (the closure guard diffs against the
+    arch-filtered closure; byte-level restore fidelity is `seeds_raw`'s
+    job, which keeps the qualifiers verbatim)."""
     try:
         _raw = utils.readfile(path).split('\n')
     except OSError:
@@ -231,6 +234,9 @@ def _read_flat_seeds(path: str) -> list:
         _name = _line.strip()
         if _name and not _name.startswith('#'):
             _out.append(_name)
+    if arch is not None:
+        import arch_profile
+        return arch_profile.filter_seed_lines(_out, arch)
     return _out
 
 
@@ -240,18 +246,24 @@ def seeds_from_config(config: 'Any') -> dict:
     seeder so both produce the identical shape."""
     _pkg = getattr(config, 'pkglist_path', '')
     _pkg_lines = utils.readfile(_pkg).splitlines() if _pkg else None
+    # Parsed seeds are the TARGET ARCH's view — [arch]-qualified entries
+    # filtered/stripped (COMP-04 D5) so the closure guard diffs the same
+    # universe the resolver saw.  seeds_raw (below) keeps the verbatim
+    # bytes, qualifiers included, for restore fidelity.
+    _arch = getattr(config, 'arch', None)
     return {
-        'pkg': (utils.parse_pkg_list_groups(_pkg, lines=_pkg_lines)
+        'pkg': (utils.parse_pkg_list_groups(_pkg, lines=_pkg_lines,
+                                            arch=_arch)
                 if _pkg else {}),
         # pkg-group descriptions — preserved so `cache restore` can faithfully
         # regenerate the `## Description:` lines tasksel needs.  Shares the one
         # file read with parse_pkg_list_groups above.
         'pkg_meta': (utils.parse_pkg_list_group_meta(_pkg, lines=_pkg_lines)
                      if _pkg else {}),
-        'live': _read_flat_seeds(getattr(config, 'livelist_path', '')),
+        'live': _read_flat_seeds(getattr(config, 'livelist_path', ''), _arch),
         'installer': _read_flat_seeds(
-            getattr(config, 'installerlist_path', '')),
-        'pool': _read_flat_seeds(getattr(config, 'poollist_path', '')),
+            getattr(config, 'installerlist_path', ''), _arch),
+        'pool': _read_flat_seeds(getattr(config, 'poollist_path', ''), _arch),
     }
 
 
@@ -424,7 +436,19 @@ def restore_list_files(config: 'Any', lock: dict) -> 'Dict[str, str]':
         # SELECT-01: prefer the verbatim bytes (operator comments + pkg-group
         # order preserved); fall back to the name-render for lockfiles written
         # before seeds_raw existed (or a file that was absent at capture time).
+        # COMP-04 D5 invariant: the name-render CANNOT reconstruct [arch]
+        # qualifiers (parsed seeds are the arch-filtered, stripped view) —
+        # that is sound ONLY because every pre-seeds_raw lockfile also
+        # predates qualifiers.  seeds_raw is captured verbatim for every
+        # modern lockfile, so a qualifier-bearing list never reaches this
+        # fallback; warn loudly if one ever does.
         _verbatim = _raw.get(_label)
+        if not (isinstance(_verbatim, str) and _verbatim):
+            utils.logger.warning(
+                f"restore_list_files: no seeds_raw for {_label!r} — "
+                "name-render fallback (pre-SELECT-01 lockfile).  Any "
+                "[arch] qualifiers and comments the original file had "
+                "are NOT reconstructible from parsed seeds.")
         _text = _verbatim if isinstance(_verbatim, str) and _verbatim else _rendered
         utils._atomic_write_bytes(_path, _text.encode('utf-8'))
         _written[_label] = _path

@@ -17,16 +17,19 @@
 # build/publish roots); the iso pre-flight fails loud on an entry that
 # is not selected.
 
-# Bootloader metas (grub-installer picks one at install time)
-grub-pc
-grub-efi-amd64
+# Bootloader metas (grub-installer picks one at install time);
+# per-arch (COMP-04 D5) — arm64 is EFI-only
+grub-pc [amd64 i386]
+grub-efi-amd64 [amd64]
+grub-efi-ia32 [i386]
+grub-efi-arm64 [arm64]
 
 # Console keymap (base-installer apt-installs onto /target)
 console-setup
 
 # CPU microcode (hw-detect, per vendor)
-intel-microcode
-amd64-microcode
+intel-microcode [amd64 i386]
+amd64-microcode [amd64 i386]
 
 # NIC / GPU / misc firmware (hw-detect)
 firmware-iwlwifi
