@@ -226,8 +226,13 @@ class BuildContainer:
         # image tag is config-derived — set unconditionally so a recipe-only
         # container (connect=False) can compose the recipe without a local
         # Docker connection or image build.
+        # Arch-qualified (COMP-04 B1): BS1/BS3 share a host + snapshot
+        # pin; without the arch in the tag the i386 checkout would
+        # silently reuse the amd64 rootfs image (the reuse check hashes
+        # only the arch-identical Dockerfile).
         self._image_tag = (
-            f"athenalinux:build-{config.container_release}-{self.snapshot_ts}")
+            f"athenalinux:build-{config.container_release}-{self.arch}-"
+            f"{self.snapshot_ts}")
 
         self.client = None
 
@@ -314,9 +319,18 @@ class BuildContainer:
         try:
             image = self.client.images.get(_image_tag)
             stored_hash = image.labels.get('athena.dockerfile.sha256', '')
+            stored_arch = image.labels.get('athena.arch', '')
 
             if stored_hash != dockerfile_hash:
                 tui.console.print(f"Dockerfile changed — rebuilding {_image_tag}")
+                _needs_build = True
+            elif stored_arch != self.arch:
+                # Belt-and-braces behind the arch-qualified tag: a
+                # pre-COMP-04 image or a hand-tagged one must never be
+                # reused for the wrong arch (B1).
+                tui.console.print(
+                    f"Image arch label {stored_arch!r} != target "
+                    f"{self.arch!r} — rebuilding {_image_tag}")
                 _needs_build = True
             else:
                 tui.console.print(f"Using Athena Build Image - {image.tags}")
@@ -383,7 +397,8 @@ class BuildContainer:
                         'SECURITY_ARCHIVE_NAME': 'debian-security',
                         'SNAPSHOT_TS':          self.snapshot_ts,
                     },
-                    labels={'athena.dockerfile.sha256': dockerfile_hash},
+                    labels={'athena.dockerfile.sha256': dockerfile_hash,
+                            'athena.arch': self.arch},
                     nocache=False, rm=True, )
 
                 tui.console.print(f"Athena Build Image Built - {image.tags}")
@@ -583,6 +598,21 @@ class BuildContainer:
             f"host filesystem and become root.  Use unix:// or loopback "
             f"tcp://127.0.0.1, or set up TLS and add 'tls=true' to the URL."
         )
+
+    def _container_command(self, cmd_str: str) -> 'list[str]':
+        """The containers.run() command for a build shell line, wrapped
+        in the target arch's linux personality when the profile demands
+        one (COMP-04 B2): an i386 build on an amd64 kernel must run
+        under `setarch linux32` so in-container `uname -m` reports i686
+        — exactly what Debian's own i386 buildds do.  Without it,
+        autotools/cmake configure against x86_64 and mis-target.
+        setarch ships in util-linux (present in the buildd base)."""
+        import arch_profile
+        _personality = arch_profile.profile(self.arch).linux_personality
+        _cmd = ["/bin/bash", "-c", cmd_str]
+        if _personality:
+            return ["setarch", _personality, "--"] + _cmd
+        return _cmd
 
     def _resource_kwargs(self) -> dict:
         """Per-container CPU + RAM caps for
@@ -1351,7 +1381,7 @@ class BuildContainer:
                 _volumes[_recipe['prebuild']] = {
                     'bind': '/prebuild.sh', 'mode': 'ro'}
             container = self.client.containers.run(
-                self._image_tag, command=["/bin/bash", "-c", cmd_str],
+                self._image_tag, command=self._container_command(cmd_str),
                 detach=True, auto_remove=False,
                 labels=self._container_labels,
                 environment=_CONTAINER_ENV,
@@ -1772,7 +1802,7 @@ class BuildContainer:
         try:
             assert self.client is not None
             container = self.client.containers.run(
-                self._image_tag, command=["/bin/bash", "-c", cmd_str],
+                self._image_tag, command=self._container_command(cmd_str),
                 detach=True, auto_remove=False,
                 labels=self._container_labels,
                 environment=_CONTAINER_ENV,

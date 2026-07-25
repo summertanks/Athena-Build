@@ -1,6 +1,7 @@
 # Plan — COMP-04: architecture support beyond amd64 (i386 + arm64)
 
-## Status: STAGE 1 COMPLETE (2026-07-19) — arch_profile.py landed, six
+## Status: STAGE 1.5 COMPLETE (2026-07-25) — B1/B2/B9 landed +
+## dead constant + per-pid crash log; STAGE 1 COMPLETE (2026-07-19) — arch_profile.py landed, six
 ## literal clusters dead, amd64 behavior pinned unchanged (954be65).
 ## Stage 0 oracle GREEN.  Next: stage 2 (seed-list [arch] qualifiers)
 
@@ -559,10 +560,16 @@ index on foreign ISOs benign.
 
 ### Revised stage sizing
 
-- **NEW stage 1.5 (small, immediate, amd64-safe):** B1 arch-qualified
-  image tag + label assert; B2 `linux_personality` profile field +
-  setarch wrap; B9 host-arch preflight; delete dead `_KERNEL_PKG_RE`;
-  per-pid crash log.
+- **NEW stage 1.5 (small, immediate, amd64-safe):** DONE 2026-07-25 —
+  B1 arch-qualified image tag (`build-<rel>-<arch>-<snap>`) +
+  `athena.arch` label stamped at build and asserted on reuse; B2
+  `linux_personality`/`host_arches` profile fields + both
+  containers.run sites route through the setarch-wrapping
+  `_container_command`; B9 `assert_host_compatible` gate at the
+  BuildConfig ARCH read (i386-on-amd64 native-allowed,
+  `ATHENA_ALLOW_FOREIGN_ARCH=1` analysis escape); dead
+  `_KERNEL_PKG_RE` deleted (test now pins the profile regex);
+  crash log is pid-scoped, removed on clean exit when empty.
 - **Stage 2 (bigger than planned):** four readers + Tunneled parser +
   restore-fallback guard, one shared qualifier-splitting helper.
 - **Stage 3 (the true epic core — substantially under-scoped before):**

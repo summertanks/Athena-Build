@@ -47,17 +47,6 @@ from apt_repo import (
 logger = logging.getLogger('athena.iso')
 
 
-# Real kernel packages carry a numeric ABI in the package name:
-#   linux-image-6.1.0-47-amd64_6.1.170-3_amd64.deb
-# Metapackages do NOT — they're empty + just Depends: on the real one:
-#   linux-image-amd64_6.1.170-3_amd64.deb         (meta — vanilla flavor)
-#   linux-image-rt-amd64_6.1.170-3_amd64.deb      (meta — rt preempt flavor)
-#   linux-image-cloud-amd64_6.1.170-3_amd64.deb   (meta — cloud flavor)
-# We only want files matching the numeric-ABI pattern and the plain
-# amd64 flavor (no -rt-, -cloud-, -trunk-, -dbg- suffix).
-_KERNEL_PKG_RE = arch_profile.profile('amd64').kernel_pkg_re
-
-
 def build_installer_iso(
     dir_chroot_installer: str,
     dir_repo: str,

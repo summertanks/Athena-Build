@@ -2283,7 +2283,7 @@ def test_recipe_only_container_skips_local_docker():
         _bc = buildcontainer.BuildContainer(_cfg, cache=None, connect=False)
     assert _bc.client is None                 # no local daemon connection
     _fe.assert_not_called()                   # never even tried
-    assert _bc._image_tag == 'athenalinux:build-bookworm-20260602T0Z'
+    assert _bc._image_tag == 'athenalinux:build-bookworm-amd64-20260602T0Z'
     assert _bc.arch == 'amd64' and _bc.codename == 'thor'
 
 

@@ -77,7 +77,8 @@ def test_iso_installer_kernel_pkg_regex_matches_real_kernels_only():
     linux-image-rt-amd64 (an empty preempt-rt meta) and failed."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _KERNEL_PKG_RE
+    import arch_profile
+    _KERNEL_PKG_RE = arch_profile.profile('amd64').kernel_pkg_re
     # Real kernels — should match
     for _real in (
         'linux-image-6.1.0-45-amd64_6.1.170-1_amd64.deb',

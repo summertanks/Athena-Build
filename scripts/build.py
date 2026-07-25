@@ -20,13 +20,29 @@ without re-running earlier work.
 
 import atexit
 import faulthandler
+import os as _os_early
 
 # Module-level handle so reload-during-dev cleans up + atexit pairs the
 # close on normal exit.  The previous form (faulthandler.enable(open(...)))
-# leaked the fd for the process lifetime.
-_FAULT_LOG = open('/tmp/athena_crash.log', 'w')
+# leaked the fd for the process lifetime.  Pid-scoped path (COMP-04
+# stage 1.5): two builder checkouts on one host (BS1 amd64 + BS3 i386)
+# would clobber a fixed /tmp/athena_crash.log; empty logs are removed
+# on clean exit so /tmp doesn't accumulate one file per run.
+_FAULT_LOG_PATH = f'/tmp/athena_crash.{_os_early.getpid()}.log'
+_FAULT_LOG = open(_FAULT_LOG_PATH, 'w')
 faulthandler.enable(_FAULT_LOG)
-atexit.register(_FAULT_LOG.close)
+
+
+def _close_fault_log() -> None:
+    _FAULT_LOG.close()
+    try:
+        if _os_early.path.getsize(_FAULT_LOG_PATH) == 0:
+            _os_early.unlink(_FAULT_LOG_PATH)
+    except OSError:
+        pass
+
+
+atexit.register(_close_fault_log)
 
 import tui
 import json

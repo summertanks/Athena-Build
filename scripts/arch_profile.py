@@ -37,6 +37,14 @@ class ArchProfile:
     microcode: 'tuple[str, ...]'    # microcode roots ('' on non-x86)
     console_extra: str              # extra kernel cmdline for consoles
     di_stock_seed: str              # upstream d-i pkg-lists cdrom seed
+    # Execution model (COMP-04 stage 1.5, B2/B9):
+    linux_personality: str          # setarch personality wrapping native
+                                    # builds on a WIDER host ('linux32'
+                                    # for i386-on-amd64 — Debian's i386
+                                    # buildds always run linux32 so
+                                    # uname -m reports i686); '' = none
+    host_arches: 'tuple[str, ...]'  # host dpkg arches that execute this
+                                    # target natively (no emulation)
     # Derived, compiled once per profile:
     kernel_pkg_re: 're.Pattern[str]' = field(init=False)
     kernel_name_re: 're.Pattern[str]' = field(init=False)
@@ -72,6 +80,8 @@ _PROFILES: 'dict[str, ArchProfile]' = {
         microcode=('intel-microcode', 'amd64-microcode'),
         console_extra='',
         di_stock_seed='cdrom/amd64.cfg',
+        linux_personality='',
+        host_arches=('amd64',),
     ),
     'i386': ArchProfile(
         arch='i386',
@@ -85,6 +95,8 @@ _PROFILES: 'dict[str, ArchProfile]' = {
         microcode=('intel-microcode', 'amd64-microcode'),
         console_extra='',
         di_stock_seed='cdrom/i386.cfg',
+        linux_personality='linux32',
+        host_arches=('amd64', 'i386'),
     ),
     'arm64': ArchProfile(
         arch='arm64',
@@ -98,6 +110,8 @@ _PROFILES: 'dict[str, ArchProfile]' = {
         microcode=(),
         console_extra='console=ttyAMA0',
         di_stock_seed='cdrom/arm64.cfg',
+        linux_personality='',
+        host_arches=('arm64',),
     ),
 }
 
@@ -117,3 +131,58 @@ def profile(arch: str) -> ArchProfile:
 
 def supported_arches() -> 'tuple[str, ...]':
     return tuple(sorted(_PROFILES))
+
+
+_HOST_ARCH: 'str | None' = None
+
+
+def host_arch() -> str:
+    """The build host's dpkg architecture (cached).  Falls back to a
+    platform.machine() mapping when dpkg is absent (non-Debian host —
+    the preflight will almost certainly fail later anyway, but the
+    refusal message stays honest)."""
+    global _HOST_ARCH
+    if _HOST_ARCH is None:
+        import subprocess
+        try:
+            _HOST_ARCH = subprocess.run(
+                ['dpkg', '--print-architecture'],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip() or ''
+        except (OSError, subprocess.SubprocessError):
+            _HOST_ARCH = ''
+        if not _HOST_ARCH:
+            import platform
+            _HOST_ARCH = {
+                'x86_64': 'amd64', 'i686': 'i386', 'aarch64': 'arm64',
+            }.get(platform.machine(), platform.machine())
+    return _HOST_ARCH
+
+
+def assert_host_compatible(target_arch: str) -> None:
+    """COMP-04 B9 host-arch preflight: refuse loudly AT STARTUP when
+    the host cannot natively execute the target arch (an arm64 checkout
+    on an amd64 host would otherwise die mid-build with Exec format
+    error inside a chroot/container).  i386-on-amd64 is native (32-bit
+    personality) and allowed by the profile's host_arches.
+
+    Escape hatch for selection-only analysis runs (cache build/parse
+    touch no target-arch binaries): ATHENA_ALLOW_FOREIGN_ARCH=1
+    downgrades the refusal to a warning."""
+    import os
+    _host = host_arch()
+    _prof = profile(target_arch)
+    if _host in _prof.host_arches:
+        return
+    _msg = (
+        f"target arch {target_arch!r} cannot execute on this "
+        f"{_host!r} host (native hosts: {', '.join(_prof.host_arches)})"
+        " — builds/chroots/images would die with Exec format error."
+        "  Run this checkout on a matching builder, or set"
+        " ATHENA_ALLOW_FOREIGN_ARCH=1 for selection-only analysis.")
+    if os.environ.get('ATHENA_ALLOW_FOREIGN_ARCH') == '1':
+        import logging
+        logging.getLogger('athena.utils').warning(
+            f"host-arch preflight OVERRIDDEN: {_msg}")
+        return
+    raise RuntimeError(_msg)

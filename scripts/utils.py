@@ -2779,6 +2779,13 @@ class BuildConfig:
                 os.path.dirname(self.config_path), 'distro.conf')
             config_parser.read([_distro_path, self.config_path])
             self.arch = config_parser.get('Build', 'ARCH')
+            # COMP-04 B9 host-arch preflight: an arm64 checkout on an
+            # amd64 host would die mid-build with Exec format error
+            # inside a chroot/container — refuse at startup instead.
+            # i386-on-amd64 is native and passes; selection-only
+            # analysis runs can set ATHENA_ALLOW_FOREIGN_ARCH=1.
+            import arch_profile as _arch_profile
+            _arch_profile.assert_host_compatible(self.arch)
 
             # [Base] defaults — per-mirror sections may override BASEURL/BASEID
             _default_baseurl = config_parser.get('Base', 'BASEURL')

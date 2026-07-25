@@ -51,6 +51,86 @@ def test_mat03_live_chroot_identity_scanned_before_squashfs():
         assert _glob in _a, f'allowlist must carve out {_glob}'
 
 
+def test_arch_profile_stage15_personality_and_host_matrix():
+    """COMP-04 stage 1.5 (B2/B9): the execution-model fields.  i386 is
+    the only personality-wrapped arch (linux32, Debian buildd
+    convention) and the only one executable on a wider host (amd64);
+    amd64/arm64 run only on themselves.  assert_host_compatible must
+    refuse a non-native target loudly and honor the
+    ATHENA_ALLOW_FOREIGN_ARCH=1 analysis escape."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import arch_profile as ap
+    assert ap.profile('amd64').linux_personality == ''
+    assert ap.profile('i386').linux_personality == 'linux32'
+    assert ap.profile('arm64').linux_personality == ''
+    assert ap.profile('amd64').host_arches == ('amd64',)
+    assert ap.profile('i386').host_arches == ('amd64', 'i386')
+    assert ap.profile('arm64').host_arches == ('arm64',)
+    # matrix behavior, host pinned to amd64 via the cache
+    _saved = ap._HOST_ARCH
+    try:
+        ap._HOST_ARCH = 'amd64'
+        ap.assert_host_compatible('amd64')
+        ap.assert_host_compatible('i386')     # native 32-bit personality
+        try:
+            ap.assert_host_compatible('arm64')
+            raise AssertionError('arm64-on-amd64 must be refused')
+        except RuntimeError as _e:
+            assert 'Exec format error' in str(_e)
+        os.environ['ATHENA_ALLOW_FOREIGN_ARCH'] = '1'
+        try:
+            ap.assert_host_compatible('arm64')   # warning, no raise
+        finally:
+            del os.environ['ATHENA_ALLOW_FOREIGN_ARCH']
+        ap._HOST_ARCH = 'arm64'
+        ap.assert_host_compatible('arm64')
+        try:
+            ap.assert_host_compatible('i386')
+            raise AssertionError('i386-on-arm64 must be refused')
+        except RuntimeError:
+            pass
+    finally:
+        ap._HOST_ARCH = _saved
+    # B9 is wired at the config arch read, not merely available
+    with open(os.path.join(_ROOT, 'scripts', 'utils.py')) as _fh:
+        _u = _fh.read()
+    assert 'assert_host_compatible(self.arch)' in _u, \
+        'BuildConfig must run the B9 host-arch preflight'
+
+
+def test_buildcontainer_stage15_arch_tag_label_and_personality():
+    """COMP-04 stage 1.5 (B1/B2) source pins: the docker image tag
+    carries the arch (BS1/BS3 share host + snapshot pin — an
+    unqualified tag reuses the wrong rootfs), the athena.arch label is
+    stamped at build AND asserted on reuse, and both containers.run
+    sites route through the personality-wrapping _container_command."""
+    _p = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_p) as _fh:
+        _s = _fh.read()
+    import re
+    _m = re.search(r'self\._image_tag\s*=\s*\(([^)]*)\)', _s)
+    assert _m and '{self.arch}' in _m.group(1), \
+        'image tag must be arch-qualified'
+    assert _s.count("'athena.arch'") >= 2, \
+        'athena.arch label must be stamped at build and read on reuse'
+    assert 'stored_arch != self.arch' in _s, \
+        'reuse must rebuild on arch-label mismatch'
+    assert '_container_command(cmd_str)' in _s and \
+        _s.count('command=self._container_command(cmd_str)') == 2, \
+        'both run sites must use the personality wrapper'
+    assert '"setarch", _personality, "--"' in _s
+    # behavioral: the wrapper itself, on a bare instance
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer as _bcm
+    _bc = object.__new__(_bcm.BuildContainer)
+    _bc.arch = 'i386'
+    assert _bcm.BuildContainer._container_command(_bc, 'echo hi') == \
+        ['setarch', 'linux32', '--', '/bin/bash', '-c', 'echo hi']
+    _bc.arch = 'amd64'
+    assert _bcm.BuildContainer._container_command(_bc, 'echo hi') == \
+        ['/bin/bash', '-c', 'echo hi']
+
+
 def test_arch_profile_d2_table_and_kernel_regexes():
     """COMP-04 D2: arch_profile is the single authority for per-arch
     facts.  Pins the table rows the image builders depend on, the
@@ -773,6 +853,8 @@ def test_iso_installer_accepts_tasks_desc_text():
 
 TESTS = [
     test_mat03_live_chroot_identity_scanned_before_squashfs,
+    test_arch_profile_stage15_personality_and_host_matrix,
+    test_buildcontainer_stage15_arch_tag_label_and_personality,
     test_arch_profile_d2_table_and_kernel_regexes,
     test_comp04_stage1_no_live_amd64_literals,
     test_identity_scan_include_globs_positive_manifest,
