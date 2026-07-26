@@ -721,6 +721,36 @@ class BuildContainer:
         logger.info(f"D4b base check: container base ID={_env or '?'} — "
                     "non-native, transpose mode confirmed")
 
+    def _federation_claims_for(self, package: str) -> 'list[dict]':
+        """Raw federation claim lines for *package* from every fetched
+        coord tree (cache/mirror/*/fetched/claims/*.jsonl).  UNVERIFIED
+        read — B7 uses only (intended_version, patch_set_hash) as a
+        convergence cross-check, never as a trust root; the verified
+        path stays on the publish/audit side.  Missing trees → []."""
+        import glob as _glob
+        import json as _json
+        _out: 'list[dict]' = []
+        _pat = os.path.join(
+            self.config.dir_cache, 'mirror', '*', 'fetched',
+            'claims', '*.jsonl')
+        for _p in sorted(_glob.glob(_pat)):
+            try:
+                with open(_p, 'r', encoding='utf-8') as _fh:
+                    for _line in _fh:
+                        _line = _line.strip()
+                        if not _line or f'"{package}"' not in _line:
+                            continue
+                        try:
+                            _c = _json.loads(_line)
+                        except ValueError:
+                            continue
+                        if isinstance(_c, dict) \
+                                and _c.get('package') == package:
+                            _out.append(_c)
+            except OSError:
+                continue
+        return _out
+
     def _record_phase(self, package: str, *, initial: 'Optional[dict]' = None,
                       **fields: object) -> None:
         """Phase transition.  Best-effort: a record-write OSError
@@ -747,9 +777,25 @@ class BuildContainer:
                 # version) against the prior record — reset on a version change,
                 # ++ when our patch_set changed, reuse otherwise.  bn_bump_count
                 # stays 0 on a normal build (the force-build path sets it).
-                initial['patch_bump_count'] = utils.decide_patch_bump_count(
-                    _prior, str(initial.get('intended_version', '')),
-                    str(initial.get('patch_set_hash', '')))
+                # COMP-04 B7: a NON-PRIMARY builder adopts the
+                # federation's +pP for this base+patch-set instead of
+                # minting from its own checkout history — independent
+                # ledgers converge on identical patches with different
+                # P and reference source versions the primary never
+                # published.  Hash divergence raises (sync patch/
+                # first); no comparable claim falls back to the local
+                # ledger rule.
+                _fed_p = None
+                if not getattr(self.config, 'arch_all_owner', True):
+                    _fed_p = utils.federated_patch_level(
+                        self._federation_claims_for(package),
+                        str(initial.get('intended_version', '')),
+                        str(initial.get('patch_set_hash', '')))
+                initial['patch_bump_count'] = (
+                    _fed_p if _fed_p is not None
+                    else utils.decide_patch_bump_count(
+                        _prior, str(initial.get('intended_version', '')),
+                        str(initial.get('patch_set_hash', ''))))
                 initial['bn_bump_count'] = 0
                 utils.write_build_record(self.buildlog_path, initial)
             else:

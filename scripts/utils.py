@@ -41,6 +41,7 @@ from bump import (
     EMPTY_PATCH_SET_HASH as EMPTY_PATCH_SET_HASH,
     compute_transposed_versions as compute_transposed_versions,
     decide_patch_bump_count as decide_patch_bump_count,
+    federated_patch_level as federated_patch_level,
     strip_binNMU as strip_binNMU,
     is_source_artifact as is_source_artifact,
     source_package_version as source_package_version,

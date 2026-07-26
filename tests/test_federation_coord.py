@@ -635,6 +635,45 @@ def test_generate_pending_claims_threads_component_from_build_record():
 
 
 
+def test_b7_federated_patch_level_and_claim_hash():
+    """COMP-04 B7: claims carry patch_set_hash (additive);
+    federated_patch_level adopts the federation's +pP for a matching
+    base+hash, raises on hash divergence (sync patch/, don't mint),
+    returns None with no comparable claim; generate_pending_claims
+    threads the record's hash; the buildcontainer P-decision consults
+    the federation on non-primary builders."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump
+    from coord import schema as _sch
+    _c = _sch.new_claim(
+        builder='b', seq=0, package='p', intended_version='1.0-1+asg1u0+p2',
+        built_version='1.0-1', filename='p_1.0-1+asg1u0+p2_amd64.deb',
+        sha256='x', size=0, snapshot='s', built_at='t',
+        patch_set_hash='h' * 64)
+    assert _c['patch_set_hash'] == 'h' * 64
+    _claims = [_c]
+    assert bump.federated_patch_level(
+        _claims, '1.0-1+asg1u0', 'h' * 64) == 2
+    assert bump.federated_patch_level([], '1.0-1', 'zz') is None
+    try:
+        bump.federated_patch_level(_claims, '1.0-1+asg1u0', 'z' * 64)
+        raise AssertionError('hash divergence must raise')
+    except ValueError as _e:
+        assert 'sync patch/' in str(_e)
+    with open(os.path.join(_ROOT, 'scripts', 'coord',
+                           'publish.py')) as _fh:
+        _p = _fh.read()
+    assert "patch_set_hash=str(_rec.get('patch_set_hash') or '')" in _p
+    with open(os.path.join(_ROOT, 'scripts', 'buildcontainer.py')) as _fh:
+        _bc = _fh.read()
+    assert 'federated_patch_level(' in _bc
+    assert '_federation_claims_for(package)' in _bc
+    _gate = _bc.index('federated_patch_level(')
+    assert "arch_all_owner', True)" in _bc[_gate - 400:_gate], \
+        'federated P adoption must be gated to non-primary builders'
+
+
 def test_b3_b5_b11_per_arch_coord_plumbing():
     """COMP-04 chunk B pure functions: head per-arch sha resolution
     (map wins, missing arch is empty, legacy scalar fallback);
@@ -5464,6 +5503,7 @@ TESTS = [
     test_virtual_publish_dry_run_same_sha_no_hash_conflict,
     test_new_claim_threads_component_field,
     test_generate_pending_claims_threads_component_from_build_record,
+    test_b7_federated_patch_level_and_claim_hash,
     test_b3_b5_b11_per_arch_coord_plumbing,
     test_b3_b4_wiring_pins,
     test_d3_non_primary_drops_all_and_source_claims_and_d4_arch,

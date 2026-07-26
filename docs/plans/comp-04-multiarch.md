@@ -1,6 +1,9 @@
 # Plan — COMP-04: architecture support beyond amd64 (i386 + arm64)
 
-## Status: STAGE 2 COMPLETE (2026-07-25) — [arch] qualifiers live in
+## Status: STAGE 3 CODE COMPLETE (2026-07-26) — chunks A-D landed
+## (D3/D4 gates, B3/B4/B5/B6/B7/B11, _all convergence); operational
+## rollout (repo-amd64 mv + re-registration, BS3/BS2 bring-up)
+## pending; STAGE 2 COMPLETE (2026-07-25) — [arch] qualifiers live in
 ## all four readers + Tunneled, lists qualified, amd64-invariance
 ## proven; STAGE 1.5 COMPLETE (2026-07-25) — B1/B2/B9 landed +
 ## dead constant + per-pid crash log; STAGE 1 COMPLETE (2026-07-19) — arch_profile.py landed, six
@@ -154,6 +157,14 @@ triple.
 Client sources.list per arch (baked at image build via the D2
 profile): `deb http://<mirror>/repo-<arch> thor main`, plus the
 shared `deb-src http://<mirror>/repo-amd64 thor main` (primary).
+
+**Signing model (corrected per adversarial v2).**  The tier-1 GPG
+repo key is SHARED across builders: onboarding imports + verifies the
+one key, every per-arch repo's InRelease is signed by it, and client
+images bake the single archive keyring.  Per-builder tier-1 keys
+would break cross-repo trust (no aggregation exists and none is
+needed).  Builder INDIVIDUALITY lives at tier 2 — the per-builder
+Ed25519 claim keys bound into the coord-head `builders` map.
 
 ### D2 — `arch_profile.py`: single authority for per-arch facts
 
@@ -602,3 +613,31 @@ index on foreign ISOs benign.
 - **Stage 8 additions:** mirror-setup docs + onboarding wizard
   (ARCH prompt, per-arch remote paths, shared coord), build-system.sh
   arch-aware hints, remote-build arch handshake.
+
+## Stage-3 operational rollout — migration runbook (operator-run)
+
+Code is arch-neutral and back-compat: BS1 continues publishing to the
+existing layout untouched until this runbook is executed.  Steps:
+
+1. **Mirror host** (one-time, during a quiet window):
+   `mv /home/ubuntu/asgard /home/ubuntu/repo-amd64` and
+   `mv /home/ubuntu/asgard-coord /home/ubuntu/repo-coord`.
+2. **BS1 re-registration**: `mirror remove master`, then
+   `mirror add ip ssh://ubuntu@<host>/home/ubuntu/repo-amd64
+   --ssh-key ~/mirror.key --coord-url
+   ssh://ubuntu@<host>/home/ubuntu/repo-coord --name master --yes`
+   (public_url updates to `http://<host>/repo-amd64`).
+3. **Web server**: update the http alias/document root for the new
+   paths (public_url consumers).
+4. **Verify**: `mirror status`, `mirror audit` — expect the same
+   clean result; claims/coord state is untouched by the rename.
+5. **BS3 (i386) bring-up** (stage 4): second checkout on BS1's host,
+   `distro.conf ARCH = i386`, own builder identity via
+   `mirror builders register`, `mirror add … repo-i386 --coord-url
+   …/repo-coord --primary-url …/repo-amd64`; local.conf gets
+   `Role = federation` (⇒ arch_all_owner=false) — verify with
+   `source emit` (should refuse) before the first publish.
+6. **BS2 (arm64) bring-up** (stage 6): same shape on the ARM VM.
+
+Rollback: reverse the two `mv`s and re-register the old URLs — no
+state format changed.

@@ -242,6 +242,7 @@ def new_claim(
     republished_from: 'Optional[Dict[str, Any]]' = None,
     component: str = 'main',
     arch: str = '',
+    patch_set_hash: str = '',
 ) -> dict:
     """Build an unsigned claim record.  Caller passes the result through
     identity.sign_claim before storing.  The `sig` field is added there.
@@ -284,6 +285,12 @@ def new_claim(
     # pre-D4 claims; readers treat missing as unknown-legacy.
     if arch:
         _rec['arch'] = arch
+    # COMP-04 B7 (additive): the sha256 of the patch set this build
+    # applied — lets any builder verify its patch tree matches the
+    # federation's before adopting the primary's +pP level, and gives
+    # audits provenance the version string alone cannot carry.
+    if patch_set_hash:
+        _rec['patch_set_hash'] = patch_set_hash
     return _rec
 
 

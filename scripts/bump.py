@@ -1321,6 +1321,42 @@ def decide_patch_bump_count(prior: 'Optional[dict]', intended_version: str,
     return _prev_p
 
 
+def federated_patch_level(
+    claims: 'list[dict]', intended_version: str,
+    patch_set_hash: str,
+) -> 'Optional[int]':
+    """COMP-04 B7: the +pP level a NON-PRIMARY builder must use for a
+    source at *intended_version* with *patch_set_hash*, adopted from
+    the federation's live claims — P is history-dependent per checkout
+    (prior.P+1), so two independent builders converging on identical
+    patch bytes could otherwise mint different P and reference source
+    versions the primary never published.
+
+    Scans claims (any builder) for one whose intended_version shares
+    this base (the +pP tail stripped) and carries a patch_set_hash:
+      - hash matches → that claim's P (parsed from its +p<P> tail;
+        no tail = 0)
+      - hash differs → ValueError (the patch trees diverge — the
+        operator must sync patch/ from the primary, NOT mint a new P)
+      - no comparable claim → None (caller falls back to the local
+        ledger — first build of this source in the federation)."""
+    _base = re.sub(r'\+p\d+$', '', intended_version)
+    for _c in claims:
+        _civ = str(_c.get('intended_version') or '')
+        _ch = str(_c.get('patch_set_hash') or '')
+        if not _ch or re.sub(r'\+p\d+$', '', _civ) != _base:
+            continue
+        if _ch != patch_set_hash:
+            raise ValueError(
+                f"patch-set hash diverges from the federation's claim "
+                f"for {intended_version} (ours {patch_set_hash[:12]}, "
+                f"claimed {_ch[:12]}) — sync patch/ with the primary "
+                "before building")
+        _m = re.search(r'\+p(\d+)$', _civ)
+        return int(_m.group(1)) if _m else 0
+    return None
+
+
 def _append_patch_force(version: str, patch_level: int,
                         force_bn: 'Optional[int]',
                         prefix: str, release: int) -> str:

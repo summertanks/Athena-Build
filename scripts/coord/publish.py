@@ -255,6 +255,7 @@ def generate_pending_claims(
                 republished_from=_rfrom,
                 component=_comp,
                 arch=_fn_arch,
+                patch_set_hash=str(_rec.get('patch_set_hash') or ''),
             ))
         # MAT-02 stage 5 — SOURCE artifacts (source_outputs /
         # source_output_hashes, written by `source emit`) are claimed like
