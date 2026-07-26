@@ -262,6 +262,7 @@ class MirrorCommandsMixin(SessionState):
             'no_probe':   False,
             'yes':        False,
             'coord_url':  None,
+            'primary_url': None,
         }
         _i = 2
         while _i < len(args):
@@ -277,6 +278,9 @@ class MirrorCommandsMixin(SessionState):
                 _i += 2
             elif _a in ('--coord-url',) and _i + 1 < len(args):
                 _parsed['coord_url'] = args[_i + 1]
+                _i += 2
+            elif _a in ('--primary-url',) and _i + 1 < len(args):
+                _parsed['primary_url'] = args[_i + 1]
                 _i += 2
             elif _a == '--no-probe':
                 _parsed['no_probe'] = True
@@ -547,6 +551,7 @@ class MirrorCommandsMixin(SessionState):
             host=_host, host_type=_host_type,
             public_proto=_proto or '', public_url=_public_url,
             coord_url=_parsed.get('coord_url') or '',
+            primary_url=_parsed.get('primary_url') or '',
         )
         console.print(
             f"mirror add: {_detail}",
@@ -1473,6 +1478,14 @@ class MirrorCommandsMixin(SessionState):
             console.print(
                 f"mirror publish {_n} [MODE={_mode_tag}]: → {_url}",
                 tui.COLOR_HIGHLIGHT)
+            # COMP-04 chunk C: a non-primary builder converges its local
+            # _all set to the primary's live claims BEFORE the publish
+            # transaction — otherwise its repo would index self-built
+            # divergent _all bytes and the arch-scoped audit CRITICALs.
+            if not getattr(self.config, 'arch_all_owner', True):
+                if not self._converge_all_from_primary(_n, _st):
+                    _all_ok = False
+                    continue
             # ProgressBar wired through on_progress.  Total updates
             # dynamically as we learn the count after step 5; until
             # then the bar shows 0/0.
@@ -2077,9 +2090,22 @@ class MirrorCommandsMixin(SessionState):
                     label=f'pull {_n}', itr_label='B/s',
                     maxvalue=max(_total_b, 1), show_rate=True,
                     label_width=26, bar_width=20)
-                for _ent in _entries.values():
+                _own_arch = getattr(self.config, 'arch', '')
+                _owner_role = getattr(self.config, 'arch_all_owner', True)
+                _scope_ok = {_own_arch, 'all'} | (
+                    {'source'} if _owner_role else set())
+                for _lkey, _ent in _entries.items():
                     _fn = _ent.get('filename')
                     if not isinstance(_fn, str) or not _fn:
+                        continue
+                    # COMP-04 B6: the union ledger carries EVERY arch's
+                    # slice — pulling a foreign-concrete-arch entry from
+                    # this single-arch repo would 404 (or worse, plant a
+                    # foreign deb in our tree); sources stay primary-only.
+                    _lscope = (_lkey.rsplit('|', 1)[1]
+                               if '|' in _lkey else '')
+                    if _own_arch and _lscope \
+                            and _lscope not in _scope_ok:
                         continue
                     _bar.label(_fn.split('_', 1)[0])     # binary package name
                     _claim, _builder = _claim_by_fn.get(_fn, (None, ''))
@@ -2106,7 +2132,13 @@ class MirrorCommandsMixin(SessionState):
                     label=f'pull {_n}', itr_label='B/s',
                     maxvalue=max(_total_b, 1), show_rate=True,
                     label_width=26, bar_width=20)
+                import coord.schema as _sch_b6
                 for _fn, (_c, _builder) in _claim_by_fn.items():
+                    # COMP-04 B6 — same scope rule as the ledger path.
+                    if not _sch_b6.claim_in_arch_scope(
+                            _c, getattr(self.config, 'arch', ''),
+                            getattr(self.config, 'arch_all_owner', True)):
+                        continue
                     _bar.label(_fn.split('_', 1)[0])     # binary package name
                     if _c.get('builder') == _bid:
                         _restore_own_file(_fn, _c)
@@ -3686,6 +3718,134 @@ class MirrorCommandsMixin(SessionState):
             f"(was {_local or 'unset'}) — re-run `cache build` + `cache parse`",
             tui.COLOR_WARNING)
         return _adopt
+
+    def _converge_all_from_primary(self, name: str, state: dict) -> bool:
+        """COMP-04 chunk C (D1 arch:all propagation): make this
+        NON-PRIMARY builder's local repo carry the primary's live
+        `_all.deb` set byte-exactly before publish.
+
+        Converges three ways against the freshly-fetched shared coord
+        view: (1) local _all whose sha differs from the live claim →
+        replaced with the primary's bytes (covers reclaim propagation);
+        (2) live _all claim with no local file → fetched (first
+        bring-up); (3) local _all whose claim is dead or absent →
+        removed (deprecation propagation).  Fetches come from the
+        registered `primary_url` pool over the claim-verified sha —
+        transport is untrusted, the signed claim is the authority.
+        Returns False only on a fetch/verify failure (publish should
+        stop: the repo would index divergent or stale _all bytes)."""
+        import hashlib
+        import coord.head as _chead
+        import coord.schema as _sch
+        import coord.transport as _ctransport
+        import mirror as _mirror
+        import signing as _signing
+        _primary_url = str(state.get('primary_url') or '').strip()
+        _fetched = os.path.join(
+            self.config.dir_cache, 'mirror', name, 'fetched')
+        os.makedirs(_fetched, exist_ok=True)
+        _coord_spec, _ = _mirror.rsync_spec_for_url(
+            _mirror.coord_root_for_state(state))
+        _okp, _detp = _ctransport.pull_remote_coord(
+            local_dest=_fetched, remote_spec=_coord_spec,
+            ssh_key=state.get('ssh_key') or None)
+        if not _okp:
+            console.print(
+                f"mirror publish {name}: coord fetch for _all "
+                f"convergence failed: {_detp}", tui.COLOR_ERROR)
+            return False
+        _head_dict = _chead.read_coord_head(
+            _fetched, _signing.signing_home(self.config))
+        if _head_dict is None:
+            console.print(
+                f"mirror publish {name}: cannot verify fetched coord-head "
+                "for _all convergence", tui.COLOR_ERROR)
+            return False
+        _by_builder, _bmsg = self._bind_keyring_and_read_claims(
+            _fetched, _head_dict)
+        if _bmsg:
+            console.print(_bmsg, tui.COLOR_WARNING)
+        _bid = self._coord_builder_id()
+        # live _all claims (any builder but us — in practice the primary)
+        _live_all: 'dict[str, dict]' = {}
+        for _b, _claims in _by_builder.items():
+            _dead = _sch.superseded_seqs(_claims)
+            for _c in _claims:
+                if _sch.is_superseded_claim(_c, _dead):
+                    continue
+                _fn = str(_c.get('filename') or '')
+                if _sch.artifact_arch(_fn) == 'all' and _b != _bid:
+                    _live_all[_fn] = _c
+        # local _all files under the repo dists tree
+        _local_all: 'dict[str, str]' = {}
+        for _root, _dirs, _files in os.walk(self.config.dir_repo):
+            for _f in _files:
+                if _f.endswith(('.deb', '.udeb')) \
+                        and _sch.artifact_arch(_f) == 'all':
+                    _local_all[_f] = os.path.join(_root, _f)
+
+        def _sha256(_p: str) -> str:
+            _h = hashlib.sha256()
+            with open(_p, 'rb') as _fh:
+                for _blk in iter(lambda: _fh.read(1 << 20), b''):
+                    _h.update(_blk)
+            return _h.hexdigest()
+
+        _replaced = _fetched_n = _removed = 0
+        _primary_arch = str(state.get('primary_arch') or 'amd64')
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        for _fn, _c in sorted(_live_all.items()):
+            _want = str(_c.get('sha256') or '')
+            _have = _local_all.get(_fn)
+            if _have and _want and _sha256(_have) == _want:
+                continue
+            if not _primary_url:
+                console.print(
+                    f"mirror publish {name}: local _all set diverges from "
+                    f"the primary ({_fn}) and no --primary-url is "
+                    "registered to fetch from — re-add the mirror with "
+                    "--primary-url <primary repo>.", tui.COLOR_ERROR)
+                return False
+            _comp = str(_c.get('component') or 'main')
+            _rel = (f"dists/{_codename}/{_comp}/"
+                    f"binary-{_primary_arch}/{_fn}")
+            _spec, _ = _mirror.rsync_spec_for_url(
+                _primary_url.rstrip('/') + '/' + _rel)
+            _dest = os.path.join(
+                self._artifact_dest_dir(_fn, _comp), _fn)
+            _okf, _det = _ctransport.fetch_pool_file(
+                remote_file_spec=_spec, dest_path=_dest,
+                ssh_key=state.get('ssh_key') or None)
+            if not _okf or (_want and _sha256(_dest) != _want):
+                console.print(
+                    f"mirror publish {name}: fetch/verify of primary "
+                    f"_all {_fn} FAILED ({_det or 'sha mismatch'})",
+                    tui.COLOR_ERROR)
+                return False
+            if _have and os.path.abspath(_have) != os.path.abspath(_dest):
+                try:
+                    os.unlink(_have)
+                except OSError:
+                    pass
+            _replaced += 1 if _have else 0
+            _fetched_n += 0 if _have else 1
+        for _fn, _path in sorted(_local_all.items()):
+            if _fn not in _live_all:
+                # our own self-built _all with no (foreign) live claim —
+                # keep our OWN claimed files (primary case handled by
+                # arch_all_owner gate at the call site), remove stale
+                # foreign-owned leftovers whose claims died.
+                try:
+                    os.unlink(_path)
+                    _removed += 1
+                except OSError:
+                    pass
+        if _replaced or _fetched_n or _removed:
+            console.print(
+                f"  _all convergence: {_fetched_n} fetched, "
+                f"{_replaced} replaced, {_removed} removed "
+                "(primary-owned set)", tui.COLOR_INFO)
+        return True
 
     def _artifact_dest_dir(self, filename: str, component: str) -> str:
         """Local destination dir for a pulled/restored pool artifact:

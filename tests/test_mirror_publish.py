@@ -4543,6 +4543,43 @@ def test_mirror_pull_progress_is_byte_sized_with_pkg_label():
 
 
 
+def test_comp04_chunk_c_pull_scope_and_all_convergence_pins():
+    """COMP-04 B6 + chunk C source pins: both pull walk paths filter to
+    the builder's arch scope (union-ledger keys by suffix, fallback
+    claims via claim_in_arch_scope); non-primary publish converges the
+    local _all set against the primary's live claims (fetch missing /
+    replace divergent / remove dead) BEFORE the transaction, fetching
+    over the registered primary_url with claim-sha verification; the
+    peer-fetch transport primitive exists; mirror add registers
+    --primary-url and --coord-url."""
+    _p = os.path.join(_ROOT, 'scripts', 'commands', 'cmd_mirror.py')
+    with open(_p) as _fh:
+        _c = _fh.read()
+    assert "_lscope not in _scope_ok" in _c, \
+        'ledger pull walk must skip out-of-scope union entries'
+    assert "_sch_b6.claim_in_arch_scope(" in _c, \
+        'fallback claims pull walk must scope-filter'
+    assert 'def _converge_all_from_primary' in _c
+    assert '_converge_all_from_primary(_n, _st)' in _c, \
+        'publish flow must converge _all before the transaction'
+    _conv = _c.index('def _converge_all_from_primary')
+    _pub_call = _c.index('_converge_all_from_primary(_n, _st)')
+    assert "arch_all_owner', True)" in _c[_pub_call - 600:_pub_call], \
+        'convergence must be gated to NON-primary builders'
+    for _pin in ("artifact_arch(_fn) == 'all'", '_sha256(_dest) != _want',
+                 "state.get('primary_url')"):
+        assert _pin in _c[_conv:_conv + 6000], f'converge must contain {_pin}'
+    _t = os.path.join(_ROOT, 'scripts', 'coord', 'transport.py')
+    with open(_t) as _fh:
+        _tt = _fh.read()
+    assert 'def fetch_pool_file' in _tt
+    _m = os.path.join(_ROOT, 'scripts', 'mirror.py')
+    with open(_m) as _fh:
+        _mm = _fh.read()
+    assert "'primary_url':      _primary_norm," in _mm
+    assert "'--primary-url'" in _c
+
+
 def test_mirror_pull_routes_and_records_source_artifacts():
     """MAT-02 stage 5 wiring pins:
       - _pull_file and _restore_own_file route through _artifact_dest_dir
@@ -5309,6 +5346,7 @@ TESTS = [
     test_cmd_mirror_dispatch_routes_reclaim,
     test_mirror_pull_progress_is_byte_sized_with_pkg_label,
     test_mirror_pull_restores_missing_own_files,
+    test_comp04_chunk_c_pull_scope_and_all_convergence_pins,
     test_mirror_pull_routes_and_records_source_artifacts,
     test_mirror_pull_canonical_apply_has_local_ahead_guard,
     test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base,

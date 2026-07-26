@@ -950,6 +950,7 @@ def add_mirror(
     public_proto: str = '',
     public_url: str = '',
     coord_url: str = '',
+    primary_url: str = '',
 ) -> 'tuple[bool, str]':
     """Register a new mirror.  Returns (ok, detail).
 
@@ -997,6 +998,14 @@ def add_mirror(
         return False, (
             f"invalid public_proto {public_proto!r} "
             f"(expected one of {sorted(VALID_PROTOS)})")
+    _primary_norm = ''
+    if primary_url:
+        _pn = _normalize_url(primary_url)
+        if _pn is None:
+            return False, (
+                f"invalid primary URL {primary_url!r} "
+                "(ssh:// or file:///abs/path)")
+        _primary_norm = _pn
     _coord_norm = ''
     if coord_url:
         _cn = _normalize_url(coord_url)
@@ -1009,6 +1018,7 @@ def add_mirror(
         'name':             name,
         'url':              _norm,
         'coord_url':        _coord_norm,
+        'primary_url':      _primary_norm,
         'type':             _type,
         'ssh_key':          ssh_key or '',
         'host':             host or '',

@@ -355,6 +355,29 @@ def pull_single_file(
     return True, ''
 
 
+def fetch_pool_file(
+    *, remote_file_spec: str, dest_path: str,
+    ssh_key: 'Optional[str]' = None,
+) -> Tuple[bool, str]:
+    """COMP-04 chunk C peer-fetch primitive: rsync ONE pool file from a
+    peer repo (e.g. the primary's binary-amd64/ dir) to a local path.
+    `remote_file_spec` points at the remote FILE.  Caller verifies the
+    sha256 against the signed claim afterwards — transport carries no
+    trust."""
+    _dest_dir = os.path.dirname(dest_path)
+    if _dest_dir:
+        os.makedirs(_dest_dir, exist_ok=True)
+    _argv = list(_RSYNC_BASE)
+    _ssh = _ssh_arg(ssh_key)
+    if _ssh is not None:
+        _argv += _ssh
+    _argv += [remote_file_spec, dest_path]
+    _r = subprocess.run(_argv, capture_output=True, text=True)
+    if _r.returncode != 0:
+        return False, (_r.stderr or _r.stdout or 'rsync failed').strip()[:300]
+    return True, ''
+
+
 def push_jsonl(
     *, local_path: str, remote_spec: str, ssh_key: 'Optional[str]' = None,
 ) -> Tuple[bool, str]:
