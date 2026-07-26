@@ -786,7 +786,8 @@ class BuildContainer:
                 # first); no comparable claim falls back to the local
                 # ledger rule.
                 _fed_p = None
-                if not getattr(self.config, 'arch_all_owner', True):
+                _cfg_b7 = getattr(self, 'config', None)
+                if not getattr(_cfg_b7, 'arch_all_owner', True):
                     _fed_p = utils.federated_patch_level(
                         self._federation_claims_for(package),
                         str(initial.get('intended_version', '')),
