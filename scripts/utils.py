@@ -2980,6 +2980,17 @@ class BuildConfig:
             # container-init prompt or `set create-local-mirror`.
             self.create_local_mirror = _local_conf.getboolean(
                 'Local', 'CreateLocalMirror', fallback=False)
+            # COMP-04 D3: is this builder the arch:all + source-artifact
+            # owner?  Exactly ONE builder in a federation may claim
+            # _all.deb and source artifacts (the filename-keyed
+            # hash-conflict gate cannot tolerate two arches' rebuilds of
+            # the same _all name).  Defaults to role == 'first' so BS1
+            # keeps today's behavior with zero config; foreign builders
+            # (role=federation) default to non-owner.  Explicit
+            # [Local] ArchAllOwner overrides either way.
+            self.arch_all_owner = _local_conf.getboolean(
+                'Local', 'ArchAllOwner',
+                fallback=(self.system_role == 'first'))
             # Build-system name — this machine's builder identity (e.g.
             # athena-primary), set at `configure`.  Machine-local only; empty on
             # a fresh/un-onboarded checkout.

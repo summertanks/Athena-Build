@@ -339,6 +339,7 @@ class SnapshotCommandsMixin(SessionState):
                 snapshot_pin=self._snapshot_current() or '',
                 read_build_record=utils.read_build_record,
                 build_arch=self.config.arch,
+                arch_all_owner=getattr(self.config, 'arch_all_owner', True),
             )
             return len(_pending) > 0
         except Exception as _e:    # noqa: BLE001 — advisory; never block select

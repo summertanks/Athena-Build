@@ -453,6 +453,15 @@ class SourceCommandsMixin(SessionState):
         Usage: source emit [<pkg>…] [force] | source emit verify"""
         if args and args[0] == 'verify':
             return self._source_emit_verify()
+        # COMP-04 D3: non-primary builders are verify-only — the emit
+        # actions produce source artifacts this builder may never claim.
+        if not getattr(self.config, 'arch_all_owner', True):
+            console.print(
+                "source emit: this builder is not the arch:all/source "
+                "owner (COMP-04 D3) — sources are emitted and published "
+                "by the primary.  `source emit verify` remains available.",
+                tui.COLOR_WARNING)
+            return None
         _force = 'force' in args
         _names = [a for a in args
                   if not a.startswith('-') and a != 'force']
@@ -635,7 +644,17 @@ class SourceCommandsMixin(SessionState):
         current as builds land, instead of relying on the backfill.
         BEST-EFFORT — an emit problem must never fail a successful build;
         the record simply lacks source_outputs and the next `source emit`
-        (or the audit) picks it up."""
+        (or the audit) picks it up.
+
+        COMP-04 D3: source artifacts are a PRIMARY-builder concern —
+        a non-arch-all-owner builder never emits (its claim layer
+        drops them anyway; emitting would only create record/pool
+        state the audits then must explain away)."""
+        if not getattr(self.config, 'arch_all_owner', True):
+            logger.info(
+                f"source emit (post-build) {src}: skipped — this "
+                "builder is not the arch:all/source owner (COMP-04 D3)")
+            return
         try:
             _st = self._emit_one_source(src)
             if _st == 'failed':

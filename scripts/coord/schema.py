@@ -189,6 +189,22 @@ _CLAIM_REQUIRED = frozenset({
 })
 
 
+def artifact_arch(filename: str) -> str:
+    """The D4 arch token for a pool artifact filename: 'source' for
+    source artifacts (.dsc/.tar/.diff), else the trailing
+    _<arch>.(deb|udeb) token, else '' (unparseable — legacy caller)."""
+    if (filename.endswith(('.dsc', '.asc', '.diff.gz'))
+            or '.tar.' in filename):
+        return 'source'
+    _stem = filename
+    for _ext in ('.deb', '.udeb'):
+        if _stem.endswith(_ext):
+            _stem = _stem[:-len(_ext)]
+            _parts = _stem.rsplit('_', 1)
+            return _parts[1] if len(_parts) == 2 else ''
+    return ''
+
+
 def new_claim(
     *,
     builder: str,
@@ -204,6 +220,7 @@ def new_claim(
     claim_state: str = CLAIM_STATE_PENDING,
     republished_from: 'Optional[Dict[str, Any]]' = None,
     component: str = 'main',
+    arch: str = '',
 ) -> dict:
     """Build an unsigned claim record.  Caller passes the result through
     identity.sign_claim before storing.  The `sig` field is added there.
@@ -239,6 +256,13 @@ def new_claim(
     }
     if republished_from is not None:
         _rec['republished_from'] = republished_from
+    # COMP-04 D4 (additive, like seeds_raw): the artifact's arch — the
+    # FILENAME token ('amd64'/'all'/…) for binaries, 'source' for
+    # source artifacts — so audits and pulls can filter claims to the
+    # arches they can see without re-parsing filenames.  Absent on
+    # pre-D4 claims; readers treat missing as unknown-legacy.
+    if arch:
+        _rec['arch'] = arch
     return _rec
 
 

@@ -635,6 +635,96 @@ def test_generate_pending_claims_threads_component_from_build_record():
 
 
 
+def test_d3_non_primary_drops_all_and_source_claims_and_d4_arch():
+    """COMP-04 D3/D4: with arch_all_owner=False the pending set drops
+    every _all.deb and every source artifact (concrete-arch binaries
+    kept); with the default True everything is claimed.  Every emitted
+    claim carries the D4 arch field: filename token for binaries,
+    'source' for source artifacts."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import publish as _pub
+    from coord import schema as _schema
+    from unittest.mock import patch
+
+    assert _schema.artifact_arch('x_1_all.deb') == 'all'
+    assert _schema.artifact_arch('x_1_i386.udeb') == 'i386'
+    assert _schema.artifact_arch('x_1.dsc') == 'source'
+    assert _schema.artifact_arch('x_1.0.orig.tar.gz') == 'source'
+
+    _rec = {
+        'phase':            'done',
+        'status':           'PASS',
+        'intended_version': '1.0-1+asg1u0',
+        'built_version':    '1.0-1',
+        'outputs':          ['tool_1.0-1+asg1u0_i386.deb',
+                             'tool-data_1.0-1+asg1u0_all.deb'],
+        'output_hashes':    {
+            'tool_1.0-1+asg1u0_i386.deb': 'a' * 64,
+            'tool-data_1.0-1+asg1u0_all.deb': 'b' * 64,
+        },
+        'source_outputs':   ['tool_1.0-1+asg1u0.dsc'],
+        'source_output_hashes': {'tool_1.0-1+asg1u0.dsc': 'c' * 64},
+        'republished_from': {},
+        'pulled_from':      None,
+        'component':        'main',
+        'finished':         '2026-07-26T00:00:00Z',
+    }
+    def _run(owner):
+        with tempfile.TemporaryDirectory() as _tmp:
+            _claims_dir = os.path.join(_tmp, 'claims')
+            os.makedirs(_claims_dir, exist_ok=True)
+            _buildlog = os.path.join(_tmp, 'log', 'build')
+            os.makedirs(_buildlog, exist_ok=True)
+            with open(os.path.join(_buildlog, 'tool.build.json'), 'w') as _fh:
+                _fh.write('{}')
+            with patch.object(_pub._store, 'read_builder_claims',
+                              return_value=[]):
+                return _pub.generate_pending_claims(
+                    builder_id='bs3-i386',
+                    buildlog_dir=_buildlog,
+                    claims_dir=_claims_dir,
+                    public_key_path='/nonexistent',
+                    snapshot_pin='20260705T190150Z',
+                    read_build_record=lambda _bl, _n: _rec,
+                    build_arch='i386',
+                    arch_all_owner=owner,
+                )
+    _foreign = _run(False)
+    _fns = sorted(_c['filename'] for _c in _foreign)
+    assert _fns == ['tool_1.0-1+asg1u0_i386.deb'], \
+        f'non-primary must claim ONLY concrete-arch binaries: {_fns}'
+    assert _foreign[0]['arch'] == 'i386'
+    _primary = _run(True)
+    _fns_p = sorted(_c['filename'] for _c in _primary)
+    assert _fns_p == ['tool-data_1.0-1+asg1u0_all.deb',
+                      'tool_1.0-1+asg1u0.dsc',
+                      'tool_1.0-1+asg1u0_i386.deb']
+    _by = {_c['filename']: _c for _c in _primary}
+    assert _by['tool-data_1.0-1+asg1u0_all.deb']['arch'] == 'all'
+    assert _by['tool_1.0-1+asg1u0.dsc']['arch'] == 'source'
+
+
+def test_d3_config_role_default_and_emit_gates():
+    """arch_all_owner defaults to role=='first' (BS1 keeps today's
+    behavior with zero config; role=federation defaults non-owner) with
+    [Local] ArchAllOwner as explicit override; the post-build emit hook
+    and the manual `source emit` actions are role-gated (verify stays
+    available)."""
+    with open(os.path.join(_ROOT, 'scripts', 'utils.py')) as _fh:
+        _u = _fh.read()
+    assert "'ArchAllOwner'" in _u
+    assert "fallback=(self.system_role == 'first')" in _u
+    with open(os.path.join(_ROOT, 'scripts', 'commands',
+                           'cmd_source.py')) as _fh:
+        _cs = _fh.read()
+    assert _cs.count("getattr(self.config, 'arch_all_owner', True)") >= 2, \
+        'both the post-build hook and cmd_source_emit must be gated'
+    _gate = _cs.index("getattr(self.config, 'arch_all_owner', True)")
+    assert _cs.index("args and args[0] == 'verify'") < _gate, \
+        'verify must be dispatched BEFORE the non-primary gate'
+
+
 def test_generate_pending_claims_covers_source_outputs():
     """MAT-02 stage 5: a record's source_outputs / source_output_hashes
     (written by `source emit`) generate claims like any output — same
@@ -5291,6 +5381,8 @@ TESTS = [
     test_virtual_publish_dry_run_same_sha_no_hash_conflict,
     test_new_claim_threads_component_field,
     test_generate_pending_claims_threads_component_from_build_record,
+    test_d3_non_primary_drops_all_and_source_claims_and_d4_arch,
+    test_d3_config_role_default_and_emit_gates,
     test_generate_pending_claims_covers_source_outputs,
     test_scan_pool_files_includes_source_artifacts_under_source_dirs,
     test_audit_closure_ledger_validates_source_entries,

@@ -69,6 +69,7 @@ def generate_pending_claims(
     read_build_record: Callable[[str, str], 'Optional[dict]'],
     build_arch: 'Optional[str]' = None,
     pool: 'Optional[Dict[str, str]]' = None,
+    arch_all_owner: bool = True,
 ) -> List[dict]:
     """Walk build.json records; for each phase=done / phase=tunneled
     output whose filename isn't already in this builder's live jsonl,
@@ -215,6 +216,15 @@ def generate_pending_claims(
             if build_arch and _arch_filter.is_foreign_target_binary(
                     _fn.split('_', 1)[0], build_arch):
                 continue
+            _fn_arch = _schema.artifact_arch(_fn)
+            # COMP-04 D3: arch:all artifacts are claimed ONLY by the
+            # primary (arch-all-owner) builder — two arches building
+            # the same non-reproducible _all.deb would otherwise trip
+            # the filename-keyed CRITICAL hash-conflict gate.  The
+            # build record keeps the output (local closure needs it);
+            # only the CLAIM is suppressed.
+            if not arch_all_owner and _fn_arch == 'all':
+                continue
             _sha = _hashes.get(_fn)
             if not isinstance(_sha, str) or not _sha:
                 # Pre-coord legacy or skipped backfill — skip.  The
@@ -243,6 +253,7 @@ def generate_pending_claims(
                 claim_state=_schema.CLAIM_STATE_PENDING,
                 republished_from=_rfrom,
                 component=_comp,
+                arch=_fn_arch,
             ))
         # MAT-02 stage 5 — SOURCE artifacts (source_outputs /
         # source_output_hashes, written by `source emit`) are claimed like
@@ -252,8 +263,12 @@ def generate_pending_claims(
         # the verbatim upstream files, so we own their lifecycle
         # (deprecate/reclaim) — the no-owner projection is a BINARY
         # passthrough concept.
-        _src_hashes = _rec.get('source_output_hashes') or {}
-        for _fn in (_rec.get('source_outputs') or []):
+        # COMP-04 D3: source artifacts are indexed in the primary repo
+        # only — non-primary builders never claim them (they run
+        # `source emit verify` at most; see the emit-side gate).
+        _src_hashes = ({} if not arch_all_owner
+                       else _rec.get('source_output_hashes') or {})
+        for _fn in (_rec.get('source_outputs') or []) if arch_all_owner else []:
             if _fn in _known:
                 continue
             _sha = _src_hashes.get(_fn)
@@ -274,6 +289,7 @@ def generate_pending_claims(
                 claim_state=_schema.CLAIM_STATE_PENDING,
                 republished_from=None,
                 component=_comp,
+                arch='source',
             ))
     _pending.sort(key=lambda _c: (_c['package'], _c['filename']))
     return _pending
@@ -672,6 +688,7 @@ def local_publish(
         snapshot_pin=snapshot_pin,
         read_build_record=read_build_record,
         build_arch=getattr(config, 'arch', None),
+        arch_all_owner=getattr(config, 'arch_all_owner', True),
         pool=_pool,
     )
     fill_sizes_from_pool(_pending, _pool)
@@ -1035,6 +1052,7 @@ def remote_publish(
             snapshot_pin=snapshot_pin,
             read_build_record=read_build_record,
             build_arch=getattr(config, 'arch', None),
+            arch_all_owner=getattr(config, 'arch_all_owner', True),
             pool=_pool,
         )
         _pending_total = len(_pending)
