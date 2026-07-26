@@ -27,6 +27,7 @@ because claim writes are idempotent (same seq + same canonical
 bytes = same line).
 """
 
+import json
 import logging
 import os
 from typing import Callable, Dict, List, Optional, Tuple
@@ -780,6 +781,36 @@ def snapshot_divergence_note(local_pin: str, remote_current: str) -> 'Optional[s
             "filename) as long as they are not below the mirror base -- but "
             "verify your asg uN lineage is current first to keep bump "
             "tracking monotonic.")
+
+
+def union_ledger_entries(
+    fetched_entries: 'Dict[str, dict]',
+    own_entries: 'Dict[str, dict]',
+    own_arch: str,
+    arch_all_owner: bool,
+) -> 'Dict[str, dict]':
+    """COMP-04 B5: the shared closure ledger is the UNION of every
+    builder's arch slice — a publisher must never overwrite the whole
+    file with its local repo's view (that strands every other arch's
+    claims at the next pull).  This builder's scope is its own arch
+    (+ 'all' and per-file '|source' entries when it is the D3 owner);
+    fetched entries outside that scope are preserved verbatim, and the
+    own slice replaces the fetched own-scope slice wholesale (so
+    deprecated/renamed own entries genuinely disappear).  Own entries
+    OUTSIDE the scope (e.g. pulled _all bytes present in a foreign
+    builder's local repo) are dropped — the primary owns those keys."""
+    _own_scope = {own_arch}
+    if arch_all_owner:
+        _own_scope |= {'all', 'source'}
+
+    def _scope(_k: str) -> str:
+        return _k.rsplit('|', 1)[1] if '|' in _k else ''
+
+    _out = {_k: _v for _k, _v in (fetched_entries or {}).items()
+            if _scope(_k) not in _own_scope}
+    _out.update({_k: _v for _k, _v in (own_entries or {}).items()
+                 if _scope(_k) in _own_scope})
+    return _out
 
 
 def remote_publish(
@@ -1542,7 +1573,9 @@ def remote_publish(
         # owner writes + pins it; a build-mode peer preserves the fetched
         # head's pin.  Lets peers pull the full closure off a mixed-snapshot
         # mirror without keying on per-claim snapshots.
-        _ledger_sha = (_head_dict or {}).get('closure_ledger_sha256')
+        _own_arch = str(getattr(config, 'arch', '') or '')
+        _ledger_sha = _schema.head_ledger_sha(_head_dict or {}, _own_arch) \
+            or (_head_dict or {}).get('closure_ledger_sha256')
         _wrote_ledger = False
         if getattr(config, 'build_mode', 'distribution') != 'build':
             # Carry the FULL selection authority (4 lists + the owner's verified
@@ -1580,8 +1613,27 @@ def remote_publish(
                     _repo_audit.published_source_ledger_entries(config))
             except Exception:                              # noqa: BLE001
                 _entries = {}     # robust — never abort publish over the ledger
+            # COMP-04 B5: union with the FETCHED shared ledger — other
+            # builders' arch slices are preserved, our scope replaced.
+            _fetched_ledger_entries: 'Dict[str, dict]' = {}
+            try:
+                _flp = _cfgman.closure_ledger_path(_fetched)
+                if os.path.isfile(_flp):
+                    with open(_flp, 'r', encoding='utf-8') as _fh:
+                        _fdoc = json.load(_fh)
+                    if isinstance(_fdoc, dict):
+                        _fe = _fdoc.get('entries')
+                        if isinstance(_fe, dict):
+                            _fetched_ledger_entries = _fe
+            except Exception:                              # noqa: BLE001
+                _fetched_ledger_entries = {}
+            _entries = union_ledger_entries(
+                _fetched_ledger_entries, _entries,
+                str(getattr(config, 'arch', '') or ''),
+                bool(getattr(config, 'arch_all_owner', True)))
             if _entries:
-                _status(f"published ledger: {len(_entries)} binary(ies)")
+                _status(f"published ledger: {len(_entries)} binary(ies) "
+                        f"(union incl. {len(_fetched_ledger_entries)} fetched)")
                 _ledger_doc = _schema.new_closure_ledger(
                     codename=str(getattr(config, 'build_codename', '')),
                     snapshot=str(_ss.get('current') or ''),
@@ -1604,6 +1656,17 @@ def remote_publish(
                 _builders_ring[builder_id] = _own_pub
         _builders = _identity.build_builder_bindings(_builders_ring)
         _status(f"binding {len(_builders)} builder pubkey(s) into coord-head")
+        # COMP-04 B3: per-arch sha maps — preserve every other arch's
+        # pins from the fetched head, update only our own arch's slot.
+        # The legacy scalars carry OUR values for pre-B3 readers.
+        _ir_by_arch = dict((_head_dict or {}).get(
+            'inrelease_sha256_by_arch') or {})
+        _lg_by_arch = dict((_head_dict or {}).get(
+            'closure_ledger_sha256_by_arch') or {})
+        if _own_arch:
+            _ir_by_arch[_own_arch] = _ir_sha
+            if _ledger_sha:
+                _lg_by_arch[_own_arch] = str(_ledger_sha)
         _new_head = _schema.new_coord_head(
             inrelease_sha256=_ir_sha,
             snapshot=_ss,
@@ -1614,6 +1677,8 @@ def remote_publish(
             config_sha256=_config_sha,
             closure_ledger_sha256=_ledger_sha,
             builders=_builders,
+            inrelease_sha256_by_arch=_ir_by_arch or None,
+            closure_ledger_sha256_by_arch=_lg_by_arch or None,
         )
         _status(f"signing coord-head (last_seqs[{builder_id}]={_seq})")
         _ok = _head.write_coord_head(
@@ -1772,6 +1837,10 @@ def revoke_builder(
             config_sha256=_head_dict.get('config_sha256'),
             closure_ledger_sha256=_head_dict.get('closure_ledger_sha256'),
             builders=_head_dict.get('builders'),
+            inrelease_sha256_by_arch=_head_dict.get(
+                'inrelease_sha256_by_arch'),
+            closure_ledger_sha256_by_arch=_head_dict.get(
+                'closure_ledger_sha256_by_arch'),
         )
         _status(f"signing coord-head (revoking {builder_id_to_revoke})")
         if not _head.write_coord_head(

@@ -635,6 +635,89 @@ def test_generate_pending_claims_threads_component_from_build_record():
 
 
 
+def test_b3_b5_b11_per_arch_coord_plumbing():
+    """COMP-04 chunk B pure functions: head per-arch sha resolution
+    (map wins, missing arch is empty, legacy scalar fallback);
+    union_ledger_entries preserves foreign slices and replaces own
+    scope wholesale (incl. dropping own out-of-scope entries);
+    claim_in_arch_scope matrix; coord_root_for_state explicit-vs-
+    derived."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    import mirror as _mirror
+
+    _h = _sch.new_coord_head(
+        inrelease_sha256='aa', snapshot={}, last_seqs={}, head_time='t',
+        inrelease_sha256_by_arch={'amd64': 'aa', 'i386': 'bb'},
+        closure_ledger_sha256_by_arch={'amd64': 'la'})
+    assert _sch.head_inrelease_sha(_h, 'i386') == 'bb'
+    assert _sch.head_inrelease_sha(_h, 'arm64') == ''
+    assert _sch.head_ledger_sha(_h, 'amd64') == 'la'
+    assert _sch.head_inrelease_sha({'inrelease_sha256': 'zz'}, 'i386') == 'zz'
+
+    from coord import publish as _pub
+    _fetched = {
+        'pkg|amd64':   {'v': 1}, 'lib|all': {'v': 1},
+        'src.dsc|source': {'v': 1}, 'pkg|i386': {'v': 'stale'},
+    }
+    _own = {'pkg|i386': {'v': 'new'}, 'pulled|all': {'v': 'x'}}
+    _u = _pub.union_ledger_entries(_fetched, _own, 'i386', False)
+    assert _u['pkg|amd64'] == {'v': 1}, 'foreign slice preserved'
+    assert _u['lib|all'] == {'v': 1}, 'primary-owned all preserved'
+    assert _u['src.dsc|source'] == {'v': 1}, 'primary source preserved'
+    assert _u['pkg|i386'] == {'v': 'new'}, 'own slice replaced'
+    assert 'pulled|all' not in _u, 'own out-of-scope entry dropped'
+    _u2 = _pub.union_ledger_entries(_fetched, {'lib|all': {'v': 2}},
+                                    'amd64', True)
+    assert _u2['lib|all'] == {'v': 2} and 'pkg|amd64' not in _u2, \
+        'primary scope (amd64+all+source) replaced wholesale'
+    assert _u2['pkg|i386'] == {'v': 'stale'}, 'i386 slice preserved'
+
+    assert _sch.claim_in_arch_scope({'arch': 'i386'}, 'i386', False)
+    assert _sch.claim_in_arch_scope({'arch': 'all'}, 'i386', False)
+    assert not _sch.claim_in_arch_scope({'arch': 'amd64'}, 'i386', False)
+    assert not _sch.claim_in_arch_scope({'arch': 'source'}, 'i386', False)
+    assert _sch.claim_in_arch_scope({'arch': 'source'}, 'amd64', True)
+    # legacy claims: filename fallback; unparseable stays in scope
+    assert not _sch.claim_in_arch_scope(
+        {'filename': 'x_1_amd64.deb'}, 'i386', False)
+    assert _sch.claim_in_arch_scope({'filename': 'weird'}, 'i386', False)
+
+    assert _mirror.coord_root_for_state(
+        {'url': 'ssh://u@h/srv/repo-i386',
+         'coord_url': 'ssh://u@h/srv/repo-coord'}) == 'ssh://u@h/srv/repo-coord'
+    assert _mirror.coord_root_for_state(
+        {'url': 'ssh://u@h/srv/asgard'}) == 'ssh://u@h/srv/asgard-coord'
+
+
+def test_b3_b4_wiring_pins():
+    """Source pins: publish preserves other arches' head-map slots and
+    updates only its own; audits filter claims by arch scope; the
+    ledger source-side audit is gated on the primary role; mirror add
+    parses --coord-url and add_mirror validates+stores it."""
+    with open(os.path.join(_ROOT, 'scripts', 'coord',
+                           'publish.py')) as _fh:
+        _p = _fh.read()
+    assert "_ir_by_arch[_own_arch] = _ir_sha" in _p
+    assert 'inrelease_sha256_by_arch=_ir_by_arch or None' in _p
+    assert 'union_ledger_entries(' in _p
+    with open(os.path.join(_ROOT, 'scripts', 'mirror.py')) as _fh:
+        _m = _fh.read()
+    assert 'claim_in_arch_scope(' in _m, \
+        'audit_claims_vs_packages must scope-filter'
+    with open(os.path.join(_ROOT, 'scripts', 'commands',
+                           'cmd_mirror.py')) as _fh:
+        _cm = _fh.read()
+    assert _cm.count('claim_in_arch_scope(') >= 1, \
+        'missing_on_disk fold must scope-filter'
+    assert "own_arch=self.config.arch" in _cm
+    assert "'--coord-url'" in _cm
+    assert "src_idx=(_src_idx if getattr(" in _cm
+    assert _cm.count('coord_root_for_state') >= 8, \
+        'state-bearing coord sites must honor the explicit coord_url'
+
+
 def test_d3_non_primary_drops_all_and_source_claims_and_d4_arch():
     """COMP-04 D3/D4: with arch_all_owner=False the pending set drops
     every _all.deb and every source artifact (concrete-arch binaries
@@ -5381,6 +5464,8 @@ TESTS = [
     test_virtual_publish_dry_run_same_sha_no_hash_conflict,
     test_new_claim_threads_component_field,
     test_generate_pending_claims_threads_component_from_build_record,
+    test_b3_b5_b11_per_arch_coord_plumbing,
+    test_b3_b4_wiring_pins,
     test_d3_non_primary_drops_all_and_source_claims_and_d4_arch,
     test_d3_config_role_default_and_emit_gates,
     test_generate_pending_claims_covers_source_outputs,

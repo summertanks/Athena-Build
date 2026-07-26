@@ -581,6 +581,7 @@ def discover_federation_peers(
     head: dict, *,
     signing_homedir: str, stage_root: str,
     ssh_key: Optional[str] = None,
+    default_coord_url: 'Optional[str]' = None,
 ) -> 'list[dict]':
     """For every URL in ``head['neighbours']``, probe its sidecar and
     classify.  Returns a list of dicts, one per neighbour:
@@ -607,7 +608,11 @@ def discover_federation_peers(
         _url = _rec.get('url') or ''
         if not _url:
             continue
-        _coord = coord_root_for(_url)
+        # COMP-04 B11: under shared coord, a peer record's own coord
+        # is the SAME tree — prefer the record's coord_url, then the
+        # caller's shared default, then the legacy derivation.
+        _coord = (str(_rec.get('coord_url') or '').strip()
+                  or default_coord_url or coord_root_for(_url))
         _stage = os.path.join(stage_root, f"probe-{_idx:02d}")
         _ok, _det, _peer_head = probe_sidecar_head(
             _coord, signing_homedir=signing_homedir, stage_dir=_stage,
@@ -944,8 +949,12 @@ def add_mirror(
     host_type: str = '',
     public_proto: str = '',
     public_url: str = '',
+    coord_url: str = '',
 ) -> 'tuple[bool, str]':
     """Register a new mirror.  Returns (ok, detail).
+
+    `coord_url` (COMP-04 B11): explicit shared-coord root; empty means
+    derive per the `-coord` convention.  Validated like `url`.
 
     Writes ``config/mirror.<name>.state`` ONLY — federation propagation
     to peers (`reconcile-neighbours`) is the caller's next step.
@@ -988,9 +997,18 @@ def add_mirror(
         return False, (
             f"invalid public_proto {public_proto!r} "
             f"(expected one of {sorted(VALID_PROTOS)})")
+    _coord_norm = ''
+    if coord_url:
+        _cn = _normalize_url(coord_url)
+        if _cn is None:
+            return False, (
+                f"invalid coord URL {coord_url!r} "
+                "(ssh:// or file:///abs/path)")
+        _coord_norm = _cn
     _state = {
         'name':             name,
         'url':              _norm,
+        'coord_url':        _coord_norm,
         'type':             _type,
         'ssh_key':          ssh_key or '',
         'host':             host or '',
@@ -1399,6 +1417,8 @@ def _superseded_seqs(claims: 'list[dict]') -> 'set[int]':
 def audit_claims_vs_packages(
     by_builder: 'dict[str, list[dict]]',
     packages_index: 'dict[str, dict]',
+    own_arch: str = '',
+    arch_all_owner: bool = True,
 ) -> 'list[tuple[str, str, str]]':
     """Cross-check every non-retracted claim against the apt-trusted
     Packages index built by :func:`audit_packages_chain`.
@@ -1412,6 +1432,7 @@ def audit_claims_vs_packages(
                                   different bytes than the sidecar
                                   pins)
     """
+    from coord import schema as _cschema
     _findings: 'list[tuple[str, str, str]]' = []
     _seen_pairs: 'set[tuple[str, str]]' = set()
     for _bid, _claims in by_builder.items():
@@ -1426,6 +1447,12 @@ def audit_claims_vs_packages(
                 continue
             _fn = str(_c.get('filename') or '')
             if not _fn:
+                continue
+            # COMP-04 B4: a foreign-concrete-arch claim lives in that
+            # arch's repo — checking it against THIS single-arch index
+            # would false-CRITICAL every cross-builder claim.
+            if own_arch and not _cschema.claim_in_arch_scope(
+                    _c, own_arch, arch_all_owner):
                 continue
             _claim_sha = str(_c.get('sha256') or '')
             _idx = packages_index.get(_fn)
@@ -1510,6 +1537,7 @@ def _canon_url(url: str) -> str:
 def audit_federation_walk(
     per_mirror: 'list[dict]', signing_home: str, cache_dir: str,
     ssh_key: 'Optional[str]' = None,
+    default_coord_url: 'Optional[str]' = None,
 ) -> 'tuple[list[dict], list[tuple[str, str, str]]]':
     """For every neighbour URL declared in any reachable mirror's
     coord-head that ISN'T itself one of our locally-configured mirrors
@@ -1569,7 +1597,9 @@ def audit_federation_walk(
             _peer_name = (derive_name_from_url(_peer_url, 'fqdn')
                           or derive_name_from_url(_peer_url, 'ip')
                           or _peer_url)
-            _coord_root = coord_root_for(_peer_url)
+            _coord_root = (str(_rec.get('coord_url') or '').strip()
+                           or default_coord_url
+                           or coord_root_for(_peer_url))
             _rsync_spec, _ = rsync_spec_for_url(_coord_root)
             _local_dest = _os.path.join(
                 cache_dir, 'walked', _peer_name)
@@ -2277,6 +2307,16 @@ def neighbours_drift(config, name: str) -> 'tuple[str, list[str], list[str]]':
     return ('drift', _missing, _extra)
 
 
+def coord_root_for_state(state: 'dict') -> str:
+    """The coord-tree root for a REGISTERED mirror: the explicit
+    `coord_url` from the mirror state when the operator supplied one
+    (COMP-04 B11 — per-arch pool repos share ONE federation at
+    repo-coord/, which the `-coord` suffix derivation cannot express),
+    else the classic coord_root_for() derivation from the pool URL."""
+    _explicit = str(state.get('coord_url') or '').strip()
+    return _explicit or coord_root_for(str(state.get('url') or ''))
+
+
 def coord_root_for(pool_url: str) -> str:
     """Derive the sidecar (coord-tree) root URL from the apt-pool URL.
 
@@ -2411,7 +2451,7 @@ def reconcile_neighbours(
         _ssh_key = _st.get('ssh_key') or None
         # reconcile-neighbours operates on the SIDECAR tree (coord root),
         # not the apt pool — that's where coord-head lives.
-        _coord_url = coord_root_for(_url)
+        _coord_url = coord_root_for_state(_st)
         _spec, _ssh_host = rsync_spec_for_url(_coord_url)
         _stage = os.path.join(_stage_root, _name, 'staging')
         try:

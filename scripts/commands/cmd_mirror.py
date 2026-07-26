@@ -240,7 +240,10 @@ class MirrorCommandsMixin(SessionState):
     _MIRROR_ADD_USAGE = (
         "Usage: mirror add <ip|fqdn|local> <ssh-or-file-url> "
         "[--ssh-key PATH] [--proto http|https] [--name NAME] "
-        "[--no-probe] [--yes]"
+        "[--coord-url URL] [--no-probe] [--yes]\n"
+        "  --coord-url: explicit shared federation coord tree "
+        "(default: <url>-coord) — per-arch repos all point at the one "
+        "repo-coord/"
     )
 
     def _parse_mirror_add_args(self, args):
@@ -258,6 +261,7 @@ class MirrorCommandsMixin(SessionState):
             'name':       None,
             'no_probe':   False,
             'yes':        False,
+            'coord_url':  None,
         }
         _i = 2
         while _i < len(args):
@@ -270,6 +274,9 @@ class MirrorCommandsMixin(SessionState):
                 _i += 2
             elif _a in ('--name',) and _i + 1 < len(args):
                 _parsed['name'] = args[_i + 1]
+                _i += 2
+            elif _a in ('--coord-url',) and _i + 1 < len(args):
+                _parsed['coord_url'] = args[_i + 1]
                 _i += 2
             elif _a == '--no-probe':
                 _parsed['no_probe'] = True
@@ -469,7 +476,8 @@ class MirrorCommandsMixin(SessionState):
         _peer_head: 'Optional[dict]' = None
         _discovered: 'list[dict]' = []
         if _is_ssh:
-            _coord_url = _mirror.coord_root_for(_normalised)
+            _coord_url = (_parsed.get('coord_url')
+                          or _mirror.coord_root_for(_normalised))
             _stage_root = os.path.join(
                 self.config.dir_cache, 'mirror', _name, 'probe')
             _ok, _det, _peer_head = _mirror.probe_sidecar_head(
@@ -538,6 +546,7 @@ class MirrorCommandsMixin(SessionState):
             ssh_key=_parsed['ssh_key'], seed_pin=_seed,
             host=_host, host_type=_host_type,
             public_proto=_proto or '', public_url=_public_url,
+            coord_url=_parsed.get('coord_url') or '',
         )
         console.print(
             f"mirror add: {_detail}",
@@ -587,6 +596,7 @@ class MirrorCommandsMixin(SessionState):
                 ssh_key=_parsed['ssh_key'], seed_pin=_seed,
                 host=_peer_host, host_type=_peer_host_type,
                 public_proto=_peer_proto, public_url=_peer_public_url,
+                coord_url=_parsed.get('coord_url') or '',
             )
             console.print(
                 f"  peer {_peer_name}: {_pdet}",
@@ -661,7 +671,10 @@ class MirrorCommandsMixin(SessionState):
         console.print(
             "\nexisting coord-head on this peer:", tui.COLOR_HIGHLIGHT)
         _ts = head.get('head_time') or '(unknown)'
-        _ir = head.get('inrelease_sha256') or '(unknown)'
+        _ir_by = head.get('inrelease_sha256_by_arch') or {}
+        _ir = (', '.join(f'{_a}:{str(_s)[:12]}…'
+                         for _a, _s in sorted(_ir_by.items()))
+               if _ir_by else head.get('inrelease_sha256') or '(unknown)')
         _ls = head.get('last_seqs') or {}
         _nb = head.get('neighbours') or []
         console.print(f"  head_time:       {_ts}")
@@ -934,6 +947,14 @@ class MirrorCommandsMixin(SessionState):
             for _c in _claims:
                 _fn = _c.get('filename')
                 if not (isinstance(_fn, str) and _fn):
+                    continue
+                # COMP-04 B4: claims outside this repo's arch scope
+                # (foreign concrete arch; sources on a non-primary)
+                # belong to another repo's disk — not missing HERE.
+                _cfg = getattr(self, 'config', None)
+                if not _schema.claim_in_arch_scope(
+                        _c, getattr(_cfg, 'arch', ''),
+                        getattr(_cfg, 'arch_all_owner', True)):
                     continue
                 if _schema.is_superseded_claim(_c, _dead_seqs):
                     _state_marked.add(_fn)
@@ -1442,7 +1463,7 @@ class MirrorCommandsMixin(SessionState):
             # URL.  Pool serves apt clients; sidecar lives at the sibling
             # `-coord` path on the same host.
             _pool_spec, _ssh_host = _mirror.rsync_spec_for_url(_url)
-            _coord_url = _mirror.coord_root_for(_url)
+            _coord_url = _mirror.coord_root_for_state(_st)
             _coord_spec, _coord_ssh_host = _mirror.rsync_spec_for_url(
                 _coord_url)
             # ssh_host derived from EITHER (they should agree); coord
@@ -1672,7 +1693,7 @@ class MirrorCommandsMixin(SessionState):
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
             _, _coord_ssh = _mirror.rsync_spec_for_url(
-                _mirror.coord_root_for(_url))
+                _mirror.coord_root_for_state(_st))
             _, _pool_ssh = _mirror.rsync_spec_for_url(_url)
             _ssh_host = _coord_ssh or _pool_ssh
             if not _ssh_host:
@@ -1795,7 +1816,7 @@ class MirrorCommandsMixin(SessionState):
             # the sidecar tree.  Pool is the operator-registered URL;
             # coord is the `-coord` sibling.
             _pool_spec, _ = _mirror.rsync_spec_for_url(_url)
-            _coord_url = _mirror.coord_root_for(_url)
+            _coord_url = _mirror.coord_root_for_state(_st)
             _coord_spec, _ = _mirror.rsync_spec_for_url(_coord_url)
             console.print(
                 f"mirror pull {_n}: ← {_url}", tui.COLOR_HIGHLIGHT)
@@ -2011,7 +2032,9 @@ class MirrorCommandsMixin(SessionState):
 
             # Fetch + verify the signed closure ledger (head-pinned).
             import coord.config_manifest as _cfgman
-            _ledger_sha = str(_head.get('closure_ledger_sha256') or '')
+            import coord.schema as _csch
+            _ledger_sha = _csch.head_ledger_sha(
+                _head, getattr(self.config, 'arch', ''))
             _ledger = None
             if _ledger_sha:
                 _lg_ok, _lg_detail, _ledger = (
@@ -2236,7 +2259,7 @@ class MirrorCommandsMixin(SessionState):
             assert _st is not None
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
-            _coord_url = _mirror.coord_root_for(_url)
+            _coord_url = _mirror.coord_root_for_state(_st)
             _coord_spec, _ = _mirror.rsync_spec_for_url(_coord_url)
             console.print(
                 f"mirror reclaim {_n}: ← {_url}", tui.COLOR_HIGHLIGHT)
@@ -2381,7 +2404,7 @@ class MirrorCommandsMixin(SessionState):
             assert _st is not None
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
-            _coord_url = _mirror.coord_root_for(_url)
+            _coord_url = _mirror.coord_root_for_state(_st)
             _coord_spec, _ = _mirror.rsync_spec_for_url(_coord_url)
             console.print(
                 f"mirror withdraw-foreign {_n}: ← {_url}",
@@ -2483,7 +2506,7 @@ class MirrorCommandsMixin(SessionState):
         _ssh_key = state.get('ssh_key') or None
         if not _url:
             return False
-        _coord_url = _mirror.coord_root_for(_url)
+        _coord_url = _mirror.coord_root_for_state(state)
         _stage = os.path.join(
             self.config.dir_cache, 'mirror', mirror_name, 'probe-head')
         try:
@@ -2702,6 +2725,7 @@ class MirrorCommandsMixin(SessionState):
         import mirror as _mirror
         import signing
         import coord.head as _head_mod
+        import coord.schema as _c_schema
         import coord.transport as _transport
         import coord.reconcile as _reconcile
 
@@ -2729,7 +2753,7 @@ class MirrorCommandsMixin(SessionState):
             assert _st is not None
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
-            _coord_url = _mirror.coord_root_for(_url)
+            _coord_url = _mirror.coord_root_for_state(_st)
             _coord_spec, _ = _mirror.rsync_spec_for_url(_coord_url)
             console.print(f"[{_n}] {_url}", tui.COLOR_HIGHLIGHT)
             _fetched = os.path.join(
@@ -2803,7 +2827,8 @@ class MirrorCommandsMixin(SessionState):
             _codename = str(self.config.build_codename).strip('"').strip("'")
             _release, _ir_findings = _mirror.audit_inrelease_against_head(
                 pool_url=_url, codename=_codename,
-                expected_sha256=str(_head.get('inrelease_sha256') or ''),
+                expected_sha256=_c_schema.head_inrelease_sha(
+                    _head, getattr(self.config, 'arch', '')),
                 fetched_dir=os.path.join(_fetched, 'apt'),
                 ssh_key=_ssh_key,
             )
@@ -2910,7 +2935,10 @@ class MirrorCommandsMixin(SessionState):
                 # source claim doesn't false-flag claim_not_in_apt_index.
                 _pkg_idx.update(_src_idx)
                 _claim_idx_findings = _mirror.audit_claims_vs_packages(
-                    _by_builder, _pkg_idx)
+                    _by_builder, _pkg_idx,
+                    own_arch=self.config.arch,
+                    arch_all_owner=getattr(
+                        self.config, 'arch_all_owner', True))
                 _claim_idx_crit = [_f for _f in _claim_idx_findings
                                    if _f[0] == 'CRITICAL']
                 # First 10 findings inlined; rest summarised so a single
@@ -2931,7 +2959,8 @@ class MirrorCommandsMixin(SessionState):
                 # signed on-mirror ledger matches it.  CRITICAL gates the
                 # audit; absent ledger (old owner) → no findings.
                 import coord.config_manifest as _cfgman
-                _ledger_sha = str(_head.get('closure_ledger_sha256') or '')
+                _ledger_sha = _c_schema.head_ledger_sha(
+                    _head, getattr(self.config, 'arch', ''))
                 _lg_ok, _lg_detail, _signed_ledger = (
                     _cfgman.read_verified_closure_ledger(_fetched, _ledger_sha))
                 if _ledger_sha and not _lg_ok:
@@ -2961,9 +2990,16 @@ class MirrorCommandsMixin(SessionState):
                                 _texts.append(_fh.read())
                     except OSError:
                         pass
+                    # COMP-04 B4/src_idx gate: on a non-primary
+                    # builder the union ledger's |source entries belong
+                    # to the PRIMARY repo — auditing them against this
+                    # repo's (legitimately absent) source tree would
+                    # false-CRITICAL every one.  src_idx=None skips the
+                    # source side entirely here.
                     _lg_findings = _mirror.audit_closure_ledger(
                         _signed_ledger, _pkg_idx, _cbins, '\n'.join(_texts),
-                        src_idx=_src_idx)
+                        src_idx=(_src_idx if getattr(
+                            self.config, 'arch_all_owner', True) else None))
                     _ledger_crit = [_f for _f in _lg_findings
                                     if _f[0] == 'CRITICAL']
                     for _sev, _kind, _msg in _lg_findings[:10]:
@@ -3549,7 +3585,7 @@ class MirrorCommandsMixin(SessionState):
                 "`mirror add` first (or `mirror list`).", tui.COLOR_ERROR)
             return False
         _coord_spec, _ = _mirror.rsync_spec_for_url(
-            _mirror.coord_root_for(_st.get('url', '')))
+            _mirror.coord_root_for_state(_st))
         _ssh_key = _st.get('ssh_key') or None
         _remote_pub = (_coord_spec.rstrip('/')
                        + f'/keyring/builders/{_bid}.pub')
@@ -3830,7 +3866,7 @@ class MirrorCommandsMixin(SessionState):
                 _all_ok = False
                 continue
             _coord_spec, _ssh_host = _mirror.rsync_spec_for_url(
-                _mirror.coord_root_for(_st.get('url', '')))
+                _mirror.coord_root_for_state(_st))
             _ok, _detail = _publish.revoke_builder(
                 builder_id_to_revoke=_target_id,
                 config=self.config,

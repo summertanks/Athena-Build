@@ -205,6 +205,27 @@ def artifact_arch(filename: str) -> str:
     return ''
 
 
+def claim_in_arch_scope(claim: 'dict', own_arch: str,
+                        arch_all_owner: bool = True) -> bool:
+    """COMP-04 B4: should THIS builder's audits/pulls consider this
+    claim against its own single-arch repo?  In scope: own concrete
+    arch; 'all' (D1: every per-arch repo carries the primary's _all
+    bytes verbatim); 'source' only for the primary (sources are
+    indexed in the primary repo alone).  Foreign concrete arches
+    belong to that arch's repo audit.  Legacy claims without the D4
+    field fall back to the filename token; unparseable → in scope
+    (audit conservatively rather than silently skip)."""
+    if not own_arch:
+        return True          # arch-less caller (fixture/legacy) — no filter
+    _a = str(claim.get('arch') or '') or artifact_arch(
+        str(claim.get('filename') or ''))
+    if not _a or _a == own_arch or _a == 'all':
+        return True
+    if _a == 'source':
+        return arch_all_owner
+    return False
+
+
 def new_claim(
     *,
     builder: str,
@@ -542,6 +563,8 @@ def new_coord_head(
     config_sha256: 'Optional[str]' = None,
     closure_ledger_sha256: 'Optional[str]' = None,
     builders: 'Optional[Dict[str, str]]' = None,
+    inrelease_sha256_by_arch: 'Optional[Dict[str, str]]' = None,
+    closure_ledger_sha256_by_arch: 'Optional[Dict[str, str]]' = None,
 ) -> dict:
     """The signed canonical state snapshot.  GPG-clearsigned by the
     tier-1 (InRelease) signing key, stored at <mirror-root>/coord-head.json.
@@ -596,7 +619,37 @@ def new_coord_head(
     # peers treat a head with no `builders` as not-yet-migrated).
     if builders:
         _head['builders'] = dict(builders)
+    # COMP-04 B3: under per-arch repos each builder publishes its OWN
+    # InRelease + ledger; a single scalar sha would be overwritten by
+    # whichever arch published last, firing false inrelease_sha_mismatch
+    # CRITICALs on every other builder.  Additive maps {arch: sha};
+    # the legacy scalars stay populated with the WRITING builder's
+    # values so pre-B3 readers keep working during transition.  Readers
+    # use head_inrelease_sha()/head_ledger_sha().
+    if inrelease_sha256_by_arch:
+        _head['inrelease_sha256_by_arch'] = dict(inrelease_sha256_by_arch)
+    if closure_ledger_sha256_by_arch:
+        _head['closure_ledger_sha256_by_arch'] = dict(
+            closure_ledger_sha256_by_arch)
     return _head
+
+
+def head_inrelease_sha(head: 'dict', arch: str = '') -> str:
+    """The InRelease sha this head pins FOR AN ARCH: the B3 per-arch
+    map when present (missing arch → ''), else the legacy scalar."""
+    _by = head.get('inrelease_sha256_by_arch')
+    if isinstance(_by, dict) and _by:
+        return str(_by.get(arch, '') or '') if arch else ''
+    return str(head.get('inrelease_sha256') or '')
+
+
+def head_ledger_sha(head: 'dict', arch: str = '') -> str:
+    """closure-ledger sha for an arch — same resolution rule as
+    head_inrelease_sha."""
+    _by = head.get('closure_ledger_sha256_by_arch')
+    if isinstance(_by, dict) and _by:
+        return str(_by.get(arch, '') or '') if arch else ''
+    return str(head.get('closure_ledger_sha256') or '')
 
 
 def canonicalize_neighbour_records(items: 'list') -> 'list':

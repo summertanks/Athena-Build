@@ -4565,8 +4565,9 @@ def test_mirror_pull_routes_and_records_source_artifacts():
         'pull record writer must split source artifacts to the source keys'
     assert '_pkg_idx.update(_src_idx)' in _c, \
         'claims cross-check must include the Sources index'
-    assert 'src_idx=_src_idx' in _c, \
-        'ledger validation must receive the Sources index'
+    assert 'src_idx=(_src_idx if getattr(' in _c, \
+        'ledger validation must receive the Sources index (gated on the ' \
+        'D3 primary role — non-primary repos carry no source tree)'
     _tp = os.path.join(_ROOT, 'scripts', 'coord', 'transport.py')
     with open(_tp) as _fh:
         _t = _fh.read()
