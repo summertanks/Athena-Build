@@ -112,7 +112,18 @@ _CONTAINER_ENV = {'USER': 'athena', 'LOGNAME': 'athena'}
 # confinement of the build; the container already grants the build
 # passwordless sudo and is treated as a throwaway sandbox (MAT-04
 # covers the host-facing mounts), so drop both filters.
-_CONTAINER_SECURITY_OPT = ['seccomp=unconfined', 'apparmor=unconfined']
+#
+# systempaths=unconfined is the third half of the same problem: docker's
+# masked /proc entries + read-only /sys make the kernel refuse fresh
+# procfs/sysfs mounts inside user namespaces (the "fully visible" rule),
+# so bubblewrap's test-run.sh dies on "Can't mount proc on /newroot/proc"
+# and network-manager's platform tests on 'mount("/sys") → EPERM'
+# (2026-11-08 run, BS1 on Docker 29.9.3 / kernel 6.12).  Verified in the
+# build image: with masking, `unshare -Urmp --fork mount -t proc` is
+# EPERM; with systempaths=unconfined, proc and sysfs mounts succeed.
+# Buildds (sbuild chroots) have no such masking.
+_CONTAINER_SECURITY_OPT = [
+    'seccomp=unconfined', 'apparmor=unconfined', 'systempaths=unconfined']
 
 # serialises segregate's per-file moves from
 # every worker's scratch dir into the shared repo subdirs.  Held
