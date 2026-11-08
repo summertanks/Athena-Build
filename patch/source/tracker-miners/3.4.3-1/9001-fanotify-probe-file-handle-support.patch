@@ -1,0 +1,56 @@
+Description: monitor: fall back to inotify when the fs has no file-handle support
+ The fanotify monitor backend is selected whenever fanotify_init()
+ succeeds (CAP_SYS_ADMIN).  On overlayfs — e.g. the privileged Athena
+ build container, or any containerized deployment — fanotify_init()
+ succeeds but every name_to_handle_at() fails with EOPNOTSUPP, so the
+ backend cannot add a single mark and the miner-monitor test aborts:
+ .
+   Bail out! Tracker-FATAL-WARNING: Could not get file handle for
+   '/tmp/monitor-test-...': Operation not supported
+ .
+ (Before the build container ran privileged, fanotify_init() failed and
+ the GLib/inotify backend was silently used, which is why the suite
+ passed in July.)  Probe name_to_handle_at() on the tmp dir during
+ GInitable init, before fanotify_init(): with handle_bytes = 0 a
+ supported filesystem answers EOVERFLOW, an unsupported one EOPNOTSUPP.
+ On failure return FALSE so tracker_monitor_new()'s existing fallback
+ chain picks the GLib/inotify backend — the correct behaviour on such
+ systems at runtime too, not only under the test suite.
+Origin: vendor, Athena-Build
+Forwarded: no (could be upstreamed; upstream has since reworked monitors)
+Author: Athena-Build
+Last-Update: 2026-11-08
+---
+--- a/src/libtracker-miner/tracker-monitor-fanotify.c
++++ b/src/libtracker-miner/tracker-monitor-fanotify.c
+@@ -426,6 +426,30 @@
+ 
+ 	TRACKER_NOTE (MONITORS, g_message ("Monitor backend is Fanotify"));
+ 
++	{
++		/* Probe for file-handle support on the tmp dir's filesystem:
++		 * overlayfs (e.g. a containerized build or deployment) lets
++		 * fanotify_init() succeed but fails every name_to_handle_at()
++		 * with EOPNOTSUPP, leaving the backend unable to add any
++		 * mark.  Fail initialization here instead, so that
++		 * tracker_monitor_new() falls back to the GLib/inotify
++		 * backend.  handle_bytes = 0 makes a supported filesystem
++		 * answer EOVERFLOW without needing a payload buffer. */
++		struct file_handle probe = { 0, };
++		int probe_mntid;
++
++		if (name_to_handle_at (AT_FDCWD, g_get_tmp_dir (),
++		                       &probe, &probe_mntid, 0) < 0 &&
++		    errno != EOVERFLOW) {
++			g_set_error (error,
++			             G_IO_ERROR,
++			             g_io_error_from_errno (errno),
++			             "File handles unsupported on %s: %m",
++			             g_get_tmp_dir ());
++			return FALSE;
++		}
++	}
++
+ 	monitor->fanotify_fd = fanotify_init (FAN_CLOEXEC |
+ 	                                      FAN_CLASS_NOTIF |
+ 	                                      FAN_REPORT_DFID_NAME,
