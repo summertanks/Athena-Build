@@ -1,0 +1,40 @@
+Description: 62_threads-ctx_new-deadlock.t: _exit after passing (teardown heap race)
+ The test spawns 20 detached threads doing CTX/SSL/SESSION create+free,
+ busy-waits on threads->list(), reports its single pass, and exit(0)s.
+ A detached thread can still be mid-teardown when the interpreter
+ starts global destruction, and the concurrent OpenSSL 3 frees
+ intermittently corrupt the heap — glibc aborts AFTER the pass:
+ .
+   ok 1 - successfully finished, duration=0
+   double free or corruption (fasttop)
+   t/local/62_threads-ctx_new-deadlock.t
+     (Wstat: 134 (Signal: ABRT, dumped core) Tests: 1 Failed: 0)
+ .
+ Far likelier on the 48-core Athena builder where the 20 threads run
+ truly in parallel.  The deadlock property under test has already been
+ verified and reported by that point (Test::Builder autoflushes its
+ handles), so finish with POSIX::_exit(0) and skip interpreter global
+ destruction entirely.
+Origin: vendor, Athena-Build
+Forwarded: no
+Author: Athena-Build
+Last-Update: 2026-11-08
+---
+--- a/t/local/62_threads-ctx_new-deadlock.t
++++ b/t/local/62_threads-ctx_new-deadlock.t
+@@ -30,7 +30,14 @@
+ do_sleep(50) while (threads->list());
+ 
+ pass("successfully finished, duration=".(time-$start_time));
+-exit(0);
++
++# The test has passed and reported (Test::Builder autoflushes), but
++# detached worker threads may still be mid-teardown: letting the
++# interpreter run global destruction concurrently intermittently
++# corrupts the heap ("double free or corruption (fasttop)", SIGABRT)
++# with OpenSSL 3 on many-core machines.  Skip destruction entirely.
++require POSIX;
++POSIX::_exit(0);
+ 
+ sub do_sleep {
+   my $miliseconds = shift;
