@@ -1,0 +1,50 @@
+Description: test-service: use a per-process daemon control directory
+ test_service_setup() launches gnome-keyring-daemon with a FIXED
+ control directory, /tmp/keyring-test.  The setup is shared by all the
+ test-dbus-* binaries, which run concurrently under a parallel
+ `make check` (TESTSUITEFLAGS=-j48 on the 48-core Athena builder), so
+ two daemons collide on the directory, one never appears on the bus,
+ and the g_bus_watch_name wait times out:
+ .
+   ERROR:daemon/dbus/test-service.c:100:test_service_setup:
+   assertion failed: (egg_test_wait_until (20000) != FALSE)
+   ERROR: test-dbus-portal process failed: -6
+ .
+ Every other daemon test (test-startup, test-shutdown) already uses a
+ unique scratch directory as the control directory; give this shared
+ setup a per-pid one too.  Passed on the old low-core builder whose
+ narrower test parallelism rarely overlapped the binaries.
+Origin: vendor, Athena-Build
+Forwarded: no
+Author: Athena-Build
+Last-Update: 2026-11-08
+---
+--- a/daemon/dbus/test-service.c
++++ b/daemon/dbus/test-service.c
+@@ -67,16 +67,25 @@
+ 	GVariant *output;
+ 	gchar **env;
+ 
++	/* The control directory must be unique per test process: the
++	 * test-dbus-* binaries share this setup and run concurrently under
++	 * a parallel make check, and daemons colliding on a fixed
++	 * /tmp/keyring-test leave one of them unable to come up, timing
++	 * out the service watch below. */
++	static gchar control_directory[64];
+ 	const gchar *args[] = {
+ 		BUILDDIR "/gnome-keyring-daemon",
+ 		"--foreground",
+ 		"--control-directory",
+-		"/tmp/keyring-test",
++		control_directory,
+ 		"--components",
+ 		"secrets",
+ 		NULL,
+ 	};
+ 
++	g_snprintf (control_directory, sizeof (control_directory),
++	            "/tmp/keyring-test-%d", (int) getpid ());
++
+ 	test->bus_name = g_strdup_printf ("org.gnome.keyring.Test.t%d", getpid ());
+ 
+ 	test->watch_id = g_bus_watch_name (G_BUS_TYPE_SESSION, test->bus_name,
