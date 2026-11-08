@@ -1,0 +1,44 @@
+Description: doc: serialize the three doxygen runs (parallel-make race)
+ The doc target depends on three independent add_custom_command rules
+ (Doxyfile html, Doxyfile-1 man1, Doxyfile-5 man5) that each run
+ doxygen writing under the shared doc output tree.  Under a parallel
+ make (dpkg default -jN; -j48 on the Athena builder) they run
+ concurrently and race creating the shared output directories —
+ doxygen 1.9.4 aborts:
+ .
+   error: Could not create output directory
+   .../obj-x86_64-linux-gnu/doc/man
+   make[3]: *** [doc/CMakeFiles/doc.dir/build.make:91:
+   doc/man/man5/editorconfig-format.5] Error 1
+ .
+ Chain the commands (man1 after html, man5 after man1) so the three
+ doxygen invocations serialize; doc generation is a trivial fraction
+ of the build so the lost parallelism is irrelevant.
+Origin: vendor, Athena-Build
+Forwarded: no
+Author: Athena-Build
+Last-Update: 2026-11-08
+---
+--- a/doc/CMakeLists.txt
++++ b/doc/CMakeLists.txt
+@@ -76,6 +76,11 @@
+             ${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile.in
+             DEPENDS
+             ${PROJECT_SOURCE_DIR}/include/editorconfig/editorconfig.h
++            # Serialize after the main doxygen run: concurrent doxygen
++            # instances race creating the shared output directories under
++            # a parallel make and abort with "Could not create output
++            # directory" (seen at -j48).
++            ${CMAKE_CURRENT_BINARY_DIR}/html/index.html
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+ 
+         # Generating man page editorconfig-format.5. Although we have other
+@@ -93,6 +98,8 @@
+             ${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile.in
+             DEPENDS
+             ${PROJECT_SOURCE_DIR}/include/editorconfig/editorconfig.h
++            # Serialize after the man1 doxygen run (see above).
++            ${CMAKE_CURRENT_BINARY_DIR}/man/man1/editorconfig.1
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+ 
+         # doc generation target
