@@ -113,17 +113,25 @@ _CONTAINER_ENV = {'USER': 'athena', 'LOGNAME': 'athena'}
 # passwordless sudo and is treated as a throwaway sandbox (MAT-04
 # covers the host-facing mounts), so drop both filters.
 #
-# systempaths=unconfined is the third half of the same problem: docker's
-# masked /proc entries + read-only /sys make the kernel refuse fresh
-# procfs/sysfs mounts inside user namespaces (the "fully visible" rule),
-# so bubblewrap's test-run.sh dies on "Can't mount proc on /newroot/proc"
-# and network-manager's platform tests on 'mount("/sys") → EPERM'
-# (2026-11-08 run, BS1 on Docker 29.9.3 / kernel 6.12).  Verified in the
-# build image: with masking, `unshare -Urmp --fork mount -t proc` is
-# EPERM; with systempaths=unconfined, proc and sysfs mounts succeed.
-# Buildds (sbuild chroots) have no such masking.
-_CONTAINER_SECURITY_OPT = [
-    'seccomp=unconfined', 'apparmor=unconfined', 'systempaths=unconfined']
+# Docker's masked /proc entries + read-only /sys are the third half of
+# the same problem: the kernel refuses fresh procfs/sysfs mounts inside
+# user namespaces when the parent's are masked (the "fully visible"
+# rule), so bubblewrap's test-run.sh dies on "Can't mount proc on
+# /newroot/proc" and network-manager's platform tests on
+# 'mount("/sys") → EPERM' (2026-11-08 run, BS1 on Docker 29.9.3 /
+# kernel 6.12).  Verified in the build image: with masking,
+# `unshare -Urmp --fork mount -t proc` is EPERM; unmasked, proc and
+# sysfs mounts succeed.  The CLI spelling `--security-opt
+# systempaths=unconfined` is a docker-CLI translation to
+# MaskedPaths=[]/ReadonlyPaths=[], which the API (docker-py) neither
+# accepts as a security_opt (500: invalid --security-opt) nor exposes
+# as a kwarg — so the containers run `privileged` instead, which
+# unmasks the paths (docs/security.md already treats the build
+# container as a privileged throwaway sandbox, and the disk-image
+# chroot path runs privileged for the same reason).  Buildds (sbuild
+# chroots) have no such masking.
+_CONTAINER_SECURITY_OPT = ['seccomp=unconfined', 'apparmor=unconfined']
+_CONTAINER_PRIVILEGED = True
 
 # serialises segregate's per-file moves from
 # every worker's scratch dir into the shared repo subdirs.  Held
@@ -1444,6 +1452,7 @@ class BuildContainer:
                 labels=self._container_labels,
                 environment=_CONTAINER_ENV,
                 security_opt=_CONTAINER_SECURITY_OPT,
+                privileged=_CONTAINER_PRIVILEGED,
                 volumes=_volumes,
                 **self._resource_kwargs(),
             )
@@ -1865,6 +1874,7 @@ class BuildContainer:
                 labels=self._container_labels,
                 environment=_CONTAINER_ENV,
                 security_opt=_CONTAINER_SECURITY_OPT,
+                privileged=_CONTAINER_PRIVILEGED,
             )
             self._register_live(container)
             _buf: bytes = b''
@@ -2014,6 +2024,7 @@ class BuildContainer:
                 labels=self._container_labels,
                 environment=_CONTAINER_ENV,
                 security_opt=_CONTAINER_SECURITY_OPT,
+                privileged=_CONTAINER_PRIVILEGED,
                 volumes=_grub_volumes,
             )
             self._register_live(container)
