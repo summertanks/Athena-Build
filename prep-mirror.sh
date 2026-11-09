@@ -204,10 +204,31 @@ if [ -f "$MARKER" ]; then
     else echo "INV_marker=foreign"; fi
 else echo "INV_marker=absent"; fi
 # serving + whether the SERVED root is the release index page (vs a listing)
+# + root CORRELATION: a 200 at URL_PATH proves only that SOMETHING answers.
+# An alias left behind by an earlier prep (different root, same /<dist-id>
+# path) answers too — drop a nonce file into ROOT and fetch it through the
+# URL; only the tree the web server actually serves passes.  (Caught live
+# 2026-11-09: an 04:19 prep aliased the path to an old root, the 04:22
+# re-prep derived a new root, saw serving=yes, skipped the web-server step —
+# and publish then landed in a tree HTTP never served.)
 if curl -fsS "http://localhost${URL_PATH}/" >/dev/null 2>&1; then
     echo "INV_serving=yes"
     if curl -fsS "http://localhost${URL_PATH}/" 2>/dev/null | grep -q 'athena-release-index'; then echo "INV_index=yes"; else echo "INV_index=no"; fi
-else echo "INV_serving=no"; echo "INV_index=no"; fi
+    _nonce=".prep-probe-$$"
+    if [ -d "$ROOT" ] && echo ok >"${ROOT}/${_nonce}" 2>/dev/null; then
+        chmod o+r "${ROOT}/${_nonce}" 2>/dev/null || true
+        if curl -fsS "http://localhost${URL_PATH}/${_nonce}" >/dev/null 2>&1; then
+            echo "INV_rootmatch=yes"
+        else
+            echo "INV_rootmatch=no"
+        fi
+        rm -f "${ROOT}/${_nonce}"
+    else
+        # URL answers but ROOT is absent/unwritable → whatever is being
+        # served, it is provably not this root
+        echo "INV_rootmatch=no"
+    fi
+else echo "INV_serving=no"; echo "INV_index=no"; echo "INV_rootmatch=na"; fi
 REMOTE
 )"
 
@@ -215,7 +236,7 @@ REMOTE
 WHOAMI=''; REMOTE_HOME=''; ROOT=''; COORD=''; SUDO=''; WRITABLE=''
 ROOT_NOTDIR=''; ROOT_NONEMPTY=''; TOOLS_MISSING=''
 INV_dists=''; INV_iso=''; INV_claims=''; INV_keyring=''
-INV_marker=''; INV_serving=''; INV_index=''
+INV_marker=''; INV_serving=''; INV_index=''; INV_rootmatch=''
 while IFS='=' read -r _k _v; do
     case "$_k" in
         WHOAMI) WHOAMI="$_v" ;; HOME) REMOTE_HOME="$_v" ;;
@@ -226,6 +247,7 @@ while IFS='=' read -r _k _v; do
         INV_claims) INV_claims="$_v" ;; INV_keyring) INV_keyring="$_v" ;;
         INV_marker) INV_marker="$_v" ;; INV_serving) INV_serving="$_v" ;;
         INV_index) INV_index="$_v" ;; TOOLS_MISSING) TOOLS_MISSING="$_v" ;;
+        INV_rootmatch) INV_rootmatch="$_v" ;;
     esac
 done <<< "$PROBE"
 [ -n "$ROOT" ] || die "could not inspect remote (probe returned: ${PROBE:-<empty>})"
@@ -258,6 +280,9 @@ printf '   %s  coord claims/          %s\n' "$(mark "$INV_claims")"  "$INV_claim
 printf '   %s  coord keyring/         %s\n' "$(mark "$INV_keyring")" "$INV_keyring"
 printf '   %s  mirror-info.json       %s\n' "$(mark "$INV_marker")"  "$INV_marker"
 printf '   %s  HTTP serving %s/   %s\n'     "$(mark "$INV_serving")" "$URL_PATH" "$INV_serving"
+if [ "$INV_serving" = yes ]; then
+    printf '   %s  serves THIS root       %s\n' "$(mark "$INV_rootmatch")" "$INV_rootmatch"
+fi
 printf '   %s  index page at root     %s\n' "$(mark "$INV_index")"   "$INV_index"
 if [ -n "$TOOLS_MISSING" ]; then
     printf '   %s  tools                  missing: %s\n' "$(mark missing)" "$TOOLS_MISSING"
@@ -320,16 +345,29 @@ step "State: ${STATE_KIND}"
 case "$STATE_KIND" in
     PREPARED)
         ok "already prepared — ${STATE_DETAIL}"
-        if [ "$INV_serving" = yes ] && [ "$INV_index" = yes ]; then
-            ok "serving the release index — ready to register:"
-            printf '\n     %s%s%s\n\n' "${_B}" "$ADD_CMD" "${_R}"
-        elif [ "$INV_serving" = yes ]; then
-            warn "serving works but ${URL_PATH}/ shows a directory listing, not the release index page"
-            warn "publish a release (mirror publish) so index.html exists, and ensure nginx has 'index index.html;' for ${URL_PATH}/"
+        if [ "$INV_serving" = yes ] && [ "$INV_rootmatch" = no ]; then
+            # The URL answers from a DIFFERENT tree (stale alias from an
+            # earlier prep with another root) — NOT ready: a publish into
+            # ${ROOT} would never be served.  Fall through to apply, which
+            # repoints the alias.
+            warn "${URL_PATH}/ answers but does NOT serve ${ROOT} — stale web-server alias from an earlier prep"
+            if [ "$DRY" -eq 1 ]; then
+                warn "re-run without --check to repoint ${URL_PATH}/ → ${ROOT}/"
+                exit 1
+            fi
+            warn "will repoint ${URL_PATH}/ → ${ROOT}/"
         else
-            warn "marker present but ${PUBLIC_URL}/ is not HTTP-reachable — the web server may be down; investigate before mirror add"
-        fi
-        exit 0 ;;
+            if [ "$INV_serving" = yes ] && [ "$INV_index" = yes ]; then
+                ok "serving the release index — ready to register:"
+                printf '\n     %s%s%s\n\n' "${_B}" "$ADD_CMD" "${_R}"
+            elif [ "$INV_serving" = yes ]; then
+                warn "serving works but ${URL_PATH}/ shows a directory listing, not the release index page"
+                warn "publish a release (mirror publish) so index.html exists, and ensure nginx has 'index index.html;' for ${URL_PATH}/"
+            else
+                warn "marker present but ${PUBLIC_URL}/ is not HTTP-reachable — the web server may be down; investigate before mirror add"
+            fi
+            exit 0
+        fi ;;
     UNEXPECTED)
         die "UNEXPECTED remote state — ${STATE_DETAIL}.  Refusing to modify the host.  Inspect it by hand, then re-run." ;;
     ADOPT) ok "${STATE_DETAIL}" ;;
@@ -338,8 +376,8 @@ esac
 
 # permission gate: FRESH (or a non-serving adopt) needs sudo to install /
 # configure the web server, and we run non-interactively (BatchMode).
-if [ "$INV_serving" != yes ] && [ "$SUDO" != yes ]; then
-    warn "the web server isn't serving ${URL_PATH}/ yet and ${WHOAMI} has no passwordless sudo"
+if { [ "$INV_serving" != yes ] || [ "$INV_rootmatch" = no ]; } && [ "$SUDO" != yes ]; then
+    warn "the web server isn't serving ${URL_PATH}/ from ${ROOT} yet and ${WHOAMI} has no passwordless sudo"
     warn "installing/configuring nginx needs root; this non-interactive SSH session can't prompt for a password"
     die "grant ${WHOAMI} passwordless sudo (or pre-install + configure the web server), then re-run"
 fi
@@ -355,6 +393,8 @@ if [ "$DRY" -eq 1 ]; then
     if [ "$INV_serving" != yes ]; then
         [ "$STATE_KIND" = FRESH ] && info "apt-get install -y nginx (if absent)"
         info "configure ${URL_PATH}/ → ${ROOT}/ (index index.html; autoindex on)"
+    elif [ "$INV_rootmatch" = no ]; then
+        info "repoint stale alias: ${URL_PATH}/ → ${ROOT}/ + reload nginx"
     elif [ "$INV_index" != yes ]; then
         info "advise: add 'index index.html;' to the existing ${URL_PATH}/ server block (won't auto-edit)"
     fi
@@ -380,16 +420,62 @@ ensure "${ROOT}/dists"
 ensure "${ROOT}/iso"
 ensure "${COORD}/claims"
 ensure "${COORD}/keyring/builders"
+# the web server's worker (www-data) traverses $HOME to reach ROOT:
+# o+x on the home dir, o+rX below the served tree (a 700 home served
+# 403s on every file — caught on the first mirror bring-up)
+chmod o+x "$HOME" 2>/dev/null || true
+chmod -R o+rX "$ROOT" 2>/dev/null || true
 
 # 2. web server
 serves_ok()  { curl -fsS "http://localhost${URL_PATH}/" >/dev/null 2>&1; }
 serves_idx() { curl -fsS "http://localhost${URL_PATH}/" 2>/dev/null | grep -q 'athena-release-index'; }
-if serves_ok; then
+# root correlation (mirrors the probe): the URL must serve THIS root, not
+# a tree a stale alias from an earlier prep still points at
+serves_this_root() {
+    _n=".prep-apply-$$"
+    echo ok >"${ROOT}/${_n}" 2>/dev/null || return 1
+    chmod o+r "${ROOT}/${_n}" 2>/dev/null || true
+    if curl -fsS "http://localhost${URL_PATH}/${_n}" >/dev/null 2>&1; then
+        rm -f "${ROOT}/${_n}"; return 0
+    fi
+    rm -f "${ROOT}/${_n}"; return 1
+}
+if serves_ok && serves_this_root; then
     if serves_idx; then
         say "web server serves the release index at ${URL_PATH}/ — config untouched"
     else
         say "NOTE: ${URL_PATH}/ serves a directory listing, not index.html"
         say "NOTE: add 'index index.html;' to that server block so the release page is the root (not auto-editing an existing config)"
+    fi
+elif serves_ok; then
+    # stale alias: URL_PATH answers from a different tree.  Repoint the
+    # conf WE own (asgard*.conf claiming this location) — never a foreign
+    # server block.
+    say "${URL_PATH}/ answers but serves a different root — repointing to ${ROOT}/"
+    _conf=''
+    for _c in /etc/nginx/conf.d/asgard*.conf; do
+        [ -f "$_c" ] || continue
+        if grep -q "location ${URL_PATH}/" "$_c"; then _conf="$_c"; break; fi
+    done
+    if [ -z "$_conf" ]; then
+        say "ABORT: no /etc/nginx/conf.d/asgard*.conf claims ${URL_PATH}/ — a foreign config owns it; fix it by hand"
+        exit 3
+    fi
+    _bak="$(mktemp)"
+    cp "$_conf" "$_bak"
+    $SUDO sed -i "s|alias [^;]*;|alias ${ROOT}/;|" "$_conf"
+    if ! $SUDO nginx -t >/dev/null 2>&1; then
+        $SUDO cp "$_bak" "$_conf"; rm -f "$_bak"
+        say "ABORT: nginx config test failed after repoint — reverted ${_conf}, no reload"
+        exit 3
+    fi
+    rm -f "$_bak"
+    $SUDO systemctl reload nginx 2>/dev/null || $SUDO nginx -s reload
+    if serves_this_root; then
+        say "repointed ${_conf}: ${URL_PATH}/ → ${ROOT}/ and reloaded"
+    else
+        say "ABORT: repointed + reloaded but ${URL_PATH}/ still doesn't serve ${ROOT} — inspect by hand"
+        exit 3
     fi
 else
     if ! command -v nginx >/dev/null 2>&1; then
