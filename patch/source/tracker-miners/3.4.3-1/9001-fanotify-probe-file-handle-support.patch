@@ -54,3 +54,19 @@ Last-Update: 2026-11-08
  	monitor->fanotify_fd = fanotify_init (FAN_CLOEXEC |
  	                                      FAN_CLASS_NOTIF |
  	                                      FAN_REPORT_DFID_NAME,
+@@ -507,8 +531,13 @@
+ {
+ 	TrackerMonitorFanotify *monitor = TRACKER_MONITOR_FANOTIFY (object);
+ 
+-	g_source_destroy (monitor->source);
+-	g_source_unref (monitor->source);
++	/* The source does not exist when GInitable init failed before
++	 * creating it (e.g. the file-handle support probe): finalize still
++	 * runs on the half-constructed object. */
++	if (monitor->source) {
++		g_source_destroy (monitor->source);
++		g_source_unref (monitor->source);
++	}
+ 
+ 	g_hash_table_unref (monitor->monitored_dirs);
+ 	g_hash_table_unref (monitor->handles);
