@@ -394,7 +394,7 @@ if [ "$DRY" -eq 1 ]; then
     [ "$INV_keyring" = missing ] && info "create ${COORD}/keyring/builders"
     if [ "$INV_serving" != yes ]; then
         [ "$STATE_KIND" = FRESH ] && info "apt-get install -y nginx (if absent)"
-        info "configure ${URL_PATH}/ → ${ROOT}/ (index index.html; autoindex on)"
+        info "configure ${URL_PATH}/ → ${ROOT}/ (index index.html; autoindex on; / redirects to ${URL_PATH}/)"
     elif [ "$INV_rootmatch" = no ]; then
         info "repoint stale alias: ${URL_PATH}/ → ${ROOT}/ + reload nginx"
     elif [ "$INV_index" != yes ]; then
@@ -513,6 +513,9 @@ server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
+    # bare-host landing → the distribution root.  302 (not 301): the
+    # dist-id can change across preps and browsers cache 301s forever.
+    location = / { return 302 ${URL_PATH}/; }
     location = ${URL_PATH} { return 301 ${URL_PATH}/; }
     location ${URL_PATH}/ {
         alias ${ROOT}/;
