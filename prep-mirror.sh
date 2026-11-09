@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
-# prep-mirror.sh — bootstrap (or adopt) a remote host as an Asgard publish
-# mirror so `mirror add` can register it cleanly.
+# prep-mirror.sh — bootstrap (or adopt) a remote host as a distribution
+# publish mirror so `mirror add` can register it cleanly.  (The
+# distribution name/dist-id derive from config/distro.conf — nothing
+# distribution-specific is hardcoded here.)
 #
 # A publish mirror is just a host that (a) stores the apt repo + coord
 # sidecar + ISOs under a root dir and (b) serves that root over HTTP at
@@ -44,7 +46,7 @@ banner() {
     printf '%s\n' "${_C}${_B}╵ ╵ ╵ ╵ ╵╰─╴╵ ╵╵ ╵   ╰─╯╰─╯╵╰─╴╶┴╯   ╰─╯ ╵ ╰─╯ ╵ ╰─╴╵ ╵${_R}"
     printf '%s\n' "${_D}(c) Harkirat S Virk${_R}"
     printf '%s\n' "${_D}https://github.com/summertanks/Athena-Build${_R}"
-    printf '%s\n' "${_B}Asgard mirror preparation${_R}"
+    printf '%s\n' "${_B}${DIST_RAW:-Distribution} mirror preparation${_R}"
 }
 step()  { printf '\n%s\n' "${_C}${_B}${1}${_R}"; }
 info()  { printf '   %s\n' "${1}"; }
@@ -449,16 +451,26 @@ if serves_ok && serves_this_root; then
     fi
 elif serves_ok; then
     # stale alias: URL_PATH answers from a different tree.  Repoint the
-    # conf WE own (asgard*.conf claiming this location) — never a foreign
-    # server block.
+    # conf WE own — never a foreign server block.  Ownership = the
+    # 'athena-mirror managed' first-line marker this script writes
+    # (dist-agnostic: the toolkit marker, not any distribution name), or
+    # the legacy 'asgard*.conf' filenames from pre-marker preps.
+    owned_conf() {
+        head -n1 "$1" 2>/dev/null | grep -q 'athena-mirror managed' && return 0
+        case "$(basename "$1")" in asgard*.conf) return 0 ;; esac
+        return 1
+    }
     say "${URL_PATH}/ answers but serves a different root — repointing to ${ROOT}/"
     _conf=''
-    for _c in /etc/nginx/conf.d/asgard*.conf; do
+    for _c in /etc/nginx/conf.d/*.conf; do
         [ -f "$_c" ] || continue
-        if grep -q "location ${URL_PATH}/" "$_c"; then _conf="$_c"; break; fi
+        grep -q "location ${URL_PATH}/" "$_c" || continue
+        if owned_conf "$_c"; then _conf="$_c"; break; fi
+        say "ABORT: ${_c} claims ${URL_PATH}/ but was not written by this toolkit — fix it by hand"
+        exit 3
     done
     if [ -z "$_conf" ]; then
-        say "ABORT: no /etc/nginx/conf.d/asgard*.conf claims ${URL_PATH}/ — a foreign config owns it; fix it by hand"
+        say "ABORT: no conf in /etc/nginx/conf.d/ claims ${URL_PATH}/ — cannot locate the stale alias (sites-enabled block?); fix it by hand"
         exit 3
     fi
     _bak="$(mktemp)"
@@ -484,7 +496,9 @@ else
         $SUDO apt-get update -qq
         $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx >/dev/null
     fi
-    CONF="/etc/nginx/conf.d/asgard-$(basename "$ROOT").conf"
+    # conf name derives from the dist-id (URL_PATH is "/<dist-id>") under
+    # the toolkit prefix — nothing distribution-specific is hardcoded
+    CONF="/etc/nginx/conf.d/athena-${URL_PATH#/}.conf"
     if [ -f "$CONF" ]; then
         say "ABORT: ${CONF} already exists but ${URL_PATH}/ isn't serving — refusing to overwrite an existing config"
         exit 3
@@ -494,6 +508,7 @@ else
         say "disabled the stock nginx default site"
     fi
     $SUDO tee "$CONF" >/dev/null <<NGINX
+# athena-mirror managed — written by prep-mirror.sh (repointed on re-prep)
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
