@@ -630,7 +630,8 @@ class CacheCommandsMixin(SessionState):
 
             console.print("Pass IV: Checking dependency for live-only packages", tui.COLOR_INFO)
             _live_list = self._read_pkg_list(self.config.livelist_path,
-                                             already_selected=_pkg_closure)
+                                             already_selected=_pkg_closure,
+                                             arch=self.config.arch)
             if _live_list:
                 self.dep_tree.resolve_packages(_live_list)
             self.dep_tree.live_exclusive_pkg_names = (
@@ -651,7 +652,8 @@ class CacheCommandsMixin(SessionState):
             #   - both match → both happen
             console.print("Pass V: Dispatching installer.list (deb arm)", tui.COLOR_INFO)
             _installer_raw = self._read_pkg_list(
-                self.config.installerlist_path, already_selected=set())
+                self.config.installerlist_path, already_selected=set(),
+                arch=self.config.arch)
             _udeb_table = self.cache.udeb_hashtable
             _deb_table  = self.cache.package_hashtable
             _installer_deb_names: list = []
@@ -751,7 +753,8 @@ class CacheCommandsMixin(SessionState):
             # membership-based bypass and pool.list for the contract.
             console.print("Pass VII: Resolving pool.list (deb arm, conflicts disabled)", tui.COLOR_INFO)
             _pool_raw = self._read_pkg_list(
-                self.config.poollist_path, already_selected=set())
+                self.config.poollist_path, already_selected=set(),
+                arch=self.config.arch)
             _pool_deb_names = []
             _pool_unknown   = []
             for _name in _pool_raw:

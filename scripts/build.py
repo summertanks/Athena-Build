@@ -269,18 +269,31 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         self.download_size: int = 0
 
     @staticmethod
-    def _read_pkg_list(path: str, already_selected: set) -> list:
+    def _read_pkg_list(path: str, already_selected: set, *,
+                       arch: str) -> list:
         """Read a pkg-list file (one package per line, # comments, blanks
         ignored) and return entries NOT already in ``already_selected``.
 
-        Used by Pass IV (live.list) and Pass V (installer.list) to feed
-        only the new requests into resolve_packages — entries that are
-        already in the closure are no-ops and skipping them keeps the
-        resolve_packages invocation tight.
+        ``arch`` is REQUIRED (COMP-04 D5 convention: no closure-feeding
+        call site may silently skip filtering): ``[arch]``-qualified
+        entries are filtered/stripped to the target arch's view BEFORE
+        the already-selected check, same semantics as
+        surfaces.read_flat_roots.  Without this, a qualified line like
+        ``grub-pc [amd64 i386]`` reads as a literal (unknown) package
+        name and the entry silently drops out of the closure — caught
+        live 2026-11-09 when the installer-ISO pre-flight failed on
+        grub/microcode pool roots the resolver never saw.
+
+        Used by Pass IV (live.list), Pass V (installer.list) and
+        Pass VII (pool.list) to feed only the new requests into
+        resolve_packages — entries that are already in the closure are
+        no-ops and skipping them keeps the resolve_packages invocation
+        tight.
 
         Missing or unreadable file → empty list + a warning logged; the
         caller treats that as "no exclusive packages".
         """
+        import arch_profile
         try:
             _raw = utils.readfile(path).split('\n')
         except OSError as e:
@@ -292,10 +305,9 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             _name = _line.strip()
             if not _name or _name.startswith('#'):
                 continue
-            if _name in already_selected:
-                continue
             _out.append(_name)
-        return _out
+        _out = arch_profile.filter_seed_lines(_out, arch)
+        return [_n for _n in _out if _n not in already_selected]
 
     # --------------------------------------clean dispatchers---------------------------------
     # Each `clean <X>` wipes the working dir for stage X and resets the

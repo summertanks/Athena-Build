@@ -1834,12 +1834,20 @@ def test_read_pkg_list_handles_pool_list_format():
     _names = BuildSession._read_pkg_list(
         os.path.join(_ROOT, 'config', 'pool.list'),
         already_selected=set(),
+        arch='amd64',
     )
     assert _names, "pool.list parsed to an empty set"
     # No comment lines or blanks bleed through into the name set.
     for _n in _names:
         assert _n and not _n.startswith('#'), _n
         assert _n == _n.strip(), _n
+        assert '[' not in _n, f"[arch] qualifier not stripped: {_n!r}"
+    # D5 qualifiers honoured: amd64-qualified entries are IN (bare name),
+    # foreign-arch-only entries are OUT.
+    assert 'grub-pc' in _names
+    assert 'intel-microcode' in _names
+    assert 'grub-efi-arm64' not in _names   # [arm64]
+    assert 'grub-efi-ia32' not in _names    # [i386]
 
 
 
@@ -3468,7 +3476,8 @@ def test_read_pkg_list_filters_comments_blanks_and_already_selected():
         )
         _path = fh.name
     try:
-        out = BuildSession._read_pkg_list(_path, already_selected={'already-here'})
+        out = BuildSession._read_pkg_list(_path, already_selected={'already-here'},
+                                          arch='amd64')
     finally:
         os.unlink(_path)
     assert out == ['live-boot', 'live-config', 'user-setup']
@@ -3480,7 +3489,8 @@ def test_read_pkg_list_missing_file_returns_empty():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
-    out = BuildSession._read_pkg_list('/nonexistent/path/to/list', set())
+    out = BuildSession._read_pkg_list('/nonexistent/path/to/list', set(),
+                                      arch='amd64')
     assert out == []
 
 
